@@ -413,3 +413,50 @@ describe('comic plan parsing', () => {
     expect(parseImageTagContent(tags[0]).layout).toEqual(plan.images[0].layout);
   });
 });
+
+describe('NovelAI story selection', () => {
+  it('filters empty and male-only frames before applying the image ceiling', () => {
+    const raw = JSON.stringify({
+      images: [
+        { position: 'P1', tag: 'empty room, wide shot' },
+        { position: 'P1', tag: '1boy, solo, desk', characters: [{ name: '陆砚', tag: 'boy, reading' }] },
+        { position: 'P2', tag: '1girl, 1boy, from side, passing a letter', characters: [
+          { name: '林汐', tag: 'girl, silver hair, green eyes, yellow raincoat' },
+          { name: '陆砚', tag: 'boy, handing over letter' },
+        ] },
+      ],
+    });
+    const plan = parseImagePlanWithRange(raw, segments, 1, 1, { femaleScenesOnly: true });
+    expect(plan.images.map(image => image.position)).toEqual(['P2']);
+    expect(plan.images[0].characters[1].tag).toBe('boy, handing over letter');
+    expect(parseImagePlanWithRange(raw, segments, 1, 1).images[0].tag).toBe('empty room, wide shot');
+  });
+
+  it('allows no eligible scenes while keeping valid female profile changes', () => {
+    const raw = JSON.stringify({
+      images: [{ position: 'P1', tag: '1boy, solo' }],
+      changes: [
+        { name: '陆砚', field: 'hair', value: 'short black hair', position: 'P1' },
+        { name: '韩简', field: 'new', fields: { sex: '1boy', hair: 'brown hair', eyes: 'brown eyes' } },
+        { name: '林汐', field: 'new', fields: { sex: '1girl', hair: 'silver hair', eyes: 'green eyes' } },
+      ],
+    });
+    const plan = parseImagePlanWithRange(raw, segments, 1, 2, {
+      femaleScenesOnly: true,
+      knownMaleProfiles: new Set(['陆砚']),
+    });
+    expect(plan.images).toEqual([]);
+    expect(plan.changes.map(change => change.name)).toEqual(['林汐']);
+    expect(parseImagePlanWithRange(raw, segments, 1, 2).changes.map(change => change.name))
+      .toEqual(['陆砚', '韩简', '林汐']);
+  });
+
+  it('retains POV interaction without requiring a caption for the hand in frame', () => {
+    const raw = JSON.stringify({ images: [{
+      position: 'P1', tag: 'pov, holding hands',
+      characters: [{ name: '林汐', tag: 'girl, silver hair, yellow raincoat, smile' }],
+    }] });
+    expect(parseImagePlanWithRange(raw, segments, 1, 2, { femaleScenesOnly: true })
+      .images[0].characters).toHaveLength(1);
+  });
+});

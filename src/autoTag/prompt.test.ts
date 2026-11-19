@@ -467,7 +467,7 @@ describe('auto tag prompt', () => {
       const nai5 = await buildAutoTagMessages(context(), 1, options, null);
       text = nai5.map(m => m.content).join('\n');
       expect(text).toContain('身份 tag 必须写进档案');
-      expect(text).toContain('每个同人角色的身份 tag 都逐字照抄自档案 fandom 字段');
+      expect(text).toContain('每个应建档的同人角色的身份 tag 都逐字照抄自档案 fandom 字段');
       expect(text).toContain('若正文明确为显式 NSFW 场景');
       expect(text).toContain('若本图是显式 NSFW 场景');
       expect(text).not.toContain('若本图协议含 negative 键');
@@ -522,15 +522,15 @@ describe('auto tag prompt', () => {
       expect(text).toContain('不要用邻接绑定');
       expect(text).toContain('Base 块与角色块的分工是硬边界');
       expect(text).toContain('落 JSON 时进他自己的 characters[].tag');
-      // 单人画面没有多人互动:核心互动槽写 "-",唯一角色的动作进他角色块的个人动作——
-      // 旧口径让单人接触点写进 Base 槽,与「个人动作只进角色块」的分工规则直接打架。
-      expect(text).toContain('单人画面本槽写 "-"');
+      // 单人独处的动作进角色块；主观镜头里的共享动作仍进 Base。
+      expect(text).toContain('独处且没有互动时写 "-"');
+      expect(text).toContain('和画外玩家的可见接触写在 Base 的核心互动槽');
       expect(text).not.toContain('单人画面写该角色与场景/道具的接触点');
       // 第三层逐槽点名核对:实跑里模型把环境光丢了、自查却声称「覆盖了全部槽位」。
       // 点名清单必须含多人画面的核心互动——只在单人画面才允许 "-" 跳过。
       expect(text).toContain('逐槽核对过');
       expect(text).toContain('环境光不许漏');
-      expect(text).toContain('多人画面的核心互动');
+      expect(text).toContain('机位、景别、场景、环境光、画面的核心互动');
       // 服装视觉指纹与协议形态无关,三份思维链都要保住。
       expect(text).toContain('槽位里不许退回 school uniform、dress、pantyhose 这种笼统孤立词');
     } finally {
@@ -611,7 +611,7 @@ describe('auto tag prompt', () => {
 
   // 只验证规则装配;实际取景是否突出主要角色仍需用剧情实跑。
   it.each(['nai-diffusion-4-5-full', 'nai-diffusion-5-full'] as const)(
-    'prioritizes principal characters without requiring every present person in frame (%s)',
+    'selects scenes around a featured woman without discarding needed participants (%s)',
     async model => {
       const options: AutoTagSettings = {
         enabled: true,
@@ -633,14 +633,15 @@ describe('auto tag prompt', () => {
         const spec = messages.find(m => m.content.startsWith('[NovelAI'))!.content;
         const selection = thinking.split('E. 选段\n')[1].split('第二层｜')[0];
 
-        expect(contract).toContain('优先表现正文中玩家主角和主要角色的表情、状态、行动及关系');
-        expect(contract).toContain('主要角色单独出镜同样成立');
-        expect(contract).toContain('不得把不在场者加入画面');
-        expect(contract).toContain('主要角色依据设定与剧情判断，不等同于所有已建档角色');
+        expect(contract).toContain('每个画面都必须让至少一位女性成为可见主体或核心互动方');
+        expect(contract).toContain('女性单独入镜和男女同框互动均可');
+        expect(contract).toContain('纯男角、纯空景、只有无关女性背景的画面一律跳过');
+        expect(contract).toContain('明确的男性角色不写入 changes');
+        expect(contract).toContain('不抄男性外貌库');
         expect(contract).toContain('仅仅在场不构成入画理由');
-        expect(contract).toContain('Anonymous crowds visible in the frame remain in Base');
-        expect(selection).toContain('优先选择突出玩家主角或主要角色的画面');
-        expect(selection).toContain('不以有无档案或是否有名字给候选加减分');
+        expect(contract).toContain('Anonymous crowds remain in Base');
+        expect(selection).toContain('每图至少有一位女性作为可辨识的视觉主体或核心互动方');
+        expect(selection).toContain('先按看点确定叙事视点与机位，再定景别');
         expect(selection).toContain('先确定本图要突出的主体与核心互动，再决定谁入镜');
         expect(selection).toContain('若人群本身承载核心互动则保留');
         expect(thinking).toContain('清点名单不是入画名单');
@@ -827,9 +828,9 @@ describe('auto tag prompt', () => {
       expect(messages.some(message => message.content.includes('one Base Prompt plus zero or more native Character Prompts'))).toBe(true);
       expect(messages.some(message => message.content.includes('"characters":['))).toBe(true);
       expect(messages.some(message => message.content.includes('source# / target# / mutual#'))).toBe(true);
-      expect(messages.some(message => message.content.includes('Character tag uses girl/boy without a numeric count'))).toBe(true);
+      expect(messages.some(message => message.content.includes('Each Character Prompt uses girl/boy without a numeric count'))).toBe(true);
       expect(messages.some(message => message.content.includes('every field:"new" change must include a non-empty nl'))).toBe(true);
-      expect(messages.some(message => message.content.includes('Expression and gaze are mandatory for every character'))).toBe(true);
+      expect(messages.some(message => message.content.includes('Expression and gaze are mandatory for every female character'))).toBe(true);
       // Base 的全局性对 tag 与 nl 同样成立:实跑里模型把单角色的制服/体型写进 Base nl,
       // 与角色 nl 重复——旧文本只把禁令写在 tag 层面。
       expect(messages.some(message => message.content.includes('this applies to the Base nl as much as to the Base tag'))).toBe(true);

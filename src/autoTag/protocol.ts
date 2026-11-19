@@ -1,3 +1,4 @@
+import { hasNaiFemaleSubject, isNaiMaleAppearance } from '@/autoTag/naiStory';
 import { validateComicLayout, type ComicLayout } from '@/backends/mossLayout';
 import { normalizeOrientation, type Orientation } from '@/backends/size';
 import type { TargetSegment } from '@/autoTag/clean';
@@ -181,6 +182,7 @@ export function parseImagePlan(
   segments: TargetSegment[],
   minImages: number,
   maxImages: number,
+  rules: { femaleScenesOnly?: boolean; knownMaleProfiles?: ReadonlySet<string> } = {},
 ): ImagePlan {
   const parsed = parseObject(raw);
   if (!Array.isArray(parsed.images)) throw new Error('AI 返回的 JSON 缺少 images 数组');
@@ -211,11 +213,13 @@ export function parseImagePlan(
     const characters = sanitizeCharacters(entry.characters, index);
     // 兼容模型按习惯返回 orientation / aspect 键
     const size = normalizeOrientation(entry.size ?? entry.orientation ?? entry.aspect);
+    if (rules.femaleScenesOnly && !hasNaiFemaleSubject(tag, characters)) continue;
     images.push({ position, sourceLine, tag, nl, negative, characters, size });
   }
 
   const limitedImages = images.slice(0, normalizedMax);
-  if (limitedImages.length < normalizedMin) {
+  const noEligibleScene = rules.femaleScenesOnly && limitedImages.length === 0;
+  if (!noEligibleScene && limitedImages.length < normalizedMin) {
     throw new Error(
       `AI 返回了 ${limitedImages.length} 张图片，少于设置的最少图片数 ${normalizedMin}`,
     );
@@ -223,7 +227,7 @@ export function parseImagePlan(
 
   return {
     images: limitedImages,
-    changes: parseChanges(parsed.changes, positions),
+    changes: parseChanges(parsed.changes, positions, rules.knownMaleProfiles),
   };
 }
 
@@ -283,18 +287,22 @@ function firstPosition(positions: Map<string, number>): { position: string; sour
 }
 
 /** 建档字段:hair 与 eyes 是二次元身份锚点,缺任一条则该条建档不可用(调用方丢弃)。 */
-function parseNewFields(raw: Record<string, unknown>): string | null {
+function parseNewFields(raw: Record<string, unknown>, skipMale: boolean): string | null {
   const fields: Partial<Record<CharTagField, string>> = {};
   for (const field of CHAR_TAG_FIELDS) {
     const value = raw[field];
     const text = typeof value === 'string' ? value.trim().replace(/[\r\n]+/g, ' ') : '';
     if (text) fields[field] = text;
   }
-  if (!fields.hair || !fields.eyes) return null;
+  if (!fields.hair || !fields.eyes || (skipMale && isNaiMaleAppearance(fields.sex ?? ''))) return null;
   return JSON.stringify(fields);
 }
 
-function parseChanges(raw: unknown, positions: Map<string, number>): CharChange[] {
+function parseChanges(
+  raw: unknown,
+  positions: Map<string, number>,
+  knownMaleProfiles?: ReadonlySet<string>,
+): CharChange[] {
   if (!Array.isArray(raw)) return [];
   const out: CharChange[] = [];
   for (const item of raw) {
@@ -302,7 +310,7 @@ function parseChanges(raw: unknown, positions: Map<string, number>): CharChange[
     const o = item as Record<string, unknown>;
     const name = typeof o.name === 'string' ? o.name.trim() : '';
     const fieldRaw = typeof o.field === 'string' ? o.field.trim() : '';
-    if (!name || !HISTORY_FIELDS.has(fieldRaw)) continue;
+    if (!name || !HISTORY_FIELDS.has(fieldRaw) || knownMaleProfiles?.has(name)) continue;
     const field = fieldRaw as CharTagHistoryField;
     const parsedPosition = parsePosition(o.position ?? o.at, positions);
     // 建档全楼生效,位置只作记录,缺失就回落首位;永久变化必须知道从哪生效,位置坏 = 丢弃
@@ -314,7 +322,7 @@ function parseChanges(raw: unknown, positions: Map<string, number>): CharChange[
         ? (o.fields as Record<string, unknown>)
         : null;
     if (field === 'new') {
-      const parsedFields = fields ? parseNewFields(fields) : null;
+      const parsedFields = fields ? parseNewFields(fields, !!knownMaleProfiles) : null;
       if (!parsedFields) continue;
       value = parsedFields;
     }

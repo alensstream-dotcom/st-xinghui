@@ -958,6 +958,7 @@ A. 事实与状态账本
 B. 角色清点与建档（具体建档字段与写法见任务协议，这里只做清点判断）
    - 通读目标正文，逐个列出实际在场的**全部**角色——有名有姓的和只有指称的（三年级队长、店主）都要列，不能只看最终入选图片里的人，也不能漏掉世界书、角色卡或书籍插件为其给出了设定的角色。清点的是「谁在场」，不是「谁有档案」。
    - 每人写一行结论，先标出他属于哪一类，档案与外貌来源按这个类别处理，入画取舍另按 E 段判断：
+     · 【男性】明确为男性，即使有名字、是主角或有旧档，也不建档、不写 changes；可作为互动方入画，跳过下列补全及同人档案要求。
      · 【已建档】命中【角色固定外貌库】中的同名条目——只有名字实际列在该区块中的才算已建档，世界书、角色卡、书籍插件或正文里的详细设定只是建档来源，不代表已经在库，不得凭印象宣称已在库；
      · 【本次建档】库里没有、但属于正式角色（有设定或持续参与剧情），首次出场就建档，不论他是否入选本次图片，本次输出 field:"new"；
      · 【一次性】正文只给了指称、没有设定、不持续参与剧情的一次性角色——不建档、不写 changes、不进库。这一类**照常可以入画**：入选画面时按后端规范给他写一条仅本图有效的角色块，name 用正文的指称原词，外貌按世界观一次性补全，绝不为他编造人名。
@@ -978,9 +979,10 @@ D. 时代与世界观（一次判断，全楼通用）
 
 E. 选段
    - 候选必须是一个可见瞬间，有明确主体、动作或视觉状态和场景。纯对话只有在伴随值得画的表情、肢体动作、人物关系或环境变化时才保留；只跳过没有视觉变化的对话、纯心理和过渡。
-   - 优先选择突出玩家主角或主要角色的画面，看点是他们的表情、状态、行动与关系，不要求他们每张都同框；不以有无档案或是否有名字给候选加减分。
+   - 整楼选图先筛掉纯男角与纯空景：每图至少有一位女性作为可辨识的视觉主体或核心互动方，女性独照可以成立。单张 AI 重写沿用指定的画面。
    - 先确定本图要突出的主体与核心互动，再决定谁入镜。在不损失这些内容的前提下，优先不带无关在场者的构图；必要的无名互动对象照常保留，不为少一个人裁断核心动作。人群同样不因正文提到就必须入画，若人群本身承载核心互动则保留。
-   - 按视觉明确度、剧情重要度、动作完整度、与其他候选的差异度排序，并遵守任务协议给出的最少～最多数量：下限大于 0 时从较次但仍可见的候选中补足；达到下限后只继续选择足够强且彼此明显不同的画面，不要用同一事件的相邻动作或不同镜头凑近上限。
+   - 按视觉明确度、剧情重要度、动作完整度、与其他候选的差异度排序，并遵守任务协议给出的最少～最多数量：无合格画面可以跳过；需要补足时只从合格候选里选；达到下限后只继续选择足够强且彼此明显不同的画面，不要用同一事件的相邻动作或不同镜头凑近上限。
+   - 先按看点确定叙事视点与机位，再定景别：玩家是互动接收方可以用主观视角；要看双方反应用侧面或过肩；高低差有叙事作用时用俯拍或仰拍。保留核心动作及接触点。
    - 给每张入选图选定 P编号：让画面所需事实刚刚完整成立、且尚未切换到下一场景的位置。最后写出选定的 P 列表。
    - 数量在这里就要卡死：写出 P 列表之前先数一遍，多于上限就当场砍到上限再往下走。第二层只为最终入选的 P 写块，绝不允许先超额写完几块、再到第三层发现超限回头删——那几块是白写的，而且第三层只核对、不改决定。
 
@@ -989,9 +991,10 @@ E. 选段
 V5 的一张图 = 一个 Base 块 + 每个本图可见的个体角色各一块，与最终 JSON 的 tag{{#nl}}/nl{{/nl}} 和 characters[] 一一对应。先写 Base 块，再按从左到右、从上到下的顺序逐个写角色块——这个顺序就是 characters[] 的顺序。角色块按 E 段决定的取景写，与他有没有档案无关：【一次性】角色入画时同样各写一块，镜头外的人不写块，也不补进 Base；入画的人群作为整体留在 Base。
 
 ■ P<编号>｜Base
-  人数：<2girls / 1boy 1girl 等；只数本图取景框内可见的人，不数场景里在场但不入画的人；无人物画面写 no humans>
+  人数：<2girls / 1boy 1girl 等；只数镜头内可辨识的人，主观视角只露出的手或肩不额外计人；整楼选图必须含 1girl、2girls 等女性人数词>
   景别：<close-up / upper body / medium shot / full body / wide shot 中只选一个，且必须完整容纳下面的核心互动>
-  核心互动：<多人共同参与的那个动作：谁的哪个身体部位接触了什么，先用中文点明接触点，再给英文 tag；单人画面本槽写 "-"，唯一角色的动作是他角色块的个人动作，不进 Base>
+  机位：<本图选定的一个视角，如 pov、from side、from above 或 from below>
+  核心互动：<多人共同参与的那个动作：谁的哪个身体部位接触了什么，先用中文点明接触点，再给英文 tag；独处且没有互动时写 "-"；和画外玩家的可见接触写在这里>
   场景：<地点 + 画面里实际可见的关键道具>
   环境光：<光源 + 时间 + 色调>
   size：<portrait / landscape>
@@ -1004,31 +1007,31 @@ V5 的一张图 = 一个 Base 块 + 每个本图可见的个体角色各一块�
   个人动作：<这个角色自己在做什么>
   相对位置：<画面左 / 中 / 右，供排序与站位用>
 
-槽位填写要求（槽位值直接写你最终要放进 tag 的英文词；确实不适用的槽位写 "-"，但 Base 的景别、场景、环境光、size 与每个角色块的表情、视线永远不得为 "-"——核心互动只在单人画面写 "-"）：
+槽位填写要求（槽位值直接写你最终要放进 tag 的英文词；确实不适用的槽位写 "-"，但 Base 的景别、场景、环境光、size 与每个女性角色块的表情、视线永远不得为 "-"；男性只保留剧情所需信息）：
    - 每个槽位只写最终决定，一次定死。判断标准很简单：一个槽位在你的思考里只准出现一次取值。写下 size：portrait 之后就不许再提这个字段，写下表情：smile 之后也不许再讨论要不要改成别的。
    - 具体禁止这三种写法：带问号的自问（「landscape？」「用 blush？」）、并列候选（「expressionless 或 slight smile」）、写完再推翻（「用 A……不过 B 更好，改 A 为 B」）。心里比较完直接写结论，把比较过程留在心里。证据不足时按兜底口径直接定（size 拿不准写 portrait，服装细节不明就选一套常见且自洽的），定了就往下走。
    - 也不要在槽位里附上选择理由或对 danbooru 词表的检索过程（「looking ahead 不在标准列表」这类）——规范给了什么词，直接从里面挑一个填上。
    - 单一瞬间：一块只能是一次快门完整拍下的画面，不要把先后发生的多个动作、多个时间点或因果过程塞进同一块；剧情事实严格按正文，不编造人物、动作或人数。
-   - **Base 块与角色块的分工是硬边界**：人数、景别、场景、环境光和多人共同参与的互动只进 Base；某一个角色的外貌、服装、表情、视线和个人动作只进他自己那一块，落 JSON 时进他自己的 characters[].tag。绝不能把某人的服装或动作写进 Base，也不能写进别人那一块——V5 靠 Character Prompt 隔离每个人，混进 Base 就等于把这件衣服摊给同框所有人。单人画面唯一角色的动作同样是个人动作：落在他的角色块里，Base 的核心互动槽写 "-"。{{#nl}}这条分工对 Base 的 nl 同样成立：Base nl 只写整体场景、空间关系与事件，不写任何单个角色的外貌与服装细节。{{/nl}}
+   - **Base 块与角色块的分工是硬边界**：人数、景别、场景、环境光和多人共同参与的互动只进 Base；某一个角色的外貌、服装、表情、视线和个人动作只进他自己那一块，落 JSON 时进他自己的 characters[].tag。绝不能把某人的服装或动作写进 Base，也不能写进别人那一块——V5 靠 Character Prompt 隔离每个人，混进 Base 就等于把这件衣服摊给同框所有人。独处时人物的动作只写进角色块，Base 的核心互动槽写 "-"；和画外玩家的可见接触写在 Base 的核心互动槽。{{#nl}}这条分工对 Base 的 nl 同样成立：Base nl 只写整体场景、空间关系与事件，不写任何单个角色的外貌与服装细节。{{/nl}}
    - **不要用邻接绑定**：把特征挂到别人的发色词后面（例如把 white dress 直接接在 green hair girl 后面）是单串 tag 后端的做法，V5 不用。这里每个角色有自己独立的一块，直接写 white dress 即可，归属由所在的块决定。
-   - 已入画的个体每人各写一块，配角也要写全，不许只给主角写完整一块、配角用一句中文动作带过。表情与视线必须各是一个独立的英文 danbooru 词：写成「看向另一侧、弯腰换鞋」这种中文短语等于这一块没有表情词，落 JSON 时这个角色就会没有表情，被模型画成木脸。
+   - 每个可辨识的入画个体各写一块；女性配角也写全可见特征，表情和视线各用一个独立的英文 tag。男角色只写 boy、必要动作/关系和对理解本幕必要的可见特征。{{#nl}}男性 nl 用一个简短的英文动作分句。{{/nl}}主观视角只露手或肩时在 Base 写共享互动。
    - 表情与视线填后端规范给出的标准 danbooru 词，不写中文感受也不自创词组（想写「温柔地笑」就填 smile）；只能从规范列出的词里挑，规范没列的词一律不许用，拿不准就填 expressionless / looking at another。两项都不得留空，面无表情也要主动填 expressionless。
    - 若正文明确为显式 NSFW 场景：每个角色镜头中实际可见的性器官与身体部位写进他自己的角色块（落其 characters[].tag），多人共同参与的性行为与整体接触写进 Base 的核心互动，并按后端规范用 source# / target# / mutual# 标明谁施谁受；不得只用 nsfw、nude、sex 泛化词代替关键解剖信息，被完全遮住或画面外的部位不得写成可见。
-   - 可见服装照 C 中该角色当前状态的视觉指纹逐件写全，只写本景别看得见的部件；镜头外不可见的部件可以省略，但省略不等于脱掉，后续重新可见且中间没有变化时必须恢复。槽位里不许退回 school uniform、dress、pantyhose 这种笼统孤立词——C 段定的是 navy school blazer 就写 navy school blazer，写笼统词等于让模型自己重新设计这套衣服，同一角色每张图都会换个款式。
+   - 女角色可见服装照 C 中当前状态的视觉指纹逐件写全，只写本景别看得见的部件；镜头外不可见的部件可以省略，但省略不等于脱掉，后续重新可见且中间没有变化时必须恢复。槽位里不许退回 school uniform、dress、pantyhose 这种笼统孤立词——C 段定的是 navy school blazer 就写 navy school blazer，写笼统词等于让模型自己重新设计这套衣服，同一角色每张图都会换个款式。
    - 场景和环境光：场景只写正文、上下文或世界设定能支持的事实，地形、地面材质、天气痕迹和环境状态都算事实，没依据就别写；环境光则相反，光源、时间和色调正文不会写，必须由你主动定，缺了画面就是平庸的大头照。
 
 第三层｜落笔前自查（只核对，不预写答案）
 
 这一层只逐张核对下面几条，每点写一句结论即可。<thinking> 里禁止出现任何最终答案的草稿——不写完整 tag 串、{{#nl}}不写完整 nl 句、{{/nl}}更不要写出 JSON 对象或 "JSON:" 之类的标题。答案只在 </thinking> 之后出现一次，在思考里先写一遍等于把整份输出付两遍钱。核对完直接闭合 </thinking> 并输出 JSON：
-   - 每张图的 Base tag 逐槽核对过：人数、景别、场景、环境光、多人画面的核心互动，每一项都能在 tag 里找到对应的词，环境光不许漏（光源/时间/色调至少落一个具体词）；{{#nl}}nl 与 tag 描述同一画面，且所有 nl（Base 与每个角色）一律用英文写——正文和上面的思考是中文也不例外，中文 nl 会被生图模型读得更差，还要多花几倍 token；角色名是唯一例外：每个角色的 name 与 nl 里出现的名字都逐字对应档案/正文原名（中文名写中文），没有任何音译或变体；每个角色块都变成了 characters[] 里的一项，name/tag/nl 都不为空。{{/nl}}{{^nl}}每个角色的 name 都逐字对应档案/正文原名（中文名写中文），没有任何音译或变体；每个角色块都变成了 characters[] 里的一项，name/tag 都不为空；本次只写 tag，Base 与各角色都不写 nl。{{/nl}}
+   - 每张图的 Base tag 逐槽核对过：人数、机位、景别、场景、环境光、画面的核心互动，每一项都能在 tag 里找到对应的词，环境光不许漏（光源/时间/色调至少落一个具体词）；{{#nl}}nl 与 tag 描述同一画面，且所有 nl（Base 与每个角色）一律用英文写——正文和上面的思考是中文也不例外，中文 nl 会被生图模型读得更差，还要多花几倍 token；角色名是唯一例外：每个角色的 name 与 nl 里出现的名字都逐字对应档案/正文原名（中文名写中文），没有任何音译或变体；每个角色块都变成了 characters[] 里的一项，name/tag/nl 都不为空。{{/nl}}{{^nl}}每个角色的 name 都逐字对应档案/正文原名（中文名写中文），没有任何音译或变体；每个角色块都变成了 characters[] 里的一项，name/tag 都不为空；本次只写 tag，Base 与各角色都不写 nl。{{/nl}}
    - 每个剧情 tag 都能追溯到正文/设定；地形、地面、道路、天气和环境状态 tag 没依据就删除。
-   - Base 的 tag {{#nl}}和 nl 里都{{/nl}}{{^nl}}里{{/nl}}没有混进任何单个角色的外貌、服装或个人动作；每个角色的服装和个人动作都在他自己的 characters[].tag 里实际出现了，没有谁的服装或动作只写在槽位{{#nl}}或 nl {{/nl}}里却没进 tag，也没有 school uniform、pantyhose 这类被简写掉的笼统词；每个角色都各有一个表情词和一个视线词，没有谁只有动作没有表情。
+   - Base 的 tag {{#nl}}和 nl 里都{{/nl}}{{^nl}}里{{/nl}}没有混进任何单个角色的外貌、服装或个人动作；每个女性角色的服装、动作、表情和视线都在自己的 characters[].tag 中，服装不用笼统词代替视觉指纹。男方只保留必要动作和关键可见细节。
    - 这一层只核对、不改决定：发现问题就在落 tag 时直接改对，不要在思考里写出「超限，需精简」「让位」「改为」这类修订过程。张数在 E 段就已经定死，这里不该再变。
-   - 每个同人角色的身份 tag 都逐字照抄自档案 fandom 字段、在其 characters[].tag 的首位，没有放进 Base；同人角色的档案都带 fandom（本次建档或 field:"fandom" 补档），原创角色档案没有 fandom、没有被误加作品名。
+   - 每个应建档的同人角色的身份 tag 都逐字照抄自档案 fandom 字段、在其 characters[].tag 的首位，没有放进 Base；同人角色的档案都带 fandom（本次建档或 field:"fandom" 补档），原创角色档案没有 fandom、没有被误加作品名。
    - 若本图是显式 NSFW 场景：可见解剖部位都在所属角色的 tag 里、多人共担的性行为与整体接触在 Base，没有只写泛化 NSFW 词；非显式场景本项直接跳过。
-   - 每个在场角色都能三选一：指出【角色固定外貌库】中的同名条目、在 changes 中有 field:"new"、或标为【一次性】（不建档不写 changes，入画时才在他自己的角色块里补外貌）；世界书里有详细设定不能代替建档。每条 field:"new" 建档的 hair 都同时带发色和长度/发型、eyes 都带瞳色。【一次性】角色没有被写进 changes——写进去就是错的。永久变化的 P编号合法，临时状态没被误写进 changes。
+   - 除明确男性外，每个在场角色都能三选一：指出【角色固定外貌库】中的同名条目、在 changes 中有 field:"new"、或标为【一次性】（不建档不写 changes，入画时才在他自己的角色块里补外貌）；世界书里有详细设定不能代替建档。每条 field:"new" 建档的 hair 都同时带发色和长度/发型、eyes 都带瞳色。【一次性】角色没有被写进 changes——写进去就是错的。永久变化的 P编号合法，临时状态没被误写进 changes。
    - 画面保持 E 段选定的主体和核心互动，没有为了减人数破坏核心互动，也没有把无关在场者补进画面；缺档未成为放弃画面或裁掉必要参与者的理由。取景框内每个可见的个体都有自己的角色块，入画的人群留在 Base；镜头外的人不写入 tag{{#nl}}/nl{{/nl}}/characters，Base 人数只计取景框内可见的人。
-   - 张数在设定范围内；仅当下限为 0 且确实无可画时 images 才为空，且无论如何都保留应有的建档与 changes。`;
+   - 张数遵守任务协议；无合格画面时 images 可以为空，仍保留应有的建档与 changes。`;
 
 /**
  * NAI 规范:4.5 / V5 的 Base Prompt + 原生 Character Prompts。
@@ -1050,18 +1053,18 @@ Map every image to one Base Prompt plus zero or more native Character Prompts.
 Each image must contain:
 - tag: English comma-separated danbooru tags for the Base Prompt. Put global character counts, scene, composition, camera, lighting, atmosphere, and shared interactions here. Do not put one character's appearance, outfit, or individual action in Base.
 {{#nl}}- nl: a coherent English natural-language Base Prompt describing the whole scene, spatial relationships, camera, and overall event. Like the Base tag it stays global: never put one character's appearance, outfit, or individual action in the Base nl; those belong to that character's own nl.
-{{/nl}}- characters: an array of the characters actually visible in this image, ordered left-to-right then top-to-bottom. Every item is {{#nl}}{"name":"...","tag":"...","nl":"..."}{{/nl}}{{^nl}}{"name":"...","tag":"..."}{{/nl}}. Membership is decided by the frame, not by the library: a character who is visible but has no library profile still gets an entry (see rule 9). Names of library characters must follow the Name consistency rules below.
+{{/nl}}- characters: an array of the visibly distinct individuals, ordered left-to-right then top-to-bottom; a POV hand or shoulder is part of the shared action. Every item is {{#nl}}{"name":"...","tag":"...","nl":"..."}{{/nl}}{{^nl}}{"name":"...","tag":"..."}{{/nl}}. Membership is decided by the frame, not by the library: a character who is visible but has no library profile still gets an entry (see rule 9). Names of library characters must follow the Name consistency rules below.
 
 Character Prompt rules:
-1. tag uses English danbooru tags for that character's identity, sex, fixed appearance, current outfit, expression, gaze, pose, action, visible anatomy, and necessary relative position. Use girl/boy rather than 1girl/2girls; numeric counts belong only in Base. Expression and gaze are mandatory for every character and must use real danbooru tags rather than invented descriptive phrases: pick expressions from smile, grin, laughing, blush, embarrassed, frown, pout, puffy cheeks, surprised, crying, tears, angry, serious, sad, worried, scared, smug, seductive smile, expressionless, half-closed eyes, open mouth, clenched teeth; pick one gaze from looking at viewer, looking at another, looking away, looking down, looking up, looking back, closed eyes. Write smile rather than gentle smile and blush rather than shy expression; phrases like neutral curious expression are not tags and only dilute the prompt.{{#nl}} Save adjectival nuance for nl.{{/nl}} When the story does not state an expression, infer one; write expressionless explicitly rather than omitting it.
-2. First decide whether the named character is an original character or a fandom character. Treat a character as fandom only when the character card, lorebook, story, or an unambiguous well-known name reliably identifies an existing anime, game, novel, or other work. If the work is uncertain, do not guess; treat the character as original.
-3. For every fandom character, the model-recognized English Danbooru identity tag, formatted exactly as character name (copyright name), must be the first tag in that character's tag. The identity tag is stored in the fixed appearance library: when creating the entry (changes field:"new"), register it as the fields.fandom of that entry; when an existing entry lacks it and the character is fandom, add it via a changes item with field:"fandom"; then copy it verbatim every time. Do not escape the parentheses for NovelAI, do not translate the names literally, do not abbreviate the copyright, and do not put this per-character identity tag in Base. Original characters receive no copyright identity tag and no fandom field.
+1. For female characters, tag uses English danbooru tags for that character's identity, sex, fixed appearance, current outfit, expression, gaze, pose, action, visible anatomy, and necessary relative position. Use girl/boy rather than 1girl/2girls; numeric counts belong only in Base. Expression and gaze are mandatory for every female character and must use real danbooru tags rather than invented descriptive phrases: pick expressions from smile, grin, laughing, blush, embarrassed, frown, pout, puffy cheeks, surprised, crying, tears, angry, serious, sad, worried, scared, smug, seductive smile, expressionless, half-closed eyes, open mouth, clenched teeth; pick one gaze from looking at viewer, looking at another, looking away, looking down, looking up, looking back, closed eyes. Write smile rather than gentle smile and blush rather than shy expression; phrases like neutral curious expression are not tags and only dilute the prompt.{{#nl}} Save adjectival nuance for nl.{{/nl}} When the story does not state an expression, infer one; write expressionless explicitly rather than omitting it. For male characters, use boy plus the essential action/relationship and only plot-critical visual detail; omit routine hair, eyes, skin, outfit, expression and gaze.{{#nl}} Use one short English action clause for the male nl.{{/nl}}
+2. For a named character eligible for a profile, first decide whether they are original or fandom. Explicitly male characters do not enter the profile library. Treat a character as fandom only when the character card, lorebook, story, or an unambiguous well-known name reliably identifies an existing anime, game, novel, or other work. If the work is uncertain, do not guess; treat the character as original.
+3. For every fandom character eligible for a profile, the model-recognized English Danbooru identity tag, formatted exactly as character name (copyright name), must be the first tag in that character's tag. The identity tag is stored in the fixed appearance library: when creating the entry (changes field:"new"), register it as the fields.fandom of that entry; when an existing entry lacks it and the character is fandom, add it via a changes item with field:"fandom"; then copy it verbatim every time. Do not escape the parentheses for NovelAI, do not translate the names literally, do not abbreviate the copyright, and do not put this per-character identity tag in Base. Original characters receive no copyright identity tag and no fandom field.
 4. For an explicit NSFW scene. Do not rely on vague tags such as nsfw, nude, or sex: name each actually visible, action-relevant anatomical feature or genital in the owning character's tag, such as breasts, nipples, penis, pussy, anus, or testicles. Do not claim fully covered or out-of-frame anatomy is visible.
 5. Put the shared sexual act and overall contact in Base. Use source# / target# / mutual# tags in Character Prompts when they clarify who acts, which body part is involved, and who or what receives the action. The tags must describe the exact visible contact rather than euphemize it.
-{{#nl}}6. nl uses English natural language for the same character's appearance, outfit, action, facing, interaction, visible anatomy, and approximate position. It may add relationship or spatial detail but must not conflict with tag.{{/nl}}{{^nl}}6. This output is tag-only: write no nl key anywhere, neither in Base nor in any Character Prompt. Everything rule 1 lists for a character — including facing, interaction, and necessary relative position — must be carried by that character's own tag; clarify who acts on whom with source# / target# / mutual# tags (rules 5 and 8).{{/nl}}
+{{#nl}}6. For a female character, nl uses English natural language for that character's appearance, outfit, action, facing, interaction, visible anatomy, and approximate position. It may add relationship or spatial detail but must not conflict with tag.{{/nl}}{{^nl}}6. This output is tag-only: write no nl key anywhere, neither in Base nor in any Character Prompt. Everything rule 1 lists for a character — including facing, interaction, and necessary relative position — must be carried by that character's own tag; clarify who acts on whom with source# / target# / mutual# tags (rules 5 and 8).{{/nl}}
 7. For characters in the fixed appearance library, copy the library Tag fields into that character's tag, keeping the fandom identity tag (fields.fandom) first. Keep appearance wording verbatim, but convert the library sex count tag 1girl/1boy to girl/boy.{{#nl}} Library natural-language notes may inform that character's nl.{{/nl}} Tag fields remain canonical.
 8. For other multi-character interactions, use NovelAI source# / target# / mutual# tags when they clarify actor and target. Do not use ComfyUI's multi-person segmentation convention.
-9. Character Prompts are keyed to the frame, not to the library. Do not create Character Prompts for characters absent from this image. A visible character who has no library profile still belongs in characters[]: when the story treats someone as a single identifiable person — an opponent, a shopkeeper, a passer-by carrying a child — give them their own Character Prompt even though they will never be registered. Use the term the story uses for them as the name (三年级队长, 店主), and complete their appearance once, for this image only. Such an entry is valid for this image alone: never report it in changes, never add it to the library, and never carry it into a later floor. Never invent a personal name for them — a made-up name is indistinguishable from a real profile when this image tag is later read back as context.
+9. Character Prompts are keyed to the frame, not to the library. Do not create Character Prompts for characters absent from this image. A visible character who has no library profile still belongs in characters[]: when the story treats someone as a single identifiable person — an opponent, a shopkeeper, a passer-by carrying a child — give them their own Character Prompt even though they will never be registered. Use the term the story uses for them as the name (三年级队长, 店主), and complete their appearance once for this image, or use the short caption from rule 1 when male. Such an entry is valid for this image alone: never report it in changes, never add it to the library, and never carry it into a later floor. Never invent a personal name for them — a made-up name is indistinguishable from a real profile when this image tag is later read back as context.
 10. People the story treats as a mass rather than as individuals — crowds, soldiers, onlooking students — receive no Character Prompt. Only include them when the chosen frame needs the crowd; then describe them in Base as a group. When unsure whether people already selected for the frame are individuals or a mass, leave them in Base. This is a placement rule for visible people, not a reason to add bystanders or crowds to the image.
 
 Name consistency (critical — the plugin matches names verbatim):
@@ -1075,7 +1078,7 @@ Visual completion (important):
 The story text is prose, not a shot list. It will never state camera, lighting, or period costume — the things that only exist once something is drawn. Your job is not to transcribe the text but to complete it into a finished picture. Handle these four classes differently.
 
 1. Pictorial language (camera, composition, lighting, color, depth of field, mood) must be supplied by you, in Base.
-   Give every image a shot distance (close-up / upper body / medium shot / full body / wide shot), a light source and time of day (soft sunlight, candlelight, moonlight, backlighting, golden hour), and a color mood (warm colors, cold colors, muted colors, high contrast). The story not stating them is not a reason to omit them; without them the result is a bland headshot.
+   Choose the story viewpoint and camera angle before distance: POV for a direct exchange, side or over-the-shoulder when both reactions matter, and a high or low angle when differences in elevation matter. Put the chosen camera angle in Base. Give every image a shot distance (close-up / upper body / medium shot / full body / wide shot), a light source and time of day (soft sunlight, candlelight, moonlight, backlighting, golden hour), and a color mood (warm colors, cold colors, muted colors, high contrast). The story not stating them is not a reason to omit them; without them the result is a bland headshot.
    - Write exactly one shot distance. close-up / upper body / medium shot / full body / wide shot conflict with each other, and writing two (medium shot, upper body) leaves the model unsure where to crop.
    - The shot distance must contain this image's core contact point. When the core action happens below the torso (a knee pressing, a foot stepping, sitting on a lap, lower-body contact on a bed), do not use close-up or upper body — those crop the contact out of frame. Use medium shot or full body, or a local close-up that frames the contact point completely.
    - Keep body tags consistent with the shot distance. Having chosen upper body or close-up, do not then write shoes, socks, skirt length, legs, or full-body poses in any Character Prompt: tagging a body part that is outside the frame makes the model force it back in.
@@ -1088,7 +1091,7 @@ The story text is prose, not a shot list. It will never state camera, lighting, 
 3. A character's fixed facts (sex, hair, eyes, body type, signature features) follow the given information exactly, with no invention. Copy library field values verbatim.
 
 4. Story facts (who is present, actions, events, key props) follow the story text exactly. Do not add people, actions, or plot the text does not contain.
-   Select framing to emphasize the player character or principal characters while preserving the chosen moment's action and relationships. Other people or crowds may remain off-screen if they add nothing to that focus. Keep an unnamed participant when needed to show the core interaction; a missing profile is never a reason to reject a moment or crop that participant out.
+   For new selections, keep a woman as a visible subject or meaningful participant. Female solo scenes and mixed-gender interactions qualify. Skip male-only moments and empty scenery. For an individual rewrite, keep the assigned moment. Preserve the chosen moment's action and relationships. Other people or crowds may remain off-screen if they add nothing to that focus. Keep an unnamed participant when needed to show the core interaction; a missing profile is never a reason to reject a moment or crop that participant out.
    The Base character count is the number of people visible inside this frame, not the number of people present in the scene. People left off-screen receive no image tags{{#nl}}, natural-language descriptions,{{/nl}} or Character Prompts; do not restore them in Base just because the story says they are nearby.
 
 In one line: how it is shot may be made concrete by you; what is in the picture must come from the text and the settings. Specific is not the same as invented.

@@ -7,6 +7,7 @@ import {
   type PositionedCharOp,
 } from '@/autoTag/charAnchors';
 import { prepareTargetText } from '@/autoTag/clean';
+import { naiStoryProfiles } from '@/autoTag/naiStory';
 import { beginGeneration, clearGeneration, consumeGeneration } from '@/autoTag/generationGate';
 import { autoTagProfile, buildAutoTagMessages } from '@/autoTag/prompt';
 import { rebaseImagePositions, type RebaseReport } from '@/autoTag/rebase';
@@ -327,7 +328,15 @@ async function runForFloor(floor: number, opts: RunOptions = {}): Promise<void> 
     const memory = readBookMemory(floor, context.chat[floor]?.mes ?? '', context.name1);
     // 单槽重写:库文本要包含本楼已落档的增量(首次全量分析建的档),否则 AI 会把
     // 已建档角色当新人重写。charTagsBeforeFloor(floor + 1) 正好含本楼(swipe 匹配时生效)。
-    const entriesBefore = slot ? charTagsBeforeFloor(floor + 1) : charTagsBeforeFloor(floor);
+    const profile = autoTagProfile();
+    const previousEntries = charTagsBeforeFloor(slot ? floor + 1 : floor);
+    const previousDelta = readCharTagFloorDelta(message);
+    const storyProfiles = profile.naiCharPrompts
+      ? naiStoryProfiles(previousEntries, previousDelta, swipeId ?? 0)
+      : undefined;
+    const entriesBefore = storyProfiles
+      ? previousEntries.filter(entry => !storyProfiles.maleNames.has(entry.name))
+      : previousEntries;
     // 锁定名(全局库 ⊖ 本聊天基线):AI 的 changes 对这些名字一律无效,库文本里带 [locked] 标记
     const lockedNames = lockedCharTagNames();
     // 纯本地渲染:建档由主请求在同一次输出里完成(changes 的 field="new")
@@ -338,8 +347,6 @@ async function runForFloor(floor: number, opts: RunOptions = {}): Promise<void> 
     const promptOptions = slot
       ? { ...settings.autoTag, minImages: 1, maxImages: 1 }
       : settings.autoTag;
-    // 协议形态开跑时快照一次:写协议、验收与收尾同一份,用户中途拨开关也不会前后不一
-    const profile = autoTagProfile();
     const messages = await buildAutoTagMessages(
       context,
       floor,
@@ -376,6 +383,7 @@ async function runForFloor(floor: number, opts: RunOptions = {}): Promise<void> 
                 preparedTarget.segments,
                 promptOptions.minImages,
                 promptOptions.maxImages,
+                { femaleScenesOnly: profile.naiCharPrompts && !slot, knownMaleProfiles: storyProfiles?.maleNames },
               );
           // 单槽重写忽略本次 changes,不校验建档 nl —— 校验它会为一份会被丢弃的
           // changes 白白消耗重试次数。NAI 关了自然语言时协议不要 nl,也就不验。
@@ -441,7 +449,7 @@ async function runForFloor(floor: number, opts: RunOptions = {}): Promise<void> 
       ? planOps.filter(item => !lockedNames.has(item.op.name))
       : planOps;
     const floorOps = effectiveOps.map(item => item.op);
-    const previousDelta = readCharTagFloorDelta(message);
+    if (storyProfiles) floorOps.push(...storyProfiles.previousMaleOps);
 
     // @占位符按正文位置替换：变化前图片用旧档，变化位置及之后用新档。
     const unknownNames = new Set<string>();
