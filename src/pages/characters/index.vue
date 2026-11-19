@@ -5,6 +5,7 @@ import Icon from '@/components/Icon.vue';
 import ModalMask from '@/components/ModalMask.vue';
 import { generateCharTags } from '@/autoTag/charAnchors';
 import { readBookMemory } from '@/autoTag/bookMemory';
+import { replayNaiOutfits, type OutfitPart } from '@/autoTag/naiWardrobe';
 import {
   CHAR_TAG_FIELDS,
   CHAR_TAG_FIELD_LABELS,
@@ -28,7 +29,7 @@ import {
   upsertGlobalCharTag,
 } from '@/state/globalCharTags';
 import { getContext } from '@/st/context';
-import { computed, ref } from 'vue';
+import { computed, onMounted, onUnmounted, ref } from 'vue';
 
 /**
  * 角色管理 —— 两层固定外貌库:
@@ -68,9 +69,9 @@ const FIELD_PLACEHOLDERS: Record<CharTagField, string> = {
   sex: '如 1girl / 1boy',
   hair: '如 long black hair',
   eyes: '如 red eyes',
-  skin: '如 pale skin(可不填)',
-  body: '如 petite, small breasts',
-  extra: '如 heterochromia(可不填)',
+  skin: '如 tan skin, dark skin（可留空）',
+  body: '身高感、骨架、身形，如 tall, broad shoulders',
+  extra: '脸型、眉形或标志特征，如 round face, freckles',
   outfit: '固定着装,可不填',
 };
 
@@ -103,6 +104,60 @@ const previewTag = computed(() => {
 const editingHistory = computed<CharTagChangeRecord[]>(() => {
   if (!editingName.value || editingScope.value !== 'chat') return [];
   return findCharTag(editingName.value)?.history ?? [];
+});
+
+const chatRevision = ref(0);
+const refreshOutfits = () => { chatRevision.value += 1; };
+const outfitEvents = ['CHAT_CHANGED', 'MESSAGE_SWIPED', 'MESSAGE_EDITED', 'MESSAGE_UPDATED', 'MESSAGE_DELETED'] as const;
+let stopOutfitEvents: (() => void) | undefined;
+
+onMounted(() => {
+  const context = getContext();
+  if (!context) return;
+  const events = outfitEvents.map(event => context.eventTypes[event]).filter(Boolean);
+  // Older hosts may lack an unsubscribe API. Keep their subscription on the existing host event API
+  // only while it can be cleaned up with the component.
+  if (!context.eventSource.off) return;
+  for (const event of events) context.eventSource.on(event, refreshOutfits);
+  stopOutfitEvents = () => {
+    for (const event of events) context.eventSource.off?.(event, refreshOutfits);
+  };
+});
+onUnmounted(() => stopOutfitEvents?.());
+
+const editingOutfits = computed(() => {
+  void chatRevision.value;
+  const name = editingName.value;
+  const chat = getContext()?.chat;
+  if (!name || !chat) return null;
+  const { outfits, history } = replayNaiOutfits(chat, chat.length, name);
+  const current = outfits.get(name);
+  return current ? { current, history: [...history].reverse() } : null;
+});
+
+function outfitPartLabel(part: OutfitPart): string {
+  if (part.state === 'removed') return `${part.tag}（已脱下）`;
+  return part.state ? `${part.tag}（${part.state}）` : part.tag;
+}
+
+const draftFieldOrigins = computed(() => {
+  if (!draft.value || !editingName.value || editingScope.value !== 'chat') return {};
+  const labels: Partial<Record<CharTagField, string>> = {};
+  const entry = findCharTag(editingName.value);
+  if (!entry || draftSource.value === 'book') return labels;
+  for (const field of CHAR_TAG_FIELDS) {
+    if (!draft.value.fields[field].trim()) continue;
+    if (entry.fields[field] !== draft.value.fields[field].trim()) {
+      labels[field] = '手动修改';
+      continue;
+    }
+    const origin = entry.origins?.[field];
+    if (origin === 'story') labels[field] = '来自设定';
+    else if (origin === 'design') labels[field] = '生图补全';
+    else if (origin === 'mixed') labels[field] = '设定 + 生图补全';
+    else if (entry.source === 'ai') labels[field] = '来源未记录';
+  }
+  return labels;
 });
 
 /** 卡片上的字段 chips:有字段用字段,整串模式回退 raw 文本(模板里分支)。 */
@@ -506,7 +561,10 @@ function sourceLabel(entry: CharTagEntry): string {
               class="bbi-char-form-row"
               :class="{ 'is-wide': f === 'outfit' }"
             >
-              <span class="bbi-char-form-label">{{ CHAR_TAG_FIELD_LABELS[f] }}</span>
+              <span class="bbi-char-form-label">
+                {{ CHAR_TAG_FIELD_LABELS[f] }}
+                <small v-if="draftFieldOrigins[f]" class="bbi-field-hint">{{ draftFieldOrigins[f] }}</small>
+              </span>
               <input
                 v-model="draft.fields[f]"
                 class="bbi-input"
@@ -516,7 +574,26 @@ function sourceLabel(entry: CharTagEntry): string {
             </label>
           </div>
         </div>
-        <span class="bbi-field-hint">只写固定基础特征;服装、表情、动作不入库,每次按剧情生成。</span>
+        <span class="bbi-field-hint">这里维护固定外貌和招牌着装。剧情中的临时穿着按本聊天单独记录。</span>
+
+        <div v-if="editingOutfits" class="bbi-char-preview">
+          <span class="bbi-field-label">本聊天当前穿着</span>
+          <code class="bbi-char-preview-tag">{{ editingOutfits.current.map(outfitPartLabel).join(' · ') }}</code>
+          <details class="bbi-char-history">
+            <summary class="bbi-char-history-toggle">最近服装变更</summary>
+            <ul class="bbi-char-history-list">
+              <li
+                v-for="(record, i) in editingOutfits.history"
+                :key="`${record.floor}-${record.sourceLine}-${i}`"
+                class="bbi-char-history-item"
+              >
+                <span class="bbi-char-history-field">第 {{ record.floor }} 楼</span>
+                <span v-if="record.reason" class="bbi-field-hint">{{ record.reason }}</span>
+                <code class="bbi-char-preview-tag">{{ record.parts.map(outfitPartLabel).join(' · ') }}</code>
+              </li>
+            </ul>
+          </details>
+        </div>
 
         <label class="bbi-modal-field">
           <span class="bbi-modal-label">整串模式(可选)</span>

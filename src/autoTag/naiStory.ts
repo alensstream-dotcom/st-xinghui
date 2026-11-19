@@ -1,5 +1,7 @@
-import type { ImageCharacterPrompt } from '@/autoTag/protocol';
-import type { CharTagEntry, CharTagFloorDelta } from '@/state/charTags';
+import { joinNaiTags, NAI_VISUAL_FIELDS, naiTagParts } from '@/autoTag/naiAppearance';
+import type { OutfitPart } from '@/autoTag/naiWardrobe';
+import type { ImageCharacterPrompt, PlannedCharacterPrompt } from '@/autoTag/protocol';
+import { charFieldsEmpty, type CharTagEntry, type CharTagFloorDelta } from '@/state/charTags';
 
 const MALE_TAG = /^(?:(?:\d+\+?\s*)?(?:boys?|males?)|man|men)$/i;
 const FEMALE_TAG = /^(?:(?:\d+\+?\s*)?(?:girls?|females?)|woman|women|multiple girls)$/i;
@@ -35,4 +37,48 @@ export function naiStoryProfiles(
     maleNames,
     previousMaleOps: previousOps.filter(op => maleNames.has(op.name)),
   };
+}
+
+/** Turn analysis-only fields into a normal Character Prompt before touching the saved tag format. */
+export function completeNaiCharacter(
+  planned: PlannedCharacterPrompt,
+  entry: CharTagEntry | undefined,
+  outfit: readonly OutfitPart[] | undefined,
+  locked = false,
+): ImageCharacterPrompt {
+  const { name, tag, nl } = planned;
+  const profile = entry && !isNaiMaleAppearance(entry.fields.sex, entry.raw) ? entry : undefined;
+  if (isNaiMaleAppearance('', tag) || (entry && !profile)) return { name, tag, nl };
+
+  const hasStructuredProfile = planned.useProfile && profile && !charFieldsEmpty(profile.fields);
+  const appearance = hasStructuredProfile
+    ? [
+      profile.fields.fandom,
+      ...NAI_VISUAL_FIELDS.filter(field => locked || !planned.temporaryFields?.includes(field))
+        .map(field => profile.fields[field]),
+    ]
+    : [planned.useProfile ? planned.appearanceTag ?? '' : ''];
+
+  let clothing = planned.outfitTag ?? '';
+  if (planned.outfitParts?.length === 0) {
+    clothing = '';
+  } else if (planned.outfitParts !== undefined && profile && outfit) {
+    const byId = new Map(outfit.map(part => [part.id, part]));
+    const visible = planned.outfitParts.map(id => byId.get(id));
+    if (visible.every(part => part !== undefined)) {
+      clothing = visible.flatMap(part => part.state === 'removed' ? [] : [part.tag, part.state]).join(', ');
+    }
+    // An unknown part ID can coexist with known ones (e.g. a manually edited old tag).
+    // Keep the whole fallback for that frame rather than silently emitting partial clothing.
+  } else if (hasStructuredProfile && planned.outfitParts === undefined && !clothing) {
+    clothing = profile.fields.outfit;
+  }
+
+  if (!planned.useProfile && !planned.outfitTag && planned.outfitParts === undefined) return { name, tag, nl };
+
+  const sceneTags = naiTagParts(tag);
+  if (hasStructuredProfile && !hasTag(tag, FEMALE_TAG) && hasTag(profile.fields.sex, FEMALE_TAG)) {
+    sceneTags.unshift('girl');
+  }
+  return { name, tag: joinNaiTags([...appearance.filter(value => !/[<>]/.test(value)), ...sceneTags, clothing]), nl };
 }

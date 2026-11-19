@@ -56,6 +56,20 @@ export interface AutoTagProfile {
   comic: boolean;
 }
 
+interface NaiContinuityContext {
+  outfits: string;
+  slot: boolean;
+}
+
+const NAI_CONTINUITY = `
+10. NovelAI 本次输出协议（与旧版规范中的必填、照抄或服装规则冲突时，以本条为准）。
+   - 对新建的正式女性档案，changes[].fields 只记录设定明确的固定事实，保留 sex 和已知的 fandom，outfit 只收设定明确的长期招牌着装。发色、发型、瞳色、肤色、体型、眉眼、脸型与标志特征有依据就记录，未知可留空。发型/颜色进 hair，瞳色/眼型进 eyes，肤色进 skin，身高/骨架/轮廓进 body，脸型/眉形和标志特征进 extra。不要把常见的长黑发、棕眼、白肤当默认事实。
+   - 新档另给 visualOptions 数组。作为生图设计，在设定允许的空白处给出 2～3 套明显不同的候选，每套只提供新增的 2～4 个简短英文可见特征，尽量横跨不同字段。每套都和已有角色及本次新角色比对，优先用发色/瞳色/肤色、发型轮廓、眉眼/脸型、身形等彼此组合，不用同一套黑发棕眼模板，不为凑齐字段生造特征。保留设定颜色和其他已有事实。已有充分身份特征或同人身份时 visualOptions 可为空，禁止重新设计已建档的角色。若填写建档 nl，只写已知事实，因为插件会独立选择候选。
+   - 符合条件的已建档或本轮建档女性，在自己的 characters 项写 useProfile:true，tag 写 girl 和本镜头的动作、表情、视线等动态词，固定外貌另写在 appearanceTag 供查不到档案时回退。插件按原名、按剧情位置把固定外貌加入角色块，Base 和其他角色不复制它。明确戴假发、改临时发型或戴美瞳时，才用 temporaryFields 标出此镜头要替代的字段（hair、eyes、skin、body、extra），实际可见的临时词写在 tag；锁定档案跳过这条。角色 nl 如有只负责当前动作、关系和其他画面细节，固定外貌与服装交给结构化 tag。一次性角色、男性和以整串 tag 保存的旧档仍按原规则写完整角色词，不写 useProfile。
+   - 服装由 outfits 报告，每条含 name、position、kind、reason、parts。只记录已经建档或本轮建档的正式女性。同一套服装在本楼及连续楼层从只读的临时服装记录接续，不因景别、人物暂时离镜、转场或时间跳跃而自动换装。正文明确变化优先；首次从明确服装或世界观设定建立款式。仙侠等题材用设定支持的剪裁、材质等细节。原因简述当前正文依据。即使没有图片，也报告明确变化。
+   - kind:"start" 仅用于该角色没有记录时，kind:"change" 用于正文确立新套装/更换部件时。两者的 parts 填变化之后的整套穿着，每件一项 {id:"outerwear",tag:"navy school blazer",state:""}。id 用稳定的英文部位词，如 outerwear、top、bottom、dress、legwear、footwear、accessory；tag 固定版型、颜色和关键细节。同一套衣服的穿脱、解扣、卷袖或损坏用 kind:"adjust"，parts 只给受影响的 {id,state}；state 可写 unbuttoned jacket、jacket off one shoulder 等，为完全脱下写 removed，恢复正常写空串。不要为了衣物局部状态重新设计款式。无变化输出 outfits:[]。
+   - 对有档案的女性角色，characters 项给 outfitParts（本镜头可见的服装部件 id 列表，镜头看不到衣服可给空列表）和 outfitTag（同一镜头的完整可见服装 tag 作为回退）；把服装留给这两个字段，别重复在角色 tag 或 nl。一次性角色和男性保持现有写法。镜头外部件仍留在服装记录里，重新入镜时使用原款。`;
+
 const NAI_SCENE_DIRECTION = `
 9. NovelAI 剧情取景与人物详略：先按本图看点选叙事视点和机位，再定景别，全程用一个机位。人物直接朝玩家说话或递物，可用玩家主观视角（pov）；双方的反应、动作或空间关系都重要时，用过肩、侧面或斜侧的双人取景；高低差和人物与环境的关系值得交代时，考虑俯视或仰视。只在镜头能完整呈现核心动作、接触点和女角色表情时使用；把视角本身写进 Base tag，不要求每楼轮换角度。
    - 明确的男性角色只服务于可见叙事：写 boy 和必要动作/相对关系，只有当某个道具、服装特征、表情或外貌是理解剧情的关键证据时才补它。不抄男性外貌库、不补全发眼肤色或整套服饰，不为其硬补表情与视线；若开启自然语言，男性 nl 只用一个简短的英文动作分句。男方仅露手或肩时在 Base shared interaction 里交代这个可见动作、保留女方角色词，不增加完整男性角色块。
@@ -179,6 +193,7 @@ export async function buildAutoTagMessages(
   taskNote?: string,
   /** 协议形态;runner 开跑时快照一份传进来,验收与收尾用同一份(缺省即时现算)。 */
   profile: AutoTagProfile = autoTagProfile(),
+  continuity?: NaiContinuityContext,
 ): Promise<ChatMsg[]> {
   const target = context.chat[targetFloor];
   const preparedTarget =
@@ -210,6 +225,7 @@ export async function buildAutoTagMessages(
   // 动态负面词同样取自当前预设:切工作流即同时切走自然语言与动态负面词的口径。
   const comfyOn = settings.defaultBackend === 'comfyui';
   const naiCharPromptsOn = profile.naiCharPrompts;
+  const naiContinuity = naiCharPromptsOn && continuity;
   const selectNaiScenes = naiCharPromptsOn && !taskNote?.trim();
   const comfyPreset = comfyOn ? activeComfyPreset() : null;
   const nlOn = profile.nl;
@@ -244,9 +260,13 @@ export async function buildAutoTagMessages(
         characters: [
           {
             name: '小雪',
-            tag: library
+            tag: naiContinuity ? 'girl, waving, smile, looking at viewer' : library
               ? 'girl, long silver hair, red eyes, white dress, waving'
               : 'girl, short black hair, blue eyes, white dress, waving',
+            ...(naiContinuity ? {
+              useProfile: true, appearanceTag: 'short black hair, blue eyes',
+              outfitParts: ['dress'], outfitTag: 'white long-sleeved dress',
+            } : {}),
             ...(nlOn ? { nl: 'The girl waves on the left side of the frame.' } : {}),
           },
         ],
@@ -255,7 +275,10 @@ export async function buildAutoTagMessages(
   if (nlOn && !naiCharPromptsOn) sampleImage.nl = sampleNl;
   if (negativeOn) sampleImage.negative = 'extra people, duplicate character';
   sampleImage.size = profile.lockedSize ?? 'portrait';
-  const outputShape = JSON.stringify({ images: [sampleImage], changes: [] });
+  const outputShape = JSON.stringify({
+    images: [sampleImage], changes: [],
+    ...(naiContinuity && !naiContinuity.slot ? { outfits: [] } : {}),
+  });
   // NAI 两种写法共用的尾段:角色块的取舍与 Base / 角色的分工不随自然语言开关变
   const naiCharacterRuleTail =
     'This includes visible characters who have no library profile: a one-off unnamed individual gets a Character Prompt too, keyed by the term used in the story. Anonymous crowds remain in Base. Each Character Prompt uses girl/boy without a numeric count. Females use their full visible appearance, outfit and action; males get only a compact role/action caption and any detail essential to the interaction. Do not include quality tags, negative tags, or XML.';
@@ -291,11 +314,11 @@ export async function buildAutoTagMessages(
         ? '5. size 已由用户在渠道设置里锁定为横图，每张图都填 "landscape"；后端规范里关于横竖怎么选的判据本次不适用。按横画幅取景：单人画面照常成立，用环境与留白撑开宽度，不要为了填满画面凭空加人。'
         : `5. size 是画幅方向，只能填 "portrait"（竖构图）或 "landscape"（横构图），判定口径见后端规范；拿不准就填 "portrait"。`;
 
-  const libraryReferenceRule = naiCharPromptsOn
+  const libraryReferenceRule = naiContinuity ? '' : naiCharPromptsOn
     ? `- If a visible character exists in the fixed appearance library or is created in this changes array, copy the fixed fields into that character own characters[].tag; keep appearance wording verbatim but convert 1girl/1boy to girl/boy. The fandom identity tag (fields.fandom) goes first, verbatim. Do not put them in Base or assign them to another character.${nlOn ? ' Library natural-language notes may inform that character nl.' : ''} Use the library entry name verbatim for characters[].name and for any name inside ${nlOn ? 'tag/nl' : 'tag'} — never transliterate, translate, or vary it.`
     : '- 画面中的角色只要已在【角色固定外貌库】，或在本次 changes 中建了档，tag 与 nl 就必须照抄库中/刚建档的字段值，用词一字不改，不得自行改写或增删其固定外貌。fandom 字段只作档案记录，ComfyUI 画图时不照抄它，同人身份 tag 按下发的 ComfyUI 规范现场判定并按规范转义括号。\n   - 同一角色的固定外貌在一张图里只写一遍：同一图内再次提到他时用简短指代（the boy、the silver-haired girl）承接，禁止把整串外貌重复第二遍——重复会让模型以为画面里有多个同样的人，把一个人画成互不相连的几块。';
   // 建档 nl 只在协议含 nl 时要求(runner 的验收同一口径,见 autoTagProfile)
-  const newCharacterNlRule = !naiCharPromptsOn
+  const newCharacterNlRule = !naiCharPromptsOn || naiContinuity
     ? ''
     : nlOn
       ? '\n   - NAI V5 profile requirement: every field:"new" change must include a non-empty nl containing a concise English natural-language description of the character fixed appearance. The name must be the character exact name from the card/lorebook/story — a Chinese name stays Chinese (小雪), never pinyin or translation. Fandom characters must also include their identity tag in fields.fandom, e.g. {"name":"冬海","field":"new","fields":{"sex":"1girl","hair":"long black hair","eyes":"blue eyes","fandom":"kasumi (blue archive)"},"nl":"A girl with long black hair and blue eyes.","position":"P2","reason":"first appearance"}; original characters omit fandom. If an existing library entry lacks fandom but the character is fandom, report a changes item with field:"fandom". Describe only fixed appearance: no current outfit, pose, or location — temporary states never enter the profile.'
@@ -305,11 +328,11 @@ export async function buildAutoTagMessages(
    - **建档先于画图**：先通读目标正文，找出每个有名有姓、且【角色固定外貌库】里还没有的正式角色${naiCharPromptsOn ? '（排除明确的男性角色）' : ''}——只要角色卡、世界书、星绘书或持续剧情为他给出了设定，或他是持续参与剧情的角色，首次出场就必须建档，不论他是否入选本次图片。判断依据是发给你的全部设定内容，由你自己通读判断。一次性无名路人不建。
    - **建档资格与入画资格是两回事**：不建档只表示他不进角色库，不表示他不能入画；已建档也不表示他必须入画。先按本图的主体和核心互动取景，再为镜头内的人写外貌，不按档案状态决定取舍。无名角色若是核心互动的参与者，照常入画，不得仅因缺档案放弃画面、改选瞬间或裁掉他；仅仅在场不构成入画理由，无关在场者可以留在镜头外。
    - “已建档”只能按【角色固定外貌库】区块中的同名条目判断：只有名字实际列在该区块中才算已建档；世界书、角色卡、星绘书或正文里的详细设定只是建档依据，绝不等于已经在库。${naiCharPromptsOn ? '每个符合条件的在场正式角色' : '每个在场正式角色'}必须二选一：指出库中的同名条目，或在 changes 中输出 field:"new"。${naiCharPromptsOn ? '明确的男性角色不写入 changes，即使有名字、是主角、或曾经建过档。' : ''}一次性无名角色不在这条二选一之内：他既不建档也不写 changes，不需要指出任何库条目，缺档案是正常状态而非遗漏。
-   - 建档写法：{"name":"角色名","field":"new","fields":{"sex":"1girl","hair":"long black hair","eyes":"blue eyes"},"position":"P2","reason":"首次出场建档"}；position 填他首次出现的位置，仅作记录——建档在本楼全程有效，本楼任意位置的图片都可以立即使用这套外貌。
+   - 建档写法：${naiContinuity ? '{"name":"角色名","field":"new","fields":{"sex":"1girl","hair":"black hair"},"visualOptions":[{"eyes":"red eyes","extra":"freckles"},{"eyes":"amber eyes","body":"tall"}],"position":"P2","reason":"首次出场建档"}' : '{"name":"角色名","field":"new","fields":{"sex":"1girl","hair":"long black hair","eyes":"blue eyes"},"position":"P2","reason":"首次出场建档"}'}；position 填他首次出现的位置，仅作记录——建档在本楼全程有效，本楼任意位置的图片都可以立即使用这套外貌。
    - 建档字段只放**长期不变的身体特征**：sex/hair/eyes/skin/body/extra 填性别、发色发型、瞳色、肤色、体型、标志特征；outfit 只填该角色**固定不换的招牌着装**；判定为同人角色的，fields 里必须写 fandom（模型可识别的英文 Danbooru 身份 tag，格式 character name (copyright name)），原创角色不写 fandom。动作、姿势、所在场景、临时状态（lying on carpet、standing、sitting、unzipped、湿身、伤势等）一律不得写进任何字段——档案会在他之后每一张图里被照抄，把姿势写进去会让他在所有画面里都保持那个姿势。
-   - 建档取值优先级：目标正文明确的当前外貌 > 星绘书当前角色状态 > 角色卡/世界书明确人设 > 合理补全。人设明确写了颜色时必须原样转换，不得擅改；hair 与 eyes 必填，hair 至少包含发色和长度/发型，eyes 必须包含瞳色，缺任一项该条建档会被丢弃。
-   - 如果设定没写发色、发型或瞳色，根据世界观、种族、身份、性格和其余角色设定补出简洁、协调、可长期复用的颜色与发型；这是一次性建档决定，后续不得重新随机。`;
-  const newCharacterRule = `${profileRules}
+   - 建档取值优先级：目标正文明确的当前外貌 > 星绘书当前角色状态 > 角色卡/世界书明确人设 > 合理补全。人设明确写了颜色时必须原样转换，不得擅改。${naiContinuity ? '' : `hair 与 eyes 必填，hair 至少包含发色和长度/发型，eyes 必须包含瞳色，缺任一项该条建档会被丢弃。
+   - 如果设定没写发色、发型或瞳色，根据世界观、种族、身份、性格和其余角色设定补出简洁、协调、可长期复用的颜色与发型；这是一次性建档决定，后续不得重新随机。`}`;
+  const newCharacterRule = naiContinuity ? profileRules : `${profileRules}
    - 建完档就直接用：同一次输出里，先在 changes 里确立该角色的固定外貌，再在图片 ${naiCharPromptsOn ? 'characters[].tag' : 'tag'} 中照抄这套外貌，并围绕它补充服装、动作、场景等其余 tag；同一张图里这套外貌只写一遍。${newCharacterNlRule}`;
   const multiCharacterBindingRule = naiCharPromptsOn
     ? '- 多人画面中，每个角色的发色、瞳色、体型、服装、物件和个人动作都必须放进各自的 characters[].tag，禁止放进 Base 或分配给其他角色。'
@@ -320,7 +343,7 @@ export async function buildAutoTagMessages(
    - 假发、美瞳、湿身/污渍、临时发型、包扎、光照导致的颜色变化、姿势等临时状态不写 changes，但连续场景中仍须保持，直到正文明确解除或发生时间/场景跳跃。静态角色卡/世界书中的初始设定不得覆盖角色库里已经发生的后期变化。`;
   const characterRule = `7. 角色状态与 changes：${newCharacterRule}
    ${libraryReferenceRule}
-   - 按正文 P 位置为每个角色维护临时服装状态：正文未明确初始穿着时可以合理决定一次；没有穿上、脱下、换装、衣物损坏或场景/时间跳跃时沿用上一状态，发生明确变化后从对应 P 位置起更新。首次确定一套临时服装时，必须冻结足以复现款式的“服装视觉指纹”：服装类别之外，再固定版型/剪裁、主色和关键部件，涉及裤袜时固定颜色与透明度；例如不能只写 school uniform, pantyhose，而应具体到 navy school blazer, white collared shirt, red ribbon, dark pleated skirt, opaque white pantyhose。只补少量关键特征，不堆无关装饰。相同状态复用同一视觉指纹；镜头外不可见的部件可以省略，但省略不等于脱掉，后续重新可见且中间没有变化时必须恢复。每张图的 ${nlOn ? 'tag 与 nl 都' : 'tag 都'}要写出当前镜头可见的关键服装特征。临时穿着不得写进固定 outfit，除非设定明确它是长期不换的招牌着装。
+   ${naiContinuity ? '' : `- 按正文 P 位置为每个角色维护临时服装状态：正文未明确初始穿着时可以合理决定一次；没有穿上、脱下、换装、衣物损坏或场景/时间跳跃时沿用上一状态，发生明确变化后从对应 P 位置起更新。首次确定一套临时服装时，必须冻结足以复现款式的“服装视觉指纹”：服装类别之外，再固定版型/剪裁、主色和关键部件，涉及裤袜时固定颜色与透明度；例如不能只写 school uniform, pantyhose，而应具体到 navy school blazer, white collared shirt, red ribbon, dark pleated skirt, opaque white pantyhose。只补少量关键特征，不堆无关装饰。相同状态复用同一视觉指纹；镜头外不可见的部件可以省略，但省略不等于脱掉，后续重新可见且中间没有变化时必须恢复。每张图的 ${nlOn ? 'tag 与 nl 都' : 'tag 都'}要写出当前镜头可见的关键服装特征。临时穿着不得写进固定 outfit，除非设定明确它是长期不换的招牌着装。`}
    ${multiCharacterBindingRule}
    ${permanentChangeRules}
    - 已建档角色被判定为同人、但档案里没有 fandom 的，必须补一条 changes：{"name":"角色名","field":"fandom","value":"character name (copyright name)","reason":"判定为同人，补身份 tag"}；档案已有 fandom 的直接照抄，不重复报告。
@@ -412,9 +435,16 @@ ${comicSizeRule}
   // 解析端(protocol.ts)会先剥掉 think 块再取 JSON,二者配套;按后端取对应的那一份。
   const thinking = backendThinkingPrompt(options, nlOn, naiCharPromptsOn);
   if (thinking) messages.push({ role: 'system', content: thinking });
+  if (naiContinuity) {
+    const slotRule = naiContinuity.slot
+      ? '\n   - 本次仅重写一张现有图片，给出的只读服装和固定外貌已定位到原图所在位置。changes 留空，不输出 outfits 或变更该图所在瞬间。'
+      : '';
+    messages.push({ role: 'system', content: NAI_CONTINUITY + slotRule });
+  }
   const libraryBlock = library?.trim() || `【角色固定外貌库】[system-maintained; currently empty]\n（当前为空，没有任何角色已建档。世界书、角色卡、星绘书和正文只提供建档依据；未列在本区块中的正式角色必须通过 field:"new" 建档。）`;
   const taskBlock = taskNote?.trim() ? `${taskNote.trim()}\n\n` : '';
-  const userContent = `${memoryText}\n\n${libraryBlock}\n\n${taskBlock}${previous ? `${previous}\n\n` : ''}--- 目标正文｜${roleLabel(context, targetFloor)} ---\n${preparedTarget.promptText}`;
+  const outfitBlock = naiContinuity && naiContinuity.outfits ? `${naiContinuity.outfits}\n\n` : '';
+  const userContent = `${memoryText}\n\n${libraryBlock}\n\n${outfitBlock}${taskBlock}${previous ? `${previous}\n\n` : ''}--- 目标正文｜${roleLabel(context, targetFloor)} ---\n${preparedTarget.promptText}`;
   messages.push({ role: 'user', content: userContent });
   return messages;
 }

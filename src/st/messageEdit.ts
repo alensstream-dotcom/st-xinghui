@@ -59,6 +59,20 @@ export interface MessageExtraUpdate {
   key: string;
   /** undefined = 删除该键。 */
   value: unknown;
+  /** Also update the host's snapshot of the active swipe, when one exists. */
+  perSwipe?: boolean;
+}
+
+function updateExtra(
+  extra: Record<string, unknown> | undefined,
+  updates: readonly MessageExtraUpdate[],
+): Record<string, unknown> {
+  const next = { ...extra };
+  for (const update of updates) {
+    if (update.value === undefined) delete next[update.key];
+    else next[update.key] = update.value;
+  }
+  return next;
 }
 
 /**
@@ -76,7 +90,7 @@ function isSameMessage(message: STMessage, expected: STMessage): boolean {
 }
 
 /**
- * 以 compare-and-swap 方式修改消息正文和一个 extra 键。
+ * 以 compare-and-swap 方式修改消息正文和 extra。
  *
  * 身份检查(聊天 / 消息 / swipe)一致才落盘;正文内容本身**不**参与比对——正文由
  * buildNext 基于「落盘那一刻的真实正文」现算,别的插件在分析期间做的修改因此得以保留，
@@ -89,7 +103,7 @@ export async function applyMessageText(
   expectedChatId: string,
   expectedSwipeId: number | null,
   expectedMessage?: STMessage,
-  extraUpdate?: MessageExtraUpdate,
+  extraUpdate?: MessageExtraUpdate | (() => readonly MessageExtraUpdate[]),
 ): Promise<ApplyMessageResult> {
   const context = getContext();
   if (!context?.saveChat) return 'unavailable';
@@ -103,24 +117,25 @@ export async function applyMessageText(
   // 编辑框开着时它才是正文的活口径(用户改了还没确认),落盘基底以它为准
   const nextText = buildNext(activeEditorText(floor) ?? message.mes);
   if (nextText === null) return 'build-failed';
+  const updates = typeof extraUpdate === 'function' ? extraUpdate() : extraUpdate ? [extraUpdate] : [];
 
   const previousText = message.mes;
   const previousExtra = message.extra;
   const swipeId = currentSwipeId(message);
   const previousSwipeText = swipeId !== null ? message.swipes?.[swipeId] : undefined;
+  const swipeInfo = swipeId !== null ? message.swipe_info?.[swipeId] : undefined;
+  const swipeUpdates = updates.filter(update => update.perSwipe);
+  const previousSwipeExtra = swipeInfo?.extra;
   setMessageText(message, nextText);
-  if (extraUpdate) {
-    const nextExtra = { ...(message.extra ?? {}) };
-    if (extraUpdate.value === undefined) delete nextExtra[extraUpdate.key];
-    else nextExtra[extraUpdate.key] = extraUpdate.value;
-    message.extra = nextExtra;
-  }
+  if (updates.length) message.extra = updateExtra(previousExtra, updates);
+  if (swipeInfo && swipeUpdates.length) swipeInfo.extra = updateExtra(previousSwipeExtra, swipeUpdates);
 
   try {
     await context.saveChat();
   } catch (error) {
     message.mes = previousText;
     message.extra = previousExtra;
+    if (swipeInfo && swipeUpdates.length) swipeInfo.extra = previousSwipeExtra;
     if (swipeId !== null && message.swipes && swipeId >= 0 && swipeId < message.swipes.length) {
       message.swipes[swipeId] = previousSwipeText ?? previousText;
     }

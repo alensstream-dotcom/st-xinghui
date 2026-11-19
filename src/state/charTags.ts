@@ -39,6 +39,7 @@ export const CHAR_TAG_FIELD_LABELS: Record<CharTagField, string> = {
 
 export type CharTagSource = 'book' | 'manual' | 'ai';
 export type CharTagHistoryField = CharTagField | 'new' | 'raw' | 'nl';
+export type CharFieldOrigins = Partial<Record<CharTagField, 'story' | 'design' | 'mixed'>>;
 
 export interface CharTagChangeRecord {
   field: CharTagHistoryField;
@@ -58,6 +59,7 @@ export interface CharTagEntry {
   source: CharTagSource;
   desc: string;
   history: CharTagChangeRecord[];
+  origins?: CharFieldOrigins;
 }
 
 export interface CharTagNewOp {
@@ -70,6 +72,7 @@ export interface CharTagNewOp {
   desc: string;
   reason: string;
   at: number;
+  origins?: CharFieldOrigins;
 }
 
 export interface CharTagSetOp {
@@ -79,6 +82,8 @@ export interface CharTagSetOp {
   value: string;
   reason: string;
   at: number;
+  /** 已验证的自动配图楼层内位置。旧记录只有楼号。 */
+  sourceLine?: number;
 }
 
 export type CharTagAutoOp = CharTagNewOp | CharTagSetOp;
@@ -203,6 +208,16 @@ function normalizeFields(raw: unknown): Record<CharTagField, string> {
   return fields;
 }
 
+function fieldOrigins(raw: unknown, fields: Record<CharTagField, string>): { origins?: CharFieldOrigins } {
+  if (!raw || typeof raw !== 'object') return {};
+  const origins: CharFieldOrigins = {};
+  for (const field of CHAR_TAG_FIELDS) {
+    const value = (raw as CharFieldOrigins)[field];
+    if (fields[field] && (value === 'story' || value === 'design' || value === 'mixed')) origins[field] = value;
+  }
+  return Object.keys(origins).length ? { origins } : {};
+}
+
 function normalizeEntry(raw: unknown): CharTagEntry | null {
   if (!raw || typeof raw !== 'object') return null;
   const value = raw as Partial<CharTagEntry> & { tags?: unknown };
@@ -220,6 +235,7 @@ function normalizeEntry(raw: unknown): CharTagEntry | null {
     source: value.source === 'book' || value.source === 'ai' ? value.source : 'manual',
     desc: typeof value.desc === 'string' ? value.desc : '',
     history: normalizeHistory(value.history),
+    ...fieldOrigins(value.origins, fields),
   };
 }
 
@@ -227,6 +243,7 @@ function cloneEntry(entry: CharTagEntry): CharTagEntry {
   return {
     ...entry,
     fields: { ...entry.fields },
+    ...fieldOrigins(entry.origins, entry.fields),
     history: entry.history.map(record => ({ ...record })),
   };
 }
@@ -267,6 +284,7 @@ function normalizeAutoOp(raw: unknown): CharTagAutoOp | null {
       desc: typeof value.desc === 'string' ? value.desc : '',
       reason: typeof value.reason === 'string' ? value.reason : '',
       at,
+      ...fieldOrigins(value.origins, fields),
     };
   }
   const field = typeof value.field === 'string' ? value.field : '';
@@ -279,6 +297,9 @@ function normalizeAutoOp(raw: unknown): CharTagAutoOp | null {
     value: next,
     reason: typeof value.reason === 'string' ? value.reason : '',
     at,
+    ...(typeof value.sourceLine === 'number' && Number.isInteger(value.sourceLine) && value.sourceLine >= 0
+      ? { sourceLine: value.sourceLine }
+      : {}),
   };
 }
 
@@ -302,7 +323,7 @@ function pushHistory(entry: CharTagEntry, record: CharTagChangeRecord): void {
 }
 
 export function createCharTagNewOp(
-  entry: Pick<CharTagEntry, 'name' | 'fields' | 'raw' | 'nl' | 'source' | 'desc'>,
+  entry: Pick<CharTagEntry, 'name' | 'fields' | 'raw' | 'nl' | 'source' | 'desc' | 'origins'>,
   reason = '',
   at = Date.now(),
 ): CharTagNewOp | null {
@@ -318,6 +339,7 @@ export function createCharTagNewOp(
     desc: normalized.desc,
     reason,
     at,
+    ...fieldOrigins(normalized.origins, normalized.fields),
   };
 }
 
@@ -354,6 +376,7 @@ export function applyCharTagOps(
         source: op.source,
         desc: op.desc,
         history: [],
+        ...fieldOrigins(op.origins, op.fields),
       };
       pushHistory(entry, {
         field: 'new',
@@ -374,7 +397,11 @@ export function applyCharTagOps(
     if (current === op.value) continue;
     if (op.field === 'raw') entry.raw = op.value;
     else if (op.field === 'nl') entry.nl = op.value;
-    else entry.fields[op.field] = op.value;
+    else {
+      entry.fields[op.field] = op.value;
+      if (op.sourceLine !== undefined) entry.origins = { ...entry.origins, [op.field]: 'story' };
+      else if (entry.origins) delete entry.origins[op.field];
+    }
     entry.source = 'ai';
     entry.desc = '';
     pushHistory(entry, {
@@ -511,6 +538,13 @@ export function upsertCharTag(
       ? entry.history.map(record => ({ ...record }))
       : (previous?.history.map(record => ({ ...record })) ?? []),
   };
+  if (previous?.origins && entry.source !== 'book') {
+    const retained = { ...previous.origins };
+    for (const field of CHAR_TAG_FIELDS) {
+      if (previous.fields[field] !== next.fields[field]) delete retained[field];
+    }
+    Object.assign(next, fieldOrigins(retained, next.fields));
+  }
   if (opts.recordChanges && previous) {
     const at = Date.now();
     for (const field of CHAR_TAG_FIELDS) {

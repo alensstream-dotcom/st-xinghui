@@ -7,7 +7,20 @@ import {
   type PositionedCharOp,
 } from '@/autoTag/charAnchors';
 import { prepareTargetText } from '@/autoTag/clean';
-import { naiStoryProfiles } from '@/autoTag/naiStory';
+import { chooseNaiAppearance } from '@/autoTag/naiAppearance';
+import { completeNaiCharacter, isNaiMaleAppearance, naiStoryProfiles } from '@/autoTag/naiStory';
+import {
+  NAI_STORY_EXTRA_KEY,
+  formatNaiOutfits,
+  naiSlotSourceLine,
+  outfitsAtPosition,
+  prepareOutfitChanges,
+  readNaiStoryFloor,
+  replayNaiOutfits,
+  storyTextHash,
+  type NaiStoryFloor,
+  type OutfitPart,
+} from '@/autoTag/naiWardrobe';
 import { beginGeneration, clearGeneration, consumeGeneration } from '@/autoTag/generationGate';
 import { autoTagProfile, buildAutoTagMessages } from '@/autoTag/prompt';
 import { rebaseImagePositions, type RebaseReport } from '@/autoTag/rebase';
@@ -27,7 +40,7 @@ import {
   type CharTagEntry,
   type CharTagField,
 } from '@/state/charTags';
-import { injectImageTags, parseComicPlan, parseImagePlan, type ImagePlan } from '@/autoTag/protocol';
+import { injectImageTags, parseComicPlan, parseImagePlan, type ImageInsertion, type ImagePlan } from '@/autoTag/protocol';
 import { bakeAppearance, comicAppearance, type ComicLayout } from '@/backends/mossLayout';
 import {
   clearAutoGenerateForFloor,
@@ -96,15 +109,6 @@ function activeSwipeId(message: STMessage): number | null {
   return typeof message.swipe_id === 'number' ? message.swipe_id : 0;
 }
 
-function textHash(text: string): string {
-  let hash = 2166136261;
-  for (let index = 0; index < text.length; index += 1) {
-    hash ^= text.charCodeAt(index);
-    hash = Math.imul(hash, 16777619);
-  }
-  return (hash >>> 0).toString(36);
-}
-
 interface RunOptions {
   /** 手动触发(楼层按钮):绕过 autoTag.enabled 与 processed 去重;空结果也给出反馈。 */
   manual?: boolean;
@@ -138,11 +142,13 @@ function describeRebase(report: RebaseReport): string {
 }
 
 /** 把 AI 报告的 changes 转成当前楼层操作;真正写回在正文 CAS 成功时一次完成。 */
-function planChangeOps(plan: ImagePlan): PositionedCharOp[] {
+function planChangeOps(plan: ImagePlan, existing: CharTagEntry[], positionNaiChanges: boolean): PositionedCharOp[] {
   const ops: PositionedCharOp[] = [];
+  const profiles = new Map(existing.map(entry => [entry.name, entry]));
   for (const change of plan.changes) {
     let op: CharTagAutoOp | null = null;
     if (change.field === 'new') {
+      if (positionNaiChanges && profiles.has(change.name)) continue;
       // value 可能是结构化字段的 JSON 串(protocol.ts 拼),也可能是整串 tag 文本
       let fields: Partial<Record<CharTagField, string>> | null = null;
       let value = '';
@@ -160,10 +166,14 @@ function planChangeOps(plan: ImagePlan): PositionedCharOp[] {
         }
       }
       if (!fields && change.value) value = change.value;
+      const known = { ...emptyCharFields(), ...(fields ?? {}) };
+      const appearance = change.visualOptions === undefined
+        ? { fields: known }
+        : chooseNaiAppearance(known, change.visualOptions, [...profiles.values()]);
       op = createCharTagNewOp(
         {
           name: change.name,
-          fields: { ...emptyCharFields(), ...(fields ?? {}) },
+          ...appearance,
           raw: value,
           nl: change.nl ?? '',
           source: 'ai',
@@ -171,11 +181,13 @@ function planChangeOps(plan: ImagePlan): PositionedCharOp[] {
         },
         change.reason,
       );
+      if (op && positionNaiChanges) profiles.set(op.name, { ...op, history: [] });
     } else if (change.field === 'nl') {
       op = createCharTagSetOp(change.name, 'nl', change.value || change.nl || '', change.reason);
     } else {
       op = createCharTagSetOp(change.name, change.field, change.value, change.reason);
     }
+    if (op?.kind === 'set' && positionNaiChanges) op.sourceLine = change.sourceLine;
     if (op) ops.push({ op, sourceLine: change.sourceLine });
   }
   return ops.sort((left, right) => left.sourceLine - right.sourceLine);
@@ -302,7 +314,8 @@ async function runForFloor(floor: number, opts: RunOptions = {}): Promise<void> 
     return;
   }
   const swipeId = activeSwipeId(message);
-  const identity = `${chatId}\u0000${floor}\u0000${swipeId ?? 'none'}\u0000${textHash(source)}`;
+  const sourceHash = storyTextHash(source);
+  const identity = `${chatId}\u0000${floor}\u0000${swipeId ?? 'none'}\u0000${sourceHash}`;
   // 手动是显式意图:即使同一正文自动流程已处理过(比如结论是无需插图)也照跑,
   // 但仍写入 processed,防止自动流程随后对同一正文重复请求。
   if (!opts.manual && processed.has(identity)) {
@@ -329,16 +342,39 @@ async function runForFloor(floor: number, opts: RunOptions = {}): Promise<void> 
     // 单槽重写:库文本要包含本楼已落档的增量(首次全量分析建的档),否则 AI 会把
     // 已建档角色当新人重写。charTagsBeforeFloor(floor + 1) 正好含本楼(swipe 匹配时生效)。
     const profile = autoTagProfile();
-    const previousEntries = charTagsBeforeFloor(slot ? floor + 1 : floor);
     const previousDelta = readCharTagFloorDelta(message);
+    const savedStory = profile.naiCharPrompts ? readNaiStoryFloor(message) : undefined;
+    const sameSwipeOps = previousDelta?.swipe === (swipeId ?? 0) ? previousDelta.ops : [];
+    const slotLine = slot && profile.naiCharPrompts ? naiSlotSourceLine(rawSource, slot.seq) : undefined;
+    const lockedNames = lockedCharTagNames();
+    const retainedNew = !slot && savedStory
+      ? sameSwipeOps.filter(op => op.kind === 'new' && !lockedNames.has(op.name))
+      : [];
+    const positionedSlot = slotLine !== undefined && !!savedStory;
+    const baseEntries = charTagsBeforeFloor(slot && !positionedSlot ? floor + 1 : floor);
+    const previousEntries = positionedSlot
+      ? entriesAtPosition(
+          baseEntries,
+          sameSwipeOps.map(op => ({ op, sourceLine: op.kind === 'set' ? op.sourceLine ?? -1 : -1 })),
+          slotLine,
+          lockedNames,
+        )
+      : retainedNew.length ? entriesAtPosition(
+          baseEntries,
+          retainedNew.map(op => ({ op, sourceLine: -1 })),
+          -1,
+          lockedNames,
+        ) : baseEntries;
+    const beforeOutfits = profile.naiCharPrompts ? replayNaiOutfits(context.chat, floor).outfits : new Map();
+    const slotOutfits = slotLine === undefined
+      ? beforeOutfits
+      : outfitsAtPosition(beforeOutfits, savedStory?.outfits ?? [], slotLine);
     const storyProfiles = profile.naiCharPrompts
       ? naiStoryProfiles(previousEntries, previousDelta, swipeId ?? 0)
       : undefined;
     const entriesBefore = storyProfiles
       ? previousEntries.filter(entry => !storyProfiles.maleNames.has(entry.name))
       : previousEntries;
-    // 锁定名(全局库 ⊖ 本聊天基线):AI 的 changes 对这些名字一律无效,库文本里带 [locked] 标记
-    const lockedNames = lockedCharTagNames();
     // 纯本地渲染:建档由主请求在同一次输出里完成(changes 的 field="new")
     const anchors = resolveCharAnchors(entriesBefore, lockedNames);
     // 单槽重写:协议强制「恰好 1 张」,并把该槽位当前提示词与其余槽位摘要带给模型
@@ -356,6 +392,7 @@ async function runForFloor(floor: number, opts: RunOptions = {}): Promise<void> 
       anchors.text,
       slot ? buildSlotTaskNote(rawSource, slot.seq) : '',
       profile,
+      profile.naiCharPrompts ? { outfits: formatNaiOutfits(slotOutfits), slot: !!slot } : undefined,
     );
     const channel = getTagGenChannel();
     // 失败重试:请求异常与「返回无法解析/校验不通过」都视为可重试的异常(后者常见于模型没遵守协议);
@@ -383,7 +420,11 @@ async function runForFloor(floor: number, opts: RunOptions = {}): Promise<void> 
                 preparedTarget.segments,
                 promptOptions.minImages,
                 promptOptions.maxImages,
-                { femaleScenesOnly: profile.naiCharPrompts && !slot, knownMaleProfiles: storyProfiles?.maleNames },
+                {
+                  femaleScenesOnly: profile.naiCharPrompts && !slot,
+                  knownMaleProfiles: storyProfiles?.maleNames,
+                  naiContinuity: profile.naiCharPrompts,
+                },
               );
           // 单槽重写忽略本次 changes,不校验建档 nl —— 校验它会为一份会被丢弃的
           // changes 白白消耗重试次数。NAI 关了自然语言时协议不要 nl,也就不验。
@@ -391,7 +432,8 @@ async function runForFloor(floor: number, opts: RunOptions = {}): Promise<void> 
             !slot &&
             profile.naiCharPrompts &&
             profile.nl &&
-            candidate.changes.some(change => change.field === 'new' && !change.nl?.trim())
+            candidate.changes.some(change => change.field === 'new' &&
+              change.visualOptions === undefined && !change.nl?.trim())
           ) {
             throw new Error('NAI 4.5/V5 建档必须附带 nl 外貌描述');
           }
@@ -442,14 +484,46 @@ async function runForFloor(floor: number, opts: RunOptions = {}): Promise<void> 
 
     // 单槽重写不落 changes:首次全量分析已为整楼建过档,这里再应用一次只会产生
     // 重复的建档/变更记录;库文本已含本楼增量(见上面 entriesBefore),AI 照抄即可。
-    const planOps = slot ? [] : planChangeOps(plan);
+    const planOps = slot ? [] : planChangeOps(plan, entriesBefore, profile.naiCharPrompts);
     // 锁定角色(全局库)不接受 AI changes:丢弃,不写入楼层、不参与 @替换。
     // 重放侧 applyCharTagOps 也会按锁定名再拦一次(旧消息里可能已存这类 ops)。
     const effectiveOps = lockedNames.size
       ? planOps.filter(item => !lockedNames.has(item.op.name))
       : planOps;
-    const floorOps = effectiveOps.map(item => item.op);
-    if (storyProfiles) floorOps.push(...storyProfiles.previousMaleOps);
+    const floorOps = [...retainedNew, ...effectiveOps.map(item => item.op)];
+    if (storyProfiles) {
+      for (const op of storyProfiles.previousMaleOps) if (!floorOps.includes(op)) floorOps.push(op);
+    }
+
+    const eligibleOutfits = () => new Set(entriesAtPosition(entriesBefore, effectiveOps, Infinity, lockedNames)
+      .filter(entry => !isNaiMaleAppearance(entry.fields.sex, entry.raw)).map(entry => entry.name));
+    const outfitChanges = slot || !profile.naiCharPrompts ? []
+      : savedStory?.outfits.length ? savedStory.outfits
+        : plan.outfits?.length ? prepareOutfitChanges(beforeOutfits, plan.outfits, eligibleOutfits()) : [];
+    function currentOutfits(originalSource: boolean): Map<string, OutfitPart[]> | undefined {
+      // A changed earlier swipe must not contribute garments from the branch that was active
+      // when the request began.
+      const chat = profile.naiCharPrompts && originalSource && getContext()?.chat;
+      return chat ? replayNaiOutfits(chat, floor).outfits : undefined;
+    }
+    function completeImage(image: ImageInsertion, prior: Map<string, OutfitPart[]> | undefined): ImageInsertion {
+      if (!profile.naiCharPrompts) return image;
+      const outfits = prior
+        ? outfitsAtPosition(
+            prior,
+            slot ? savedStory?.outfits ?? [] : outfitChanges,
+            slotLine ?? image.sourceLine,
+          )
+        : undefined;
+      const entries = new Map(entriesAtPosition(entriesBefore, effectiveOps, image.sourceLine, lockedNames)
+        .map(entry => [entry.name, entry]));
+      return {
+        ...image,
+        characters: image.characters.map(character =>
+          completeNaiCharacter(character, entries.get(character.name), outfits?.get(character.name),
+            lockedNames.has(character.name))),
+      };
+    }
 
     // @占位符按正文位置替换：变化前图片用旧档，变化位置及之后用新档。
     const unknownNames = new Set<string>();
@@ -531,7 +605,7 @@ async function runForFloor(floor: number, opts: RunOptions = {}): Promise<void> 
       return;
     }
     // 没有图片、没有角色变化、也没有旧楼层变化要清理时,保持原来的无写入早退。
-    if (!plan.images.length && !floorOps.length && !previousDelta) {
+    if (!plan.images.length && !floorOps.length && !previousDelta && !outfitChanges.length && !savedStory) {
       if (opts.manual) toastr.info('模型认为本楼没有值得插图的画面', '星绘');
       else console.debug(`[星绘] 第 ${floor} 楼无需插图`);
       return;
@@ -555,6 +629,7 @@ async function runForFloor(floor: number, opts: RunOptions = {}): Promise<void> 
     // 正文在 buildNext 里基于「落盘那一刻的真实正文」现算:分析期间别的插件对正文的修改
     // (翻译/润色/追加状态栏/改写句子)全部保留,tag 按叙事行重新定位后照常注入。
     let rebaseNote = '';
+    let saveStory = false;
     const result = await applyMessageText(
       floor,
       currentText => {
@@ -563,17 +638,20 @@ async function runForFloor(floor: number, opts: RunOptions = {}): Promise<void> 
         // 开跑时快照的原文对不上 = 期间被用户/别的流程改过,放弃覆盖(同提示词编辑弹窗)。
         if (slot) {
           if (parseImageTags(currentText)[slot.seq] !== slotRawTag) return null;
-          return replaceImageTagAt(currentText, slot.seq, serializeImageTag(plan.images[0]));
+          const image = completeImage(plan.images[0], currentOutfits(stripImageTags(currentText) === source));
+          return replaceImageTagAt(currentText, slot.seq, serializeImageTag(image));
         }
         // replace 路径同样以当前正文为基底剔除旧 tag,不能用旧快照
         const base = opts.replace ? stripImageTags(currentText) : currentText;
-        if (!plan.images.length) return base;
         // 请求期间用户/别的插件已经贴过 tag:再注入就是重复,交回 build-failed 走放弃分支
-        if (!opts.replace && hasImageTagTrace(currentText)) return null;
+        if (plan.images.length && !opts.replace && hasImageTagTrace(currentText)) return null;
+        saveStory = profile.naiCharPrompts && base === source;
+        if (!plan.images.length) return base;
+        const outfits = currentOutfits(saveStory);
         const rebased = rebaseImagePositions(
           base,
           preparedTarget.segments,
-          plan.images,
+          plan.images.map(image => completeImage(image, outfits)),
           settings.excludes.customStripTags,
         );
         if (!rebased) return null;
@@ -583,13 +661,23 @@ async function runForFloor(floor: number, opts: RunOptions = {}): Promise<void> 
       chatId,
       swipeId,
       message,
-      // 单槽不写法:本楼角色增量与其它槽位图片都不归它管,不传 extraUpdate 即保持原样。
+      // 单槽重写不写该楼的角色或服装记录。
       slot
         ? undefined
-        : {
-            key: BBI_CHAR_EXTRA_KEY,
-            value: makeCharTagFloorDelta(floorOps, swipeId ?? 0),
-          },
+        : () => [
+            {
+              key: BBI_CHAR_EXTRA_KEY,
+              value: makeCharTagFloorDelta(floorOps, swipeId ?? 0),
+              perSwipe: profile.naiCharPrompts,
+            },
+            ...(profile.naiCharPrompts && (saveStory || savedStory) ? [{
+              key: NAI_STORY_EXTRA_KEY,
+              value: saveStory
+                ? ({ v: 1, swipe: swipeId ?? 0, source: sourceHash, outfits: outfitChanges } satisfies NaiStoryFloor)
+                : undefined,
+              perSwipe: true,
+            }] : []),
+          ],
     );
     if (result === 'saved') {
       if (slot) {

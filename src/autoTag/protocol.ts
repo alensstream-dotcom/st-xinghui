@@ -1,4 +1,6 @@
 import { hasNaiFemaleSubject, isNaiMaleAppearance } from '@/autoTag/naiStory';
+import { NAI_VISUAL_FIELDS, parseNaiVisualOptions, type NaiVisualField, type NaiVisualFields } from '@/autoTag/naiAppearance';
+import { parseOutfitChanges, parseOutfitPartIds, type OutfitChange } from '@/autoTag/naiWardrobe';
 import { validateComicLayout, type ComicLayout } from '@/backends/mossLayout';
 import { normalizeOrientation, type Orientation } from '@/backends/size';
 import type { TargetSegment } from '@/autoTag/clean';
@@ -15,6 +17,14 @@ export interface ImageCharacterPrompt {
   nl: string;
 }
 
+export interface PlannedCharacterPrompt extends ImageCharacterPrompt {
+  useProfile?: boolean;
+  appearanceTag?: string;
+  temporaryFields?: NaiVisualField[];
+  outfitParts?: string[];
+  outfitTag?: string;
+}
+
 export interface ImageInsertion {
   /** 模型选择的目标正文位置 ID。 */
   position: string;
@@ -26,7 +36,7 @@ export interface ImageInsertion {
   nl: string;
   /** 本画面动态负面 tag(可空;仅在 ComfyUI 工作流使用 %negative_prompt% 时要求模型输出)。 */
   negative: string;
-  characters: ImageCharacterPrompt[];
+  characters: PlannedCharacterPrompt[];
   /** 画幅方向:模型只判横/竖,具体像素由用户在后端面板配置。漏给/乱给一律降级竖屏。 */
   size: Orientation;
   /** tag 类型(插件按当前方案定,不是 AI 选的);缺省插画,序列化时也不写。 */
@@ -39,6 +49,7 @@ export interface ImagePlan {
   images: ImageInsertion[];
   /** AI 报告的角色库变更(建档/字段更新);调用方负责落库。 */
   changes: CharChange[];
+  outfits?: OutfitChange[];
 }
 
 /** AI 输出的单条角色变更(宽松形状;解析后字段全部合法才保留)。 */
@@ -57,6 +68,7 @@ export interface CharChange {
   position: string;
   /** position 对应的原始物理行(0-based,仅插件内部使用)。 */
   sourceLine: number;
+  visualOptions?: NaiVisualFields[];
 }
 
 const HISTORY_FIELDS: ReadonlySet<string> = new Set([
@@ -144,9 +156,9 @@ function sanitizeContent(value: unknown, field: string, index: number): string {
   return text;
 }
 
-function sanitizeCharacters(value: unknown, imageIndex: number): ImageCharacterPrompt[] {
+function sanitizeCharacters(value: unknown, imageIndex: number, naiContinuity: boolean): PlannedCharacterPrompt[] {
   if (!Array.isArray(value)) return [];
-  const characters: ImageCharacterPrompt[] = [];
+  const characters: PlannedCharacterPrompt[] = [];
   for (let index = 0; index < value.length && characters.length < 32; index += 1) {
     const raw = value[index];
     if (!raw || typeof raw !== 'object' || Array.isArray(raw)) continue;
@@ -155,7 +167,22 @@ function sanitizeCharacters(value: unknown, imageIndex: number): ImageCharacterP
       const name = sanitizeContent(item.name, `characters[${index}].name`, imageIndex);
       const tag = sanitizeContent(item.tag ?? item.prompt, `characters[${index}].tag`, imageIndex);
       const nl = sanitizeContent(item.nl, `characters[${index}].nl`, imageIndex);
-      if (name && tag) characters.push({ name, tag, nl });
+      if (!name || !tag) continue;
+      const character: PlannedCharacterPrompt = { name, tag, nl };
+      if (naiContinuity) {
+        // A bad optional extension may fall back without losing the original character block.
+        if (item.useProfile === true) character.useProfile = true;
+        if (Array.isArray(item.temporaryFields)) {
+          character.temporaryFields = NAI_VISUAL_FIELDS.filter(field => (item.temporaryFields as unknown[]).includes(field));
+        }
+        const outfitParts = parseOutfitPartIds(item.outfitParts);
+        if (outfitParts !== undefined) character.outfitParts = outfitParts;
+        for (const field of ['outfitTag', 'appearanceTag'] as const) {
+          const text = typeof item[field] === 'string' ? item[field].trim() : '';
+          if (text && !/[<>\r\n]/.test(text)) character[field] = text;
+        }
+      }
+      characters.push(character);
     } catch {
       // A malformed character prompt must not discard an otherwise valid image plan.
     }
@@ -182,7 +209,7 @@ export function parseImagePlan(
   segments: TargetSegment[],
   minImages: number,
   maxImages: number,
-  rules: { femaleScenesOnly?: boolean; knownMaleProfiles?: ReadonlySet<string> } = {},
+  rules: { femaleScenesOnly?: boolean; knownMaleProfiles?: ReadonlySet<string>; naiContinuity?: boolean } = {},
 ): ImagePlan {
   const parsed = parseObject(raw);
   if (!Array.isArray(parsed.images)) throw new Error('AI 返回的 JSON 缺少 images 数组');
@@ -210,7 +237,7 @@ export function parseImagePlan(
     if (!tag) throw new Error(`images[${index}].tag 不能为空`);
     const nl = sanitizeContent(entry.nl, 'nl', index);
     const negative = sanitizeContent(entry.negative ?? entry.negative_prompt, 'negative', index);
-    const characters = sanitizeCharacters(entry.characters, index);
+    const characters = sanitizeCharacters(entry.characters, index, !!rules.naiContinuity);
     // 兼容模型按习惯返回 orientation / aspect 键
     const size = normalizeOrientation(entry.size ?? entry.orientation ?? entry.aspect);
     if (rules.femaleScenesOnly && !hasNaiFemaleSubject(tag, characters)) continue;
@@ -225,9 +252,11 @@ export function parseImagePlan(
     );
   }
 
+  const outfits = rules.naiContinuity ? parseOutfitChanges(parsed.outfits, segments) : undefined;
   return {
     images: limitedImages,
-    changes: parseChanges(parsed.changes, positions, rules.knownMaleProfiles),
+    changes: parseChanges(parsed.changes, positions, rules.knownMaleProfiles, rules.naiContinuity),
+    ...(outfits === undefined ? {} : { outfits }),
   };
 }
 
@@ -287,14 +316,15 @@ function firstPosition(positions: Map<string, number>): { position: string; sour
 }
 
 /** 建档字段:hair 与 eyes 是二次元身份锚点,缺任一条则该条建档不可用(调用方丢弃)。 */
-function parseNewFields(raw: Record<string, unknown>, skipMale: boolean): string | null {
+function parseNewFields(raw: Record<string, unknown>, skipMale: boolean, structured: boolean): string | null {
   const fields: Partial<Record<CharTagField, string>> = {};
   for (const field of CHAR_TAG_FIELDS) {
     const value = raw[field];
     const text = typeof value === 'string' ? value.trim().replace(/[\r\n]+/g, ' ') : '';
-    if (text) fields[field] = text;
+    if (text && (!structured || !/[<>]/.test(text))) fields[field] = text;
   }
-  if (!fields.hair || !fields.eyes || (skipMale && isNaiMaleAppearance(fields.sex ?? ''))) return null;
+  if (skipMale && isNaiMaleAppearance(fields.sex ?? '')) return null;
+  if (structured ? !fields.sex : !fields.hair || !fields.eyes) return null;
   return JSON.stringify(fields);
 }
 
@@ -302,6 +332,7 @@ function parseChanges(
   raw: unknown,
   positions: Map<string, number>,
   knownMaleProfiles?: ReadonlySet<string>,
+  naiContinuity?: boolean,
 ): CharChange[] {
   if (!Array.isArray(raw)) return [];
   const out: CharChange[] = [];
@@ -321,15 +352,21 @@ function parseChanges(
       o.fields && typeof o.fields === 'object' && !Array.isArray(o.fields)
         ? (o.fields as Record<string, unknown>)
         : null;
+    const visualOptions = field === 'new' && naiContinuity && Array.isArray(o.visualOptions)
+      ? parseNaiVisualOptions(o.visualOptions)
+      : undefined;
     if (field === 'new') {
-      const parsedFields = fields ? parseNewFields(fields, !!knownMaleProfiles) : null;
+      const parsedFields = fields ? parseNewFields(fields, !!knownMaleProfiles, visualOptions !== undefined) : null;
       if (!parsedFields) continue;
       value = parsedFields;
     }
     const nl = typeof o.nl === 'string' ? o.nl.trim() : '';
     const reason = typeof o.reason === 'string' ? o.reason.trim() : '';
     if (!value && !nl) continue;
-    out.push({ name, field, value, nl: nl || undefined, reason, position, sourceLine });
+    out.push({
+      name, field, value, nl: nl || undefined, reason, position, sourceLine,
+      ...(visualOptions === undefined ? {} : { visualOptions }),
+    });
   }
   return out;
 }
