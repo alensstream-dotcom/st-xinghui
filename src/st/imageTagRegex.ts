@@ -249,7 +249,23 @@ export function parseImageTagContent(raw: string): ImageTagContent {
           const name = oneLine(typeof rawItem.name === 'string' ? rawItem.name : '');
           const tag = oneLine(typeof rawItem.tag === 'string' ? rawItem.tag : '');
           const nl = oneLine(typeof rawItem.nl === 'string' ? rawItem.nl : '');
-          return name && tag ? [{ name, tag, nl }] : [];
+          const uc = oneLine(typeof rawItem.uc === 'string' ? rawItem.uc : '');
+          const omitFeatures = Array.isArray(rawItem.omitFeatures)
+            ? rawItem.omitFeatures
+                .filter((value): value is string => typeof value === 'string')
+                .map(value => value.trim().toLowerCase())
+                .filter(Boolean)
+            : [];
+          if (!name || !tag) return [];
+          return [
+            {
+              name,
+              tag,
+              nl,
+              ...(uc ? { uc } : {}),
+              ...(omitFeatures.length ? { omitFeatures } : {}),
+            },
+          ];
         });
       }
     } catch {

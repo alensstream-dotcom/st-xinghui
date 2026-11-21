@@ -435,6 +435,14 @@ export function buildNaiParameters(nai: NaiRunConfig, values: NaiGenerateValues)
           centers: [{ x: 0.5, y: 0.5 }],
         }))
       : [];
+    // 角色级负面：只否掉「这一个角色身上不该出现的东西」（已脱的内衣、别人的外套）。
+    // 挂到全局 negative 会把另一个真穿着它的人一起否掉，所以必须按 char_captions 下标对齐。
+    const charNegatives = charCaptions.map((_, index) => {
+      const uc = naiSupportsCharacterPrompts(nai.model)
+        ? (values.characters?.[index]?.uc ?? '').trim()
+        : '';
+      return { char_caption: uc, centers: [{ x: 0.5, y: 0.5 }] };
+    });
     params.characterPrompts = [];
     params.v4_prompt = {
       caption: { base_caption: prompt, char_captions: charCaptions },
@@ -444,7 +452,7 @@ export function buildNaiParameters(nai: NaiRunConfig, values: NaiGenerateValues)
     params.v4_negative_prompt = {
       caption: {
         base_caption: negative,
-        char_captions: charCaptions.map(() => ({ char_caption: '', centers: [{ x: 0.5, y: 0.5 }] })),
+        char_captions: charNegatives,
       },
       legacy_uc: false,
     };

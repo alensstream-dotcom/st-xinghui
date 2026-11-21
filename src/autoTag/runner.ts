@@ -6,10 +6,17 @@ import {
   resolveCharAnchors,
   type PositionedCharOp,
 } from '@/autoTag/charAnchors';
-import { prepareTargetText } from '@/autoTag/clean';
+import { assembleImagePrompts } from '@/autoTag/assemblePrompt';
+import { prepareTargetText, type TargetSegment } from '@/autoTag/clean';
 import { naiStoryProfiles } from '@/autoTag/naiStory';
 import { beginGeneration, clearGeneration, consumeGeneration } from '@/autoTag/generationGate';
-import { autoTagProfile, buildAutoTagMessages } from '@/autoTag/prompt';
+import {
+  autoTagProfile,
+  buildAutoTagMessages,
+  buildDirectorMessages,
+  buildStateSyncMessages,
+  type DualChannelInput,
+} from '@/autoTag/prompt';
 import { rebaseImagePositions, type RebaseReport } from '@/autoTag/rebase';
 import { buildSlotTaskNote } from '@/autoTag/slotPlan';
 import {
@@ -27,7 +34,16 @@ import {
   type CharTagEntry,
   type CharTagField,
 } from '@/state/charTags';
-import { injectImageTags, parseComicPlan, parseImagePlan, type ImagePlan } from '@/autoTag/protocol';
+import {
+  injectImageTags,
+  parseComicPlan,
+  parseDirectorPlan,
+  parseImagePlan,
+  parseStateSyncPlan,
+  type CharChange,
+  type ImageInsertion,
+  type ImagePlan,
+} from '@/autoTag/protocol';
 import { bakeAppearance, comicAppearance, type ComicLayout } from '@/backends/mossLayout';
 import {
   clearAutoGenerateForFloor,
@@ -45,7 +61,15 @@ import {
   serializeImageTag,
   stripImageTags,
 } from '@/st/imageTagRegex';
-import { getTagGenChannel, isCurrentChatExcluded, settings } from '@/state/settings';
+import { getTagGenChannel, isCurrentChatExcluded, settings, type ApiChannel } from '@/state/settings';
+import {
+  BBI_OUTFIT_EXTRA_KEY,
+  buildOutfitSnapshotText,
+  makeOutfitFloorDelta,
+  outfitAtPosition,
+  outfitStatesBeforeFloor,
+  type StoredOutfitOp,
+} from '@/state/outfitState';
 
 const processed = new Set<string>();
 const running = new Map<string, AbortController>();
@@ -193,6 +217,126 @@ function bakeComicAppearance(layout: ComicLayout, entries: CharTagEntry[], unkno
     if (entry) item.caption = bakeAppearance(item.caption, comicAppearance(entry));
     else unknown.add(item.name);
   }
+}
+
+/**
+ * 单模型双并发：同一个渠道上并发两条轻量通道，再在本地把结果拼成可发送的提示词。
+ *
+ * 为什么要拆两条：一条通道要它「读完整楼、把五层服装状态填准」，另一条要它「当导演挑画面」，
+ * 两件事对上下文的要求正好相反——填表要全量细节，导演要短、要敢选。挤在一次请求里，
+ * 模型会先满足容易的那件（挑一格好写的画面），服装状态就被糊弄过去。
+ *
+ * 任何一条通道失败都整体抛错，交给调用方回落到原来的单请求路径：
+ * 双通道是为了更好，不是为了把原本能跑通的楼层变成失败。
+ */
+async function runDualChannel(params: {
+  channel: ApiChannel;
+  floor: number;
+  input: Omit<DualChannelInput, 'outfitSnapshot'>;
+  segments: TargetSegment[];
+  entries: CharTagEntry[];
+  /** 用本次 changes 算出「几号位置起用哪份档案」的操作表。 */
+  opsResolver: (changes: CharChange[]) => PositionedCharOp[];
+  lockedNames: ReadonlySet<string>;
+  maleNames?: ReadonlySet<string>;
+  size: 'portrait' | 'landscape';
+  signal: AbortSignal;
+}): Promise<{ plan: ImagePlan; outfitOps: StoredOutfitOp[] }> {
+  const outfitBefore = outfitStatesBeforeFloor(params.floor);
+  const outfitSnapshot = buildOutfitSnapshotText(outfitBefore);
+  const input: DualChannelInput = { ...params.input, outfitSnapshot };
+  const [syncMessages, directorMessages] = await Promise.all([
+    buildStateSyncMessages(input),
+    buildDirectorMessages(input),
+  ]);
+
+  const holders: { sync: ReturnType<typeof parseStateSyncPlan> | null; director: null | ReturnType<typeof parseDirectorPlan> } = {
+    sync: null,
+    director: null,
+  };
+  const syncSource = `服装状态表(第 ${params.floor} 楼)`;
+  const directorSource = `镜头导演(第 ${params.floor} 楼)`;
+
+  await Promise.all([
+    requestCompletion(params.channel, syncMessages, {
+      signal: params.signal,
+      source: syncSource,
+      validate: raw => {
+        const parsed = parseStateSyncPlan(raw, params.segments, {
+          knownMaleProfiles: params.maleNames,
+        });
+        // 一条操作都没有不是错误：绝大多数楼层本来就不换衣服。
+        holders.sync = parsed;
+      },
+    }),
+    requestCompletion(params.channel, directorMessages, {
+      signal: params.signal,
+      source: directorSource,
+      validate: raw => {
+        const parsed = parseDirectorPlan(raw, params.segments, input.maxImages);
+        holders.director = parsed;
+      },
+    }),
+  ]);
+
+  if (!holders.sync || !holders.director) throw new Error('双通道有一路没有给出可解析的结果');
+  const sync = holders.sync;
+  const director = holders.director;
+  // 建档与永久变化由状态表通道顺带报告,先把它落成位置操作,后面按位置取档案。
+  const ops = params.opsResolver(sync.changes);
+
+  const images: ImageInsertion[] = [];
+  for (const shot of director.shots) {
+    const outfit = outfitAtPosition(outfitBefore, sync.ops, shot.sourceLine);
+    const entriesHere = entriesAtPosition(
+      params.entries,
+      ops,
+      shot.sourceLine,
+      params.lockedNames,
+    );
+    const assembled = assembleImagePrompts({
+      entries: entriesHere,
+      outfit,
+      director: shot.characters,
+      scale: shot.scale,
+    });
+    const characters = assembled
+      .filter(character => character.tag.trim())
+      .map(character => ({
+        name: character.name,
+        tag: character.tag,
+        nl: character.nl,
+        ...(character.uc ? { uc: character.uc } : {}),
+        ...(character.omitFeatures.length ? { omitFeatures: character.omitFeatures } : {}),
+      }));
+    if (!characters.length) continue;
+    // 人数由角色块的血统词推出来:NAI 的 Base 必须写清几个人,否则同一段正文会被画成三只手。
+    const counts = new Set<string>();
+    for (const character of assembled) {
+      for (const token of character.tag.split(',')) {
+        const trimmed = token.trim();
+        if (/^\d+(?:girl|boy|other)s?$/i.test(trimmed)) counts.add(trimmed);
+      }
+    }
+    const baseTag = [...counts, shot.place, shot.scale].filter(Boolean).join(', ');
+    images.push({
+      position: shot.position,
+      sourceLine: shot.sourceLine,
+      tag: baseTag || shot.scale || 'scene',
+      nl: '',
+      negative: '',
+      characters,
+      size: params.size,
+    });
+  }
+
+  diagnostic('dual:compiled', {
+    shots: director.shots.length,
+    images: images.length,
+    outfitOps: sync.ops.length,
+    changes: sync.changes.length,
+  });
+  return { plan: { images, changes: sync.changes }, outfitOps: sync.ops };
 }
 
 async function runForFloor(floor: number, opts: RunOptions = {}): Promise<void> {
@@ -358,13 +502,57 @@ async function runForFloor(floor: number, opts: RunOptions = {}): Promise<void> 
       profile,
     );
     const channel = getTagGenChannel();
+    // NAI 4.5/V5 且没走单槽重写时,先试「状态表 + 导演」双并发;任何一路失败就回落到单请求。
+    // 漫画不分页双发(一页一个分镜,拆开反而乱),单槽重写只要一张、也没必要多两倍请求。
+    let plan: ImagePlan | null = null;
+    let lastError = '';
+    /** 本楼五层服装增量;单请求路径下恒为空,由写回落盘时一并保存。 */
+    let outfitOps: StoredOutfitOp[] = [];
+    const dualEligible = !profile.comic && !slot && profile.naiCharPrompts && Boolean(channel);
+    if (dualEligible && channel) {
+      try {
+        const dual = await runDualChannel({
+          channel,
+          floor,
+          input: {
+            context,
+            targetFloor: floor,
+            options: promptOptions,
+            preparedTarget,
+            memoryText: memory ? memory.text : '角色参考：星绘书本次未提供。',
+            libraryBlock: anchors.text ?? '',
+            minImages: promptOptions.minImages,
+            maxImages: promptOptions.maxImages,
+          },
+          segments: preparedTarget.segments,
+          entries: anchors.entries,
+          opsResolver: changes => {
+            const resolved = planChangeOps({ images: [], changes });
+            return lockedNames.size
+              ? resolved.filter(item => !lockedNames.has(item.op.name))
+              : resolved;
+          },
+          lockedNames,
+          maleNames: storyProfiles?.maleNames,
+          size: profile.lockedSize ?? 'portrait',
+          signal: controller.signal,
+        });
+        plan = dual.plan;
+        outfitOps = dual.outfitOps;
+      } catch (error) {
+        if (controller.signal.aborted) {
+          processed.delete(identity);
+          return;
+        }
+        lastError = error instanceof Error ? error.message : String(error);
+        console.warn(`[星绘] 第 ${floor} 楼双通道失败,回落到单请求路径`, error);
+      }
+    }
     // 失败重试:请求异常与「返回无法解析/校验不通过」都视为可重试的异常(后者常见于模型没遵守协议);
     // 中止信号立即收手,不消耗重试。parseImagePlan 对坏输出抛错,「无画面」则是正常返回空数组。
     // 解析/校验放进 validate 回调:不过则请求历史如实记为失败(而非「HTTP 拿到文本」的绿色成功),
     // 错误原样抛回这里走重试——显示与行为同口径。
     const retries = Math.max(0, Math.floor(Number(settings.autoTag.retryCount) || 0));
-    let plan: ImagePlan | null = null;
-    let lastError = '';
     for (let attempt = 0; attempt <= retries && !plan; attempt++) {
       if (controller.signal.aborted) {
         processed.delete(identity);
@@ -531,7 +719,7 @@ async function runForFloor(floor: number, opts: RunOptions = {}): Promise<void> 
       return;
     }
     // 没有图片、没有角色变化、也没有旧楼层变化要清理时,保持原来的无写入早退。
-    if (!plan.images.length && !floorOps.length && !previousDelta) {
+    if (!plan.images.length && !floorOps.length && !previousDelta && !outfitOps.length) {
       if (opts.manual) toastr.info('模型认为本楼没有值得插图的画面', '星绘');
       else console.debug(`[星绘] 第 ${floor} 楼无需插图`);
       return;
@@ -584,12 +772,18 @@ async function runForFloor(floor: number, opts: RunOptions = {}): Promise<void> 
       swipeId,
       message,
       // 单槽不写法:本楼角色增量与其它槽位图片都不归它管,不传 extraUpdate 即保持原样。
+      // 服装增量与角色增量必须同一次写盘:若正文先落、服装后落,中途失败就会让下一楼读到旧的穿着。
       slot
         ? undefined
-        : {
-            key: BBI_CHAR_EXTRA_KEY,
-            value: makeCharTagFloorDelta(floorOps, swipeId ?? 0),
-          },
+        : [
+            {
+              key: BBI_CHAR_EXTRA_KEY,
+              value: makeCharTagFloorDelta(floorOps, swipeId ?? 0),
+            },
+            ...(outfitOps.length
+              ? [{ key: BBI_OUTFIT_EXTRA_KEY, value: makeOutfitFloorDelta(outfitOps, swipeId ?? 0) }]
+              : []),
+          ],
     );
     if (result === 'saved') {
       if (slot) {

@@ -518,3 +518,23 @@ describe('managed bbi image-tag regex registration', () => {  it('registers both
     expect(saveSettingsDebounced).toHaveBeenCalledTimes(2);
   });
 });
+
+describe('character uc / omitFeatures 透传', () => {
+  it('序列化再解析不丢字段(旧楼层没有这两个键时照旧为空)', () => {
+    const withUc = serializeImageTag({
+      tag: '1girl, bedroom',
+      nl: '',
+      negative: '',
+      characters: [
+        { name: '温岚', tag: 'girl, white shirt', nl: '', uc: 'skirt', omitFeatures: ['hair'] },
+        { name: '李斌', tag: 'boy', nl: '' },
+      ],
+    } as Parameters<typeof serializeImageTag>[0]);
+    expect(withUc).toContain('"uc":"skirt"');
+    expect(withUc).toContain('"omitFeatures":["hair"]');
+    const parsed = parseImageTagContent(withUc);
+    expect(parsed.characters?.[0]?.uc).toBe('skirt');
+    expect(parsed.characters?.[0]?.omitFeatures).toEqual(['hair']);
+    expect(parsed.characters?.[1]?.uc).toBeUndefined();
+  });
+});

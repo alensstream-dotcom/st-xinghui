@@ -8,11 +8,32 @@ import {
   type CharTagField,
   type CharTagHistoryField,
 } from '@/state/charTags';
+import {
+  OUTFIT_LAYER_KEYS,
+  type OutfitLayerKey,
+  type OutfitLayerState,
+  type OutfitLayerStatus,
+  type RawOutfitOp,
+  type StoredOutfitOp,
+} from '@/state/outfitState';
 
 export interface ImageCharacterPrompt {
   name: string;
   tag: string;
   nl: string;
+  /**
+   * 该角色的负面提示词(NovelAI 的 char_caption 级 uc)。
+   *
+   * 只承载「这一格不该出现的这件衣服」这类局部否定——例如她已经脱掉的胸罩、
+   * 别人身上的外套。放全局 negative 会连别人一起否掉，所以必须挂在角色上。
+   * 空串表示不写(序列化时整段省略)。
+   */
+  uc?: string;
+  /**
+   * 这一格刻意不写的固定外貌字段(hair/eyes/skin/body/extra)。
+   * 局部特写(只拍手、只拍下体)时用得上：脸不在画面里，写发色瞳色只会让模型硬塞一张脸。
+   */
+  omitFeatures?: string[];
 }
 
 export interface ImageInsertion {
@@ -155,12 +176,46 @@ function sanitizeCharacters(value: unknown, imageIndex: number): ImageCharacterP
       const name = sanitizeContent(item.name, `characters[${index}].name`, imageIndex);
       const tag = sanitizeContent(item.tag ?? item.prompt, `characters[${index}].tag`, imageIndex);
       const nl = sanitizeContent(item.nl, `characters[${index}].nl`, imageIndex);
-      if (name && tag) characters.push({ name, tag, nl });
+      const uc = sanitizeOptionalContent(item.uc, `characters[${index}].uc`, imageIndex);
+      const omitFeatures = sanitizeOmitFeatures(item.omitFeatures);
+      if (name && tag) {
+        characters.push({
+          name,
+          tag,
+          nl,
+          ...(uc ? { uc } : {}),
+          ...(omitFeatures.length ? { omitFeatures } : {}),
+        });
+      }
     } catch {
       // A malformed character prompt must not discard an otherwise valid image plan.
     }
   }
   return characters;
+}
+
+/** 可空字段：非字符串/空白一律当没写，绝不因为可选字段抛错。 */
+function sanitizeOptionalContent(value: unknown, field: string, imageIndex: number): string {
+  if (typeof value !== 'string' || !value.trim()) return '';
+  try {
+    return sanitizeContent(value, field, imageIndex);
+  } catch {
+    return '';
+  }
+}
+
+const OMITTABLE_FEATURES = new Set(['hair', 'eyes', 'skin', 'body', 'extra']);
+
+function sanitizeOmitFeatures(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  const out: string[] = [];
+  for (const item of value) {
+    if (typeof item !== 'string') continue;
+    const key = item.trim().toLowerCase();
+    if (!OMITTABLE_FEATURES.has(key) || out.includes(key)) continue;
+    out.push(key);
+  }
+  return out;
 }
 
 function sanitizePosition(value: unknown, index: number): string {
@@ -364,4 +419,223 @@ export function injectImageTags(source: string, images: ImageInsertion[]): strin
     output += line.eol;
   }
   return output;
+}
+
+/* ─────────────────────────── 五层服装状态表的解析 ─────────────────────────── */
+
+export interface StateSyncPlan {
+  v: 1;
+  ops: StoredOutfitOp[];
+  /** 同一次输出里顺带报告的角色建档/永久变化(读楼的是这条通道,不另开一次请求)。 */
+  changes: CharChange[];
+}
+
+/** 导演通道的输出：这一格画什么、谁在里面、各自的表情与动作。 */
+export interface DirectedCharacter {
+  name: string;
+  expression: string;
+  gaze: string;
+  /** 一句简短英文：这个人在这一格正在做的事。 */
+  action: string;
+  /** 施动者名字(可空)。 */
+  source: string;
+  /** 受动者名字(可空)。 */
+  target: string;
+  omitFeatures: string[];
+}
+
+export interface DirectedShot {
+  position: string;
+  sourceLine: number;
+  /** 景别(英文 tag)：full body / cowboy shot / upper body / close-up … */
+  scale: string;
+  /** 场所(英文 tag，可空)。 */
+  place: string;
+  characters: DirectedCharacter[];
+}
+
+export interface DirectorPlan {
+  v: 1;
+  shots: DirectedShot[];
+}
+
+const OUTFIT_STATUSES = new Set<OutfitLayerStatus>(['worn', 'disheveled', 'removed']);
+
+function isOutfitLayer(value: unknown): value is OutfitLayerKey {
+  return typeof value === 'string' && (OUTFIT_LAYER_KEYS as readonly string[]).includes(value);
+}
+
+function outfitTag(value: unknown, field: string, index: number): string {
+  if (value === undefined || value === null) return '';
+  if (typeof value !== 'string') throw new Error(`${field} 必须是字符串`);
+  const text = value.trim().replace(/\s+/g, ' ');
+  if (FORBIDDEN_SUBTAG.test(text)) throw new Error(`${field} 里不允许出现 <bbi_image> 等子标签`);
+  if (text.length > 160) return text.slice(0, 160);
+  void index;
+  return text;
+}
+
+function outfitStatus(value: unknown, field: string): OutfitLayerStatus {
+  if (value === undefined || value === null) return 'worn';
+  if (typeof value !== 'string') throw new Error(`${field} 必须是字符串`);
+  const status = value.trim().toLowerCase();
+  if (!OUTFIT_STATUSES.has(status as OutfitLayerStatus)) {
+    throw new Error(`${field} 只能是 worn / disheveled / removed`);
+  }
+  return status as OutfitLayerStatus;
+}
+
+function parseLayerState(raw: unknown, field: string): { tag: string; status: OutfitLayerStatus; stateTag?: string } | null {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  const item = raw as Record<string, unknown>;
+  const tag = outfitTag(item.tag ?? item.name ?? item.item, `${field}.tag`, 0);
+  const status = outfitStatus(item.status, `${field}.status`);
+  const stateTag = outfitTag(item.stateTag ?? item.state, `${field}.stateTag`, 0);
+  if (!tag && status !== 'removed') return null;
+  return { tag, status, ...(stateTag ? { stateTag } : {}) };
+}
+
+/**
+ * 解析「任务 A：服装状态填表」的输出。
+ *
+ * 宽容口径和 parseImagePlan 一致：单条坏就丢这一条，不连累整份。
+ * 唯一硬要求是 position 能对回本楼的物理行——落进 extra 的每条操作都带 sourceLine，
+ * 回放时靠它切出「某一格那一刻」的状态；对不回来的操作宁可丢，也不能挪到楼头乱套。
+ */
+export function parseStateSyncPlan(
+  raw: string,
+  segments: TargetSegment[],
+  rules: { knownMaleProfiles?: ReadonlySet<string> } = {},
+): StateSyncPlan {
+  const parsed = parseObject(raw);
+  const source = parsed.outfit ?? parsed.ops ?? parsed.layers;
+  const positions = new Map<string, number>();
+  for (const segment of segments) positions.set(segment.id.toUpperCase(), segment.sourceLine);
+  const firstLine = segments.length ? segments[0].sourceLine : 0;
+  const ops: StoredOutfitOp[] = [];
+  const parsedChanges = parseChanges(parsed.changes, positions, rules.knownMaleProfiles);
+  if (!Array.isArray(source)) return { v: 1, ops, changes: parsedChanges };
+
+  for (let index = 0; index < source.length && ops.length < 64; index += 1) {
+    const rawItem = source[index];
+    if (!rawItem || typeof rawItem !== 'object' || Array.isArray(rawItem)) continue;
+    const item = rawItem as Record<string, unknown>;
+    const op = typeof item.op === 'string' ? item.op.trim().toLowerCase() : '';
+    const name = typeof item.name === 'string' ? item.name.trim() : '';
+    if (!name || name.length > 24) continue;
+    const position = typeof item.position === 'string' ? item.position.trim().toUpperCase() : '';
+    const matched = position && positions.has(position) ? positions.get(position)! : null;
+    // set_outfit 是「这一身现在是这样」,落在首行也成立;update_layer 是「这一刻脱了它」,
+    // 行号定不下来就丢掉——宁可不写,也不能把「脱掉」提前到楼首去。
+    if (op !== 'set_outfit' && matched === null) continue;
+    const sourceLine = matched ?? firstLine;
+
+    try {
+      if (op === 'set_outfit') {
+        const layersRaw = item.layers;
+        if (!layersRaw || typeof layersRaw !== 'object' || Array.isArray(layersRaw)) continue;
+        const layers: Partial<Record<OutfitLayerKey, OutfitLayerState>> = {};
+        for (const [key, value] of Object.entries(layersRaw as Record<string, unknown>)) {
+          if (!isOutfitLayer(key)) continue;
+          const state = parseLayerState(value, `outfit[${index}].layers.${key}`);
+          if (state) layers[key] = state;
+        }
+        if (!Object.keys(layers).length) continue;
+        const sceneHint = outfitTag(item.sceneHint ?? item.scene, `outfit[${index}].sceneHint`, index);
+        ops.push({
+          sourceLine,
+          op: { op: 'set_outfit', name, ...(sceneHint ? { sceneHint } : {}), layers },
+        });
+        continue;
+      }
+
+      if (op === 'update_layer') {
+        const layer = item.layer ?? item.key;
+        if (!isOutfitLayer(layer)) continue;
+        const status = outfitStatus(item.status, `outfit[${index}].status`);
+        const tag = outfitTag(item.tag, `outfit[${index}].tag`, index);
+        const stateTag = outfitTag(item.stateTag ?? item.state, `outfit[${index}].stateTag`, index);
+        if (!tag && status !== 'removed') continue;
+        ops.push({
+          sourceLine,
+          op: {
+            op: 'update_layer',
+            name,
+            layer,
+            status,
+            ...(tag ? { tag } : {}),
+            ...(stateTag ? { stateTag } : {}),
+          },
+        });
+      }
+    } catch {
+      // 一条坏操作不该让整楼状态表作废。
+    }
+  }
+  return { v: 1, ops, changes: parsedChanges };
+}
+
+/**
+ * 解析「任务 B：导演选帧」的输出。
+ *
+ * 导演只交三样东西：位置、景别与场所、以及每个在场者的表情/视线/动作。
+ * 外貌与服装一律不从这里来——那是本地编译器按档案与五层状态硬拼的，
+ * 让模型再写一遍就等于给它一次把它们写漂的机会。
+ */
+const DIRECTOR_SCALES = ['full body', 'cowboy shot', 'upper body', 'close-up'] as const;
+
+export function parseDirectorPlan(
+  raw: string,
+  segments: TargetSegment[],
+  maxImages: number,
+): DirectorPlan {
+  const parsed = parseObject(raw);
+  const positions = new Map<string, number>();
+  for (const segment of segments) positions.set(segment.id.toUpperCase(), segment.sourceLine);
+  const list = parsed.images ?? parsed.shots;
+  const shots: DirectedShot[] = [];
+  if (!Array.isArray(list)) return { v: 1, shots };
+
+  for (let index = 0; index < list.length && shots.length < Math.max(1, maxImages); index += 1) {
+    const rawItem = list[index];
+    if (!rawItem || typeof rawItem !== 'object' || Array.isArray(rawItem)) continue;
+    const item = rawItem as Record<string, unknown>;
+    const position = typeof item.position === 'string' ? item.position.trim().toUpperCase() : '';
+    if (!position || !positions.has(position)) continue;
+    // 景别只认四选一:模型偶尔自创 "extreme macro" 这种词,直接写进 Base 会变成无意义 tag,
+    // 无意义 tag 在 NAI 里不报错、只是让画面偏离。认不出就退回能看全身又看得见手的 cowboy shot。
+    const rawScale = typeof item.scale === 'string' ? item.scale.trim().toLowerCase() : '';
+    const scale = DIRECTOR_SCALES.includes(rawScale as (typeof DIRECTOR_SCALES)[number])
+      ? rawScale
+      : 'cowboy shot';
+    const place = typeof item.place === 'string' ? item.place.trim() : '';
+    const charactersRaw = item.characters ?? item.members ?? item.cast;
+    const characters: DirectedCharacter[] = [];
+    if (Array.isArray(charactersRaw)) {
+      for (const rawCharacter of charactersRaw.slice(0, 8)) {
+        if (!rawCharacter || typeof rawCharacter !== 'object' || Array.isArray(rawCharacter)) continue;
+        const entry = rawCharacter as Record<string, unknown>;
+        const name = typeof entry.name === 'string' ? entry.name.trim() : '';
+        if (!name) continue;
+        characters.push({
+          name,
+          expression: typeof entry.expression === 'string' ? entry.expression.trim() : '',
+          gaze: typeof entry.gaze === 'string' ? entry.gaze.trim() : '',
+          action: typeof entry.action === 'string' ? entry.action.trim() : '',
+          source: typeof entry.source === 'string' ? entry.source.trim() : '',
+          target: typeof entry.target === 'string' ? entry.target.trim() : '',
+          omitFeatures: sanitizeOmitFeatures(entry.omitFeatures),
+        });
+      }
+    }
+    if (!characters.length) continue;
+    shots.push({
+      position,
+      sourceLine: positions.get(position)!,
+      scale,
+      place,
+      characters,
+    });
+  }
+  return { v: 1, shots };
 }

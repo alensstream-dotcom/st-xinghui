@@ -351,6 +351,23 @@ describe('NAI V5 support', () => {
     expect(positive.use_order).toBe(true);
   });
 
+  it('carries per-character uc into char_captions so 防复穿/防串色 真的提交给 NAI', () => {
+    const settings = nai({ model: 'nai-diffusion-5-full' });
+    const params = buildNaiParameters(settings, {
+      prompt: '1girl, 1boy, bedroom',
+      characters: [
+        { name: 'A', tag: 'girl, white shirt', nl: '', uc: 'skirt, jacket' },
+        { name: 'B', tag: 'boy, black jacket', nl: '', uc: '' },
+      ],
+      seed: 7,
+    });
+    const negative = params.v4_negative_prompt as {
+      caption: { char_captions: Array<{ char_caption: string }> };
+    };
+    expect(negative.caption.char_captions[0].char_caption).toBe('skirt, jacket');
+    expect(negative.caption.char_captions[1].char_caption).toBe('');
+  });
+
   // V5 不支持 Vibe Transfer:有 v5 编码也不发,整组记为跳过
   it('skips vibes on V5 even when a V5 encoding exists', () => {
     expect(vibeModelKey('nai-diffusion-5-full')).toBe('v5full');

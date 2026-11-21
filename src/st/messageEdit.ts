@@ -89,7 +89,8 @@ export async function applyMessageText(
   expectedChatId: string,
   expectedSwipeId: number | null,
   expectedMessage?: STMessage,
-  extraUpdate?: MessageExtraUpdate,
+  /** 单个键或多个键；多个键一次写盘，避免「正文已改、服装状态还没落」的半写状态。 */
+  extraUpdate?: MessageExtraUpdate | MessageExtraUpdate[],
 ): Promise<ApplyMessageResult> {
   const context = getContext();
   if (!context?.saveChat) return 'unavailable';
@@ -109,10 +110,17 @@ export async function applyMessageText(
   const swipeId = currentSwipeId(message);
   const previousSwipeText = swipeId !== null ? message.swipes?.[swipeId] : undefined;
   setMessageText(message, nextText);
-  if (extraUpdate) {
+  const updates = extraUpdate
+    ? Array.isArray(extraUpdate)
+      ? extraUpdate
+      : [extraUpdate]
+    : [];
+  if (updates.length) {
     const nextExtra = { ...(message.extra ?? {}) };
-    if (extraUpdate.value === undefined) delete nextExtra[extraUpdate.key];
-    else nextExtra[extraUpdate.key] = extraUpdate.value;
+    for (const update of updates) {
+      if (update.value === undefined) delete nextExtra[update.key];
+      else nextExtra[update.key] = update.value;
+    }
     message.extra = nextExtra;
   }
 
