@@ -265,11 +265,9 @@ function composeNaturalLanguage(
       : target && target !== character.name
         ? `does it to ${target}`
         : '';
-  const place = input.scale ? '' : '';
   const pieces = [action.replace(/[.。]+$/, '')];
   if (role === 'receives' && source) pieces.unshift(`as ${source} `);
   if (role.startsWith('does it to')) pieces.push(`toward ${target}`);
-  if (place) pieces.push(place);
   void others;
   const sentence = pieces.join(' ').replace(/\s+/g, ' ').trim();
   return `${sentence.charAt(0).toUpperCase()}${sentence.slice(1)}.`;
@@ -279,4 +277,35 @@ export function assembleImagePrompts(input: AssembleInput): AssembledCharacter[]
   return input.director.map(character =>
     assembleCharacterPrompt(input, character, input.director),
   );
+}
+
+/**
+ * 把各角色块里的 `1girl` / `1boy` 累加成 NAI 认的人数词。
+ *
+ * 之先去重成一个 `1girl`,双女主图会被画成一个人。这里按性别分开数,再加 `s`,
+ * 顺序与 NAI 惯例一致（girls 在前、boys 在后），单人仍输出 `1girl` / `1boy`。
+ */
+export function countHeadcounts(characterTags: string[]): string[] {
+  let girls = 0;
+  let boys = 0;
+  let others = 0;
+  for (const tag of characterTags) {
+    for (const token of tag.split(',')) {
+      const trimmed = token.trim().toLowerCase();
+      const matched = /^(\d+)(girl|boy|other)s?$/.exec(trimmed);
+      if (!matched) continue;
+      const amount = Number(matched[1]) || 1;
+      if (matched[2] === 'girl') girls += amount;
+      else if (matched[2] === 'boy') boys += amount;
+      else others += amount;
+    }
+  }
+  const counts: string[] = [];
+  if (girls === 1) counts.push('1girl');
+  else if (girls > 1) counts.push(`${girls}girls`);
+  if (boys === 1) counts.push('1boy');
+  else if (boys > 1) counts.push(`${boys}boys`);
+  if (others === 1) counts.push('1other');
+  else if (others > 1) counts.push(`${others}others`);
+  return counts;
 }

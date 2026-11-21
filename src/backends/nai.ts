@@ -429,20 +429,19 @@ export function buildNaiParameters(nai: NaiRunConfig, values: NaiGenerateValues)
   } else {
     // NAI4/4.5/V5: v4 caption structure; Vibe uses a model-specific cached encoding.
     params.reference_image_multiple_cached = [];
-    const charCaptions = naiSupportsCharacterPrompts(nai.model)
-      ? (values.characters ?? []).map(character => ({
-          char_caption: characterCaption(character),
-          centers: [{ x: 0.5, y: 0.5 }],
-        }))
-      : [];
+    // 正面与负面必须从同一个过滤后的数组派生：一旦其中一处筛掉某个空角色，
+    // 用下标去另一处取值就会整体错位（A 的 uc 挂到 B 身上）。
+    const activeCharacters = naiSupportsCharacterPrompts(nai.model) ? (values.characters ?? []) : [];
+    const charCaptions = activeCharacters.map(character => ({
+      char_caption: characterCaption(character),
+      centers: [{ x: 0.5, y: 0.5 }],
+    }));
     // 角色级负面：只否掉「这一个角色身上不该出现的东西」（已脱的内衣、别人的外套）。
     // 挂到全局 negative 会把另一个真穿着它的人一起否掉，所以必须按 char_captions 下标对齐。
-    const charNegatives = charCaptions.map((_, index) => {
-      const uc = naiSupportsCharacterPrompts(nai.model)
-        ? (values.characters?.[index]?.uc ?? '').trim()
-        : '';
-      return { char_caption: uc, centers: [{ x: 0.5, y: 0.5 }] };
-    });
+    const charNegatives = activeCharacters.map(character => ({
+      char_caption: (character.uc ?? '').trim(),
+      centers: [{ x: 0.5, y: 0.5 }],
+    }));
     params.characterPrompts = [];
     params.v4_prompt = {
       caption: { base_caption: prompt, char_captions: charCaptions },

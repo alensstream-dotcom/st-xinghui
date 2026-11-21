@@ -6,7 +6,7 @@ import {
   resolveCharAnchors,
   type PositionedCharOp,
 } from '@/autoTag/charAnchors';
-import { assembleImagePrompts } from '@/autoTag/assemblePrompt';
+import { assembleImagePrompts, countHeadcounts } from '@/autoTag/assemblePrompt';
 import { prepareTargetText, type TargetSegment } from '@/autoTag/clean';
 import { naiStoryProfiles } from '@/autoTag/naiStory';
 import { beginGeneration, clearGeneration, consumeGeneration } from '@/autoTag/generationGate';
@@ -65,6 +65,7 @@ import { getTagGenChannel, isCurrentChatExcluded, settings, type ApiChannel } fr
 import {
   BBI_OUTFIT_EXTRA_KEY,
   buildOutfitSnapshotText,
+  readOutfitFloorDelta,
   makeOutfitFloorDelta,
   outfitAtPosition,
   outfitStatesBeforeFloor,
@@ -310,15 +311,10 @@ async function runDualChannel(params: {
         ...(character.omitFeatures.length ? { omitFeatures: character.omitFeatures } : {}),
       }));
     if (!characters.length) continue;
-    // 人数由角色块的血统词推出来:NAI 的 Base 必须写清几个人,否则同一段正文会被画成三只手。
-    const counts = new Set<string>();
-    for (const character of assembled) {
-      for (const token of character.tag.split(',')) {
-        const trimmed = token.trim();
-        if (/^\d+(?:girl|boy|other)s?$/i.test(trimmed)) counts.add(trimmed);
-      }
-    }
-    const baseTag = [...counts, shot.place, shot.scale].filter(Boolean).join(', ');
+    // 人数按性别累加,不是去重:两个女角必须写成 2girls,写成 1girl 会让 NAI 少画一个人、
+    // 或者把两个人糊成一个人。
+    const headcount = countHeadcounts(assembled.map(character => character.tag));
+    const baseTag = [...headcount, shot.place, shot.scale].filter(Boolean).join(', ');
     images.push({
       position: shot.position,
       sourceLine: shot.sourceLine,
@@ -475,6 +471,7 @@ async function runForFloor(floor: number, opts: RunOptions = {}): Promise<void> 
     const profile = autoTagProfile();
     const previousEntries = charTagsBeforeFloor(slot ? floor + 1 : floor);
     const previousDelta = readCharTagFloorDelta(message);
+    const previousOutfitDelta = readOutfitFloorDelta(message);
     const storyProfiles = profile.naiCharPrompts
       ? naiStoryProfiles(previousEntries, previousDelta, swipeId ?? 0)
       : undefined;
@@ -719,7 +716,11 @@ async function runForFloor(floor: number, opts: RunOptions = {}): Promise<void> 
       return;
     }
     // 没有图片、没有角色变化、也没有旧楼层变化要清理时,保持原来的无写入早退。
-    if (!plan.images.length && !floorOps.length && !previousDelta && !outfitOps.length) {
+    // 重跑同一楼时,上次留下的服装记录必须能被清掉:否则这次没换衣服,旧记录继续生效,
+    // 后面几十楼都按「已经脱了」画。只清属于当前 swipe 的那份,另一个 swipe 的记录留着。
+    const staleOutfitDelta =
+      previousOutfitDelta && previousOutfitDelta.swipe === (swipeId ?? 0) ? previousOutfitDelta : null;
+    if (!plan.images.length && !floorOps.length && !previousDelta && !outfitOps.length && !staleOutfitDelta) {
       if (opts.manual) toastr.info('模型认为本楼没有值得插图的画面', '星绘');
       else console.debug(`[星绘] 第 ${floor} 楼无需插图`);
       return;
@@ -782,7 +783,9 @@ async function runForFloor(floor: number, opts: RunOptions = {}): Promise<void> 
             },
             ...(outfitOps.length
               ? [{ key: BBI_OUTFIT_EXTRA_KEY, value: makeOutfitFloorDelta(outfitOps, swipeId ?? 0) }]
-              : []),
+              : staleOutfitDelta
+                ? [{ key: BBI_OUTFIT_EXTRA_KEY, value: undefined }]
+                : []),
           ],
     );
     if (result === 'saved') {

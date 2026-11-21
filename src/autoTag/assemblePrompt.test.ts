@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { assembleCharacterPrompt, assembleImagePrompts, type AssembleInput } from '@/autoTag/assemblePrompt';
+import { assembleCharacterPrompt, assembleImagePrompts, countHeadcounts, type AssembleInput } from '@/autoTag/assemblePrompt';
 import { emptyCharFields, type CharTagEntry } from '@/state/charTags';
 import type { CharOutfitState, OutfitLayerState } from '@/state/outfitState';
 
@@ -160,5 +160,23 @@ describe('本地提示词编译器', () => {
     expect(withAction.nl).toBe('Kneels on the bed.');
     const noAction = assembleCharacterPrompt(input({}), { name: '温岚' }, []);
     expect(noAction.nl).toBe('');
+  });
+});
+describe('人数词累加(不是去重)', () => {
+  it('两个女角是 2girls,不是一个 1girl', () => {
+    expect(countHeadcounts(['1girl, black hair', '1girl, silver hair'])).toEqual(['2girls']);
+  });
+
+  it('一女一男分开写', () => {
+    expect(countHeadcounts(['1girl, white shirt', '1boy, black jacket'])).toEqual(['1girl', '1boy']);
+  });
+
+  it('三人以上与其它性别也照常', () => {
+    expect(countHeadcounts(['1girl', '1girl', '1girl'])).toEqual(['3girls']);
+    expect(countHeadcounts(['1boy', '1boy', '1other'])).toEqual(['2boys', '1other']);
+  });
+
+  it('没有血统词就不发明人数', () => {
+    expect(countHeadcounts(['black hair, white dress'])).toEqual([]);
   });
 });

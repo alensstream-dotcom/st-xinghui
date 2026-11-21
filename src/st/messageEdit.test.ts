@@ -12,6 +12,37 @@ function installContext(context: Record<string, unknown>): void {
 afterEach(() => vi.unstubAllGlobals());
 
 describe('safe message editing', () => {
+  it('writes several extra keys in one pass and deletes one when value is undefined', async () => {
+    const message = {
+      name: 'Char',
+      is_user: false,
+      is_system: false,
+      mes: '原文',
+      swipes: ['原文'],
+      swipe_id: 0,
+      extra: { bbiCharTags: 'old-char-delta', bbiOutfitOps: 'stale-outfit-delta', keepMe: 1 },
+    };
+    const saveChat = vi.fn(async () => undefined);
+    installContext({
+      chat: [message],
+      getCurrentChatId: () => 'chat-a',
+      saveChat,
+      eventSource: { emit: vi.fn(async () => undefined) },
+      eventTypes: { MESSAGE_EDITED: 'edited', MESSAGE_UPDATED: 'updated' },
+    });
+
+    await expect(
+      applyMessageText(0, text => text, 'chat-a', 0, message, [
+        { key: 'bbiCharTags', value: { v: 1, ops: [] } },
+        // 重跑后没有换衣动作:必须把上次的服装记录显式删掉
+        { key: 'bbiOutfitOps', value: undefined },
+      ]),
+    ).resolves.toBe('saved');
+    expect(message.extra?.bbiOutfitOps).toBeUndefined();
+    expect(message.extra?.bbiCharTags).toEqual({ v: 1, ops: [] });
+    expect(message.extra?.keepMe).toBe(1);
+  });
+
   it('updates mes and the active swipe, then emits edit/update events', async () => {
     const message = {
       name: 'Char',
