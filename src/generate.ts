@@ -26,7 +26,7 @@ import type { ImageCharacterPrompt } from '@/autoTag/protocol';
 import { comfySimpleParams, composeNegative, composePositive, validateSimpleConfig, type SimpleGenValues } from '@/backends/comfyTemplates';
 import { generateComfyImage, randomSeed, type ComfyImageResult } from '@/backends/comfyui';
 import { buildMossPrompt, type ComicLayout } from '@/backends/mossLayout';
-import { generateNaiImage, naiRandomSeed, naiSupportsCharacterPrompts } from '@/backends/nai';
+import { fullNegativePrompt, generateNaiImage, naiRandomSeed, naiSupportsCharacterPrompts } from '@/backends/nai';
 import { effectiveOrientation, parseSize, pickSize, type Orientation } from '@/backends/size';
 import { acquireNaiSlot } from '@/floor/genQueue';
 import type { GenerationMeta } from '@/generationMeta';
@@ -55,6 +55,11 @@ export interface GenerateInput {
    * MOSS layout JSON——bbox 是像素坐标,画幅定了才算得出来,所以不能提前存进 tag。
    */
   comic?: ComicLayout;
+  /**
+   * 只在本次额外追加的负面词(立绘防畸变、世界观防穿帮等)。
+   * NAI 的负面本来只取渠道/画师串配置,不吃 negative;这里的词会与配置负面合并后下发。
+   */
+  extraNegative?: string;
 }
 
 /** 生成过程中的进度上报(卡片用它显示排队位置与退避进度)。 */
@@ -238,8 +243,20 @@ export async function generateImage(
     let result: ComfyImageResult;
     let meta: GenerationMeta;
     if (isNai) {
+      // 渠道负面 + 本次额外负面:立绘要压鱼眼/俯角,世界观要压穿帮单品
+      let naiConn = effectiveNai();
+      const extraNegative = input.extraNegative?.trim();
+      if (extraNegative) {
+        const merged = [fullNegativePrompt(naiConn), extraNegative].filter(Boolean).join(', ');
+        naiConn = {
+          ...naiConn,
+          artist: naiConn.artist
+            ? { ...naiConn.artist, negative: merged }
+            : { id: 'extra-negative', name: '额外负面', prompt: '', quality: '', negative: merged },
+        };
+      }
       const output = await generateNaiImage(
-        effectiveNai(),
+        naiConn,
         // characters 原样透传:不支持的模型由 buildNaiParameters 自己滤掉(同一口径
         // naiSupportsCharacterPrompts),在这儿再滤一遍只会多一处会漂的判据
         { prompt: input.prompt, nl: input.nl ?? '', characters, seed: input.seed, size },

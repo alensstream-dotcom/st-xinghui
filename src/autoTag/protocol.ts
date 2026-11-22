@@ -453,6 +453,8 @@ export interface PositionedOutfitOp {
 export interface StateSyncPlan {
   changes: CharChange[];
   outfitOps: PositionedOutfitOp[];
+  /** 首楼 AI 识别的世界观预设;合法才带,用户锁定后由调用方决定是否采纳。 */
+  worldPreset?: string;
 }
 
 const VALID_OUTFIT_LAYERS: ReadonlySet<string> = new Set<string>(OUTFIT_LAYER_KEYS);
@@ -569,5 +571,6 @@ export function parseStateSyncPlan(
 
   const changes = parseChanges(parsed.changes, positions, rules.knownMaleProfiles);
   const outfitOps = parseOutfitOps(parsed.outfitOps, positions);
-  return { changes, outfitOps };
+  const worldPreset = typeof parsed.worldPreset === 'string' ? parsed.worldPreset.trim() : '';
+  return { changes, outfitOps, ...(worldPreset ? { worldPreset } : {}) };
 }

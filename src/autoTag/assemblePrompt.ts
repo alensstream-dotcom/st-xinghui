@@ -150,6 +150,12 @@ function compileOutfitForFrame(
     }
   }
 
+  // 外衣判定为 removed 就是上半身没有外衣:无论内衣状态如何,都要把「上衣类」压进角色负面,
+  // 否则 NAI 会按世界观默认衣装自己补一件衬衣/汉服上衣,出现「脱了又穿回去」的漂移。
+  if (outer?.status === 'removed') {
+    negative.push('shirt', 'blouse', 'dress', 'coat', 'robe', 'hanfu');
+  }
+
   if (bra) {
     if (bra.status === 'worn' && outer?.status !== 'worn' && bra.tag) positive.push(bra.tag);
     if (bra.status === 'disheveled' && bra.tag) {

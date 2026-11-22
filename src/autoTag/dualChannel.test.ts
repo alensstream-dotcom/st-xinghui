@@ -98,6 +98,27 @@ describe('状态表通道的解析', () => {
   });
 });
 
+describe('状态表通道的世界观识别', () => {
+  it('首楼带 worldPreset 时原样透出,没带时字段不出现', () => {
+    const withPreset = parseStateSyncPlan(
+      '{"worldPreset":"chinese_ancient","changes":[],"outfitOps":[]}',
+      segments,
+      {},
+    );
+    expect(withPreset.worldPreset).toBe('chinese_ancient');
+    expect(withPreset.changes).toEqual([]);
+    expect(withPreset.outfitOps).toEqual([]);
+
+    const without = parseStateSyncPlan('{"changes":[],"outfitOps":[]}', segments, {});
+    expect('worldPreset' in without).toBe(false);
+  });
+
+  it('后面的楼层不再重复输出,也不会把已有值清成空串', () => {
+    const blank = parseStateSyncPlan('{"worldPreset":"   ","changes":[],"outfitOps":[]}', segments, {});
+    expect('worldPreset' in blank).toBe(false);
+  });
+});
+
 describe('导演通道的输出(走 parseImagePlan)', () => {
   it('保留完整 Base.tag/nl 与角色 tag/nl,位置不在正文里就跳过', () => {
     const plan = parseImagePlan(

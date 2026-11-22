@@ -1,3 +1,4 @@
+import { runChannelWithRetries } from './channelRetry';
 import { requestCompletion, requestViaMainApi, type ChatMsg } from '@/api/client';
 import { readBookMemory } from '@/autoTag/bookMemory';
 import {
@@ -61,6 +62,7 @@ import {
   stripImageTags,
 } from '@/st/imageTagRegex';
 import { getTagGenChannel, isCurrentChatExcluded, settings, type ApiChannel } from '@/state/settings';
+import { applyDetectedWorldPreset, readWorldAnchor } from '@/state/worldAnchor';
 import {
   BBI_OUTFIT_EXTRA_KEY,
   buildOutfitSnapshotText,
@@ -268,6 +270,8 @@ async function runDualChannel(params: {
   maleNames?: ReadonlySet<string>;
   size: 'portrait' | 'landscape';
   signal: AbortSignal;
+  /** 每个通道各自的重试次数(复用设置里的 retryCount)。 */
+  retries: number;
 }): Promise<{ plan: ImagePlan; outfitOps: StoredOutfitOp[] }> {
   const outfitsBefore = outfitStatesBeforeFloor(params.floor);
   const outfitSnapshotText = buildOutfitSnapshotText(outfitsBefore);
@@ -281,22 +285,52 @@ async function runDualChannel(params: {
 
   const stateOpts = { signal: params.signal, source: `服装状态表(第 ${params.floor} 楼)` };
   const directorOpts = { signal: params.signal, source: `镜头导演(第 ${params.floor} 楼)` };
-  let stateRaw: string;
+  // 分通道独立重试:只重试失败的那一条,已成功的结果原样保留。
+  // 以前两路共用一个 try,导演偶发超时会把已经填好的服装表一起丢掉,整楼白跑。
+  const runChannel = (messages: ChatMsg[], opts: { signal: AbortSignal; source: string }): Promise<string> =>
+    runChannelWithRetries(next => dispatchLlm(messages, params.channel, next), {
+      retries: params.retries,
+      signal: opts.signal,
+      source: opts.source,
+    });
+
+  let stateRaw = '';
   let directorRaw: string;
   if (params.channel) {
-    [stateRaw, directorRaw] = await Promise.all([
-      dispatchLlm(stateMsgs, params.channel, stateOpts),
-      dispatchLlm(directorMsgs, params.channel, directorOpts),
+    const [stateResult, directorResult] = await Promise.allSettled([
+      runChannel(stateMsgs, stateOpts),
+      runChannel(directorMsgs, directorOpts),
     ]);
+    if (stateResult.status === 'fulfilled') stateRaw = stateResult.value;
+    else {
+      // 服装表只影响「这一格穿什么」,不该让整楼生图作废:退化为空增量,
+      // 但绝不能清空本楼已有的 BBI_OUTFIT_EXTRA_KEY(那是历史回放的基础)。
+      console.warn(`[星绘] 第 ${params.floor} 楼服装状态表通道失败,按空增量继续`, stateResult.reason);
+      toastr.warning('服装状态表这一楼没取到，本次只按已有状态出图（不会清空本楼记录）', '星绘');
+    }
+    if (directorResult.status === 'fulfilled') directorRaw = directorResult.value;
+    else throw new Error(`镜头导演通道失败：${(directorResult.reason instanceof Error ? directorResult.reason.message : String(directorResult.reason))}`);
   } else {
     // 走酒馆主 API 时顺序发:同一条会话并发两发会互相顶掉排队位置。
-    stateRaw = await dispatchLlm(stateMsgs, null, stateOpts);
-    directorRaw = await dispatchLlm(directorMsgs, null, directorOpts);
+    try {
+      stateRaw = await runChannel(stateMsgs, stateOpts);
+    } catch (error) {
+      console.warn(`[星绘] 第 ${params.floor} 楼服装状态表通道失败,按空增量继续`, error);
+      toastr.warning('服装状态表这一楼没取到，本次只按已有状态出图（不会清空本楼记录）', '星绘');
+    }
+    directorRaw = await runChannel(directorMsgs, directorOpts);
   }
 
   const statePlan = parseStateSyncPlan(stateRaw, params.segments, {
     knownMaleProfiles: params.maleNames,
   });
+  // 首楼识别:用户手动锁过就不覆盖(applyDetectedWorldPreset 内部判断)
+  if (statePlan.worldPreset) {
+    const applied = applyDetectedWorldPreset(statePlan.worldPreset);
+    if (applied.lockedByUser === false && applied.presetId !== input.world.presetId) {
+      console.info(`[星绘] 已识别本聊天世界观：${applied.label}`);
+    }
+  }
   const directorPlan = parseImagePlan(
     directorRaw,
     params.segments,
@@ -487,26 +521,32 @@ async function runForFloor(floor: number, opts: RunOptions = {}): Promise<void> 
     const promptOptions = slot
       ? { ...settings.autoTag, minImages: 1, maxImages: 1 }
       : settings.autoTag;
-    const messages = await buildAutoTagMessages(
-      context,
-      floor,
-      promptOptions,
-      memory,
-      preparedTarget,
-      anchors.text,
-      slot ? buildSlotTaskNote(rawSource, slot.seq) : '',
-      profile,
-    );
     const channel = getTagGenChannel();
-    // NAI 4.5/V5 且没走单槽重写时,先试「状态表 + 导演」双并发;任何一路失败就回落到单请求。
-    // 漫画不分页双发(一页一个分镜,拆开反而乱),单槽重写只要一张、也没必要多两倍请求。
+    const world = readWorldAnchor();
+    // V2:普通整楼生图一律走双通道,不再有「双通道失败就回落老单通道」这条路——
+    // 回落会让提示词忽厚忽薄、模型行为忽好忽坏,还掩盖真正的失败原因。
+    // 漫画仍走单通道(一页一个分镜,拆成两路反而乱);单槽重写只要一张,也走单通道。
+    const dualEligible = !profile.comic && !slot;
+    // 双通道下这一段完全不需要构造(白跑一次组装 = 白烧一次提示词预算)
+    let messages: ChatMsg[] = [];
+    if (!dualEligible) {
+      messages = await buildAutoTagMessages(
+        context,
+        floor,
+        promptOptions,
+        memory,
+        preparedTarget,
+        anchors.text,
+        slot ? buildSlotTaskNote(rawSource, slot.seq) : '',
+        profile,
+      );
+    }
     let plan: ImagePlan | null = null;
     let lastError = '';
-    /** 本楼五层服装增量;单请求路径下恒为空,由写回落盘时一并保存。 */
+    /** 本楼五层服装增量;单通道路径下恒为空,由写回落盘时一并保存。 */
     let outfitOps: StoredOutfitOp[] = [];
-    const dualEligible = !profile.comic && !slot && profile.naiCharPrompts;
     if (dualEligible) {
-      try {
+      {
         const dual = await runDualChannel({
           channel: channel ?? null,
           floor,
@@ -520,6 +560,7 @@ async function runForFloor(floor: number, opts: RunOptions = {}): Promise<void> 
             nlOn: profile.nl,
             minImages: promptOptions.minImages,
             maxImages: promptOptions.maxImages,
+            world,
           },
           segments: preparedTarget.segments,
           entries: anchors.entries,
@@ -533,16 +574,14 @@ async function runForFloor(floor: number, opts: RunOptions = {}): Promise<void> 
           maleNames: storyProfiles?.maleNames,
           size: profile.lockedSize ?? 'portrait',
           signal: controller.signal,
+          retries: Math.max(0, Math.floor(Number(settings.autoTag.retryCount) || 0)),
         });
         plan = dual.plan;
         outfitOps = dual.outfitOps;
-      } catch (error) {
-        if (controller.signal.aborted) {
-          processed.delete(identity);
-          return;
-        }
-        lastError = error instanceof Error ? error.message : String(error);
-        console.warn(`[星绘] 第 ${floor} 楼双通道失败,回落到单请求路径`, error);
+      }
+      if (controller.signal.aborted) {
+        processed.delete(identity);
+        return;
       }
     }
     // 失败重试:请求异常与「返回无法解析/校验不通过」都视为可重试的异常(后者常见于模型没遵守协议);
@@ -550,7 +589,7 @@ async function runForFloor(floor: number, opts: RunOptions = {}): Promise<void> 
     // 解析/校验放进 validate 回调:不过则请求历史如实记为失败(而非「HTTP 拿到文本」的绿色成功),
     // 错误原样抛回这里走重试——显示与行为同口径。
     const retries = Math.max(0, Math.floor(Number(settings.autoTag.retryCount) || 0));
-    for (let attempt = 0; attempt <= retries && !plan; attempt++) {
+    for (let attempt = 0; !dualEligible && attempt <= retries && !plan; attempt++) {
       if (controller.signal.aborted) {
         processed.delete(identity);
         return;

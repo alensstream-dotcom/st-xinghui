@@ -4,6 +4,7 @@ import { getTagGenChannel, settings } from '@/state/settings';
 import type { CharTagEntry, CharTagField } from '@/state/charTags';
 import { readBookMemory } from './bookMemory';
 import { cleanHistoryText } from './clean';
+import { defaultWorldAnchor, readWorldAnchor, worldAnchorBlock, type WorldAnchorConfig } from '@/state/worldAnchor';
 
 /** 重Roll 只覆盖这五个固定外貌字段;sex/outfit/fandom/raw/nl 不在其中。 */
 export const REROLL_FIELDS = ['hair', 'eyes', 'skin', 'body', 'extra'] as const;
@@ -21,6 +22,8 @@ export interface RerollRequest {
   otherEntries: CharTagEntry[];
   /** 用户偏好(可选),例如「微黑皮短发运动系」。 */
   userHint?: string;
+  /** 本聊天世界观锚点(不传则现读):决定发色/耳饰/服装的时代边界。 */
+  world?: WorldAnchorConfig;
   signal?: AbortSignal;
 }
 
@@ -91,7 +94,7 @@ function describeEntry(label: string, entry: CharTagEntry | null): string {
   return `${label}: ${entry.name}\n${lines.length ? lines.join('\n') : '（五个字段都空）'}`;
 }
 
-function buildRerollMessages(request: RerollRequest, excerpts: string): ChatMsg[] {
+export function buildRerollMessages(request: RerollRequest, excerpts = ''): ChatMsg[] {
   const { name, currentEntry, otherEntries, userHint } = request;
   const memory = (() => {
     try {
@@ -111,8 +114,10 @@ function buildRerollMessages(request: RerollRequest, excerpts: string): ChatMsg[
     .map(entry => describeEntry('其他角色', entry))
     .join('\n\n');
 
+  const world = request.world ?? readWorldAnchorOr(defaultWorldAnchor());
   const body = [
     `【目标角色】${name}`,
+    `【本聊天世界观（外貌与饰品不得越界）】\n${worldAnchorBlock(world)}`,
     describeEntry('【旧外貌（用户不满意,需要在未写死的维度上明显改掉）】', currentEntry),
     others ? `【同聊天其他角色（必须错开 3 项）】\n${others}` : '',
     memory ? `【星绘书角色参考】\n${clamp(memory, 1200)}` : '',
@@ -127,6 +132,15 @@ function buildRerollMessages(request: RerollRequest, excerpts: string): ChatMsg[
     { role: 'system', content: REROLL_SYSTEM_PROMPT },
     { role: 'user', content: body },
   ];
+}
+
+/** 读世界观:测试环境没有聊天元数据时回落到默认现代。 */
+function readWorldAnchorOr(fallback: WorldAnchorConfig): WorldAnchorConfig {
+  try {
+    return readWorldAnchor();
+  } catch {
+    return fallback;
+  }
 }
 
 /** 从模型输出里抠出第一个 JSON 对象(容忍代码块与前后废话)。 */

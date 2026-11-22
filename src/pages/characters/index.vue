@@ -31,6 +31,15 @@ import {
   upsertGlobalCharTag,
 } from '@/state/globalCharTags';
 import { getContext } from '@/st/context';
+import {
+  WORLD_PRESETS,
+  WORLD_PRESET_IDS,
+  readWorldAnchor,
+  saveWorldAnchor,
+  selectWorldPreset,
+  toCustomWorldAnchor,
+  type WorldAnchorConfig,
+} from '@/state/worldAnchor';
 import { computed, ref, watch } from 'vue';
 
 /**
@@ -232,6 +241,7 @@ async function rerollAppearance() {
       currentEntry: current,
       otherEntries: others,
       userHint: rerollHint.value,
+      world: world.value,
     });
     d.fields.hair = next.hair;
     d.fields.eyes = next.eyes;
@@ -245,6 +255,72 @@ async function rerollAppearance() {
   } finally {
     rerolling.value = false;
   }
+}
+
+/* ============ 本聊天世界观锚点 ============ */
+
+/** 读不到聊天元数据(纯单测环境)时退回现代默认,不让页面崩。 */
+function safeReadWorld(): WorldAnchorConfig {
+  try {
+    return readWorldAnchor();
+  } catch {
+    return WORLD_PRESETS.modern;
+  }
+}
+
+const world = ref<WorldAnchorConfig>(safeReadWorld());
+/** 预设下拉的选项:六个内置 + 自定义(自定义只在保存过自定义配置后可选)。 */
+const worldOptions = computed(() => [
+  ...WORLD_PRESET_IDS.map(id => ({ id: id as string, label: WORLD_PRESETS[id].label })),
+  { id: 'custom', label: '自定义' },
+]);
+/** 自定义模式的三个自由文本(直接编辑最近一次的自定义配置)。 */
+const customWorld = ref({
+  characterGuidelines: world.value.characterGuidelines,
+  outfitMappingHint: world.value.outfitMappingHint,
+  portraitAttire: world.value.portraitAttire,
+  negativeGuardrails: world.value.negativeGuardrails,
+});
+
+function syncCustomFromWorld() {
+  customWorld.value = {
+    characterGuidelines: world.value.characterGuidelines,
+    outfitMappingHint: world.value.outfitMappingHint,
+    portraitAttire: world.value.portraitAttire,
+    negativeGuardrails: world.value.negativeGuardrails,
+  };
+}
+
+/** 换预设:立刻锁定并写回聊天元数据(AI 以后不得覆盖)。 */
+function onWorldPresetChange(event: Event) {
+  const id = (event.target as HTMLSelectElement | null)?.value ?? '';
+  if (id === 'custom') {
+    world.value = toCustomWorldAnchor(world.value);
+    syncCustomFromWorld();
+    toastr.success('已切到自定义世界观,改完三个字段即生效', '星绘');
+    return;
+  }
+  const preset = WORLD_PRESET_IDS.find(item => item === id);
+  if (!preset) return;
+  world.value = selectWorldPreset(preset);
+  syncCustomFromWorld();
+  toastr.success(`世界观已锁定:${world.value.label}`, '星绘');
+}
+
+/** 自定义字段改动即时落盘(不锁定的话 AI 首楼还能改;自定义本身即锁定)。 */
+function applyCustomWorld() {
+  const next: WorldAnchorConfig = {
+    ...world.value,
+    presetId: 'custom',
+    label: world.value.label || '自定义',
+    lockedByUser: true,
+    characterGuidelines: customWorld.value.characterGuidelines,
+    outfitMappingHint: customWorld.value.outfitMappingHint,
+    portraitAttire: customWorld.value.portraitAttire,
+    negativeGuardrails: customWorld.value.negativeGuardrails,
+  };
+  world.value = next;
+  saveWorldAnchor(next);
 }
 
 /* ============ 立绘:列表封面 + 弹窗预览 ============ */
@@ -279,19 +355,29 @@ watch(
   { immediate: true },
 );
 
-/** 把当前草稿拼成条目(只用于生成立绘,不落盘)。 */
-function draftEntry(name: string): CharTagEntry {
-  const d = draft.value!;
+/**
+ * 把草稿拼成条目(只用于生成立绘/重Roll,不落盘)。
+ * 字段做深拷贝:出图要跑十几秒,期间用户可能继续改表单——生成必须用点击那一刻的快照,
+ * 否则会把「改到一半的表单」和「已经发出去的请求」混在一起。
+ */
+function snapshotEntry(name: string, d: NonNullable<typeof draft.value>, portraitKey?: string): CharTagEntry {
   return {
     name,
-    fields: { ...d.fields },
+    fields: JSON.parse(JSON.stringify(d.fields)) as CharTagEntry['fields'],
     raw: d.raw,
     nl: d.nl,
     source: draftSource.value,
     desc: draftDesc.value,
     history: [],
-    ...(draftPortraitKey.value ? { portraitKey: draftPortraitKey.value } : {}),
+    ...(portraitKey ? { portraitKey } : {}),
   };
+}
+
+/** 把当前草稿拼成条目(只用于生成立绘,不落盘)。 */
+function draftEntry(name: string): CharTagEntry {
+  const d = draft.value;
+  if (!d) throw new Error('没有打开的角色');
+  return snapshotEntry(name, d, draftPortraitKey.value || undefined);
 }
 
 /** 列表卡片:生成立绘并立刻写进对应层级的库。 */
@@ -322,8 +408,15 @@ async function refreshDraftPortrait() {
     return;
   }
   portraitBusy.value = name;
+  // 跑之前先记住是哪个角色、哪一份字段:回来时若已经切换角色就丢弃,别把 A 的立绘画进 B 的卡片
+  const editing = editingName.value;
+  const snapshot = snapshotEntry(name, d, draftPortraitKey.value || undefined);
   try {
-    const result = await generateCharacterPortrait(draftEntry(name));
+    const result = await generateCharacterPortrait(snapshot);
+    if (editingName.value !== editing || !draft.value) {
+      toastr.info('角色已切换,这次立绘已丢弃', '星绘');
+      return;
+    }
     draftPortrait.value = result.dataUrl;
     draftPortraitKey.value = result.key;
     markManual();
@@ -345,21 +438,33 @@ async function rerollAndPortrait() {
     return;
   }
   rerolling.value = true;
+  const editing = editingName.value;
+  const snapshot = snapshotEntry(name, d);
   try {
     const others = chatEntries.value.filter(entry => entry.name !== name);
     const next = await rerollCharacterAppearance({
       name,
-      currentEntry: draftEntry(name),
+      currentEntry: snapshot,
       otherEntries: others,
       userHint: rerollHint.value,
     });
+    if (editingName.value !== editing || !draft.value) {
+      toastr.info('角色已切换,这次重Roll已丢弃', '星绘');
+      return;
+    }
     d.fields.hair = next.hair;
     d.fields.eyes = next.eyes;
     d.fields.skin = next.skin;
     d.fields.body = next.body;
     d.fields.extra = next.extra;
     markManual();
-    const result = await generateCharacterPortrait(draftEntry(name));
+    // 立绘必须按刚写回的新字段出图,所以这里重新取一次快照
+    const refreshed = snapshotEntry(name, d);
+    const result = await generateCharacterPortrait(refreshed);
+    if (editingName.value !== editing || !draft.value) {
+      toastr.info('角色已切换,这张立绘已丢弃', '星绘');
+      return;
+    }
     draftPortrait.value = result.dataUrl;
     draftPortraitKey.value = result.key;
     toastr.success('新形象与新立绘已生成,满意就点「保存」', '星绘');
@@ -524,6 +629,40 @@ function sourceLabel(entry: CharTagEntry): string {
     <p class="bbi-field-hint">
       角色固定外貌库:生成 tag 时 AI 照抄库中字段,@角色名 占位符也会被替换为库中最新外貌,稳定不漂移。
     </p>
+
+    <!-- ===== 本聊天世界观锚点 ===== -->
+    <div class="bbi-world-card">
+      <div class="bbi-world-head">
+        <span class="bbi-field-label">本聊天世界观</span>
+        <span class="bbi-world-tag" :class="{ 'is-locked': world.lockedByUser }">
+          {{ world.lockedByUser ? '已锁定' : '自动识别' }}
+        </span>
+        <select class="bbi-world-select" :value="world.presetId" @change="onWorldPresetChange">
+          <option v-for="option in worldOptions" :key="option.id" :value="option.id">{{ option.label }}</option>
+        </select>
+      </div>
+      <p class="bbi-field-hint bbi-world-hint">
+        建档与服装按这个时代出词:古风不穿牛仔裤、赛博不披汉服;立绘也按这套素服出图。选过即锁定,AI 首楼不再改写。
+      </p>
+      <div v-if="world.presetId === 'custom'" class="bbi-world-custom">
+        <label class="bbi-field">
+          <span class="bbi-field-label">角色边界</span>
+          <BbiTextarea v-model="customWorld.characterGuidelines" :rows="2" placeholder="例:古代东方,平民与士族分层,无现代科技" @change="applyCustomWorld" />
+        </label>
+        <label class="bbi-field">
+          <span class="bbi-field-label">服装映射</span>
+          <BbiTextarea v-model="customWorld.outfitMappingHint" :rows="2" placeholder="例:现代单品一律换成汉服/道袍/铠甲" @change="applyCustomWorld" />
+        </label>
+        <label class="bbi-field">
+          <span class="bbi-field-label">立绘素服</span>
+          <BbiTextarea v-model="customWorld.portraitAttire" :rows="2" placeholder="例:plain white traditional hanfu" @change="applyCustomWorld" />
+        </label>
+        <label class="bbi-field">
+          <span class="bbi-field-label">防穿帮负面</span>
+          <BbiTextarea v-model="customWorld.negativeGuardrails" :rows="2" placeholder="例:jeans, sneakers, smartphone" @change="applyCustomWorld" />
+        </label>
+      </div>
+    </div>
 
     <!-- ===== 全局角色库 ===== -->
     <div class="bbi-char-section">
@@ -932,6 +1071,51 @@ function sourceLabel(entry: CharTagEntry): string {
 </template>
 
 <style scoped>
+/* 世界观卡片:一条横向信息栏 + 可选的自定义四字段 */
+.bbi-world-card {
+  margin: 12px 0 18px;
+  padding: 12px 14px;
+  border: 1px solid var(--SmartThemeBorderColor, #3a3a3a);
+  border-radius: 10px;
+  background: var(--black30a, rgba(0, 0, 0, 0.18));
+}
+.bbi-world-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.bbi-world-tag {
+  padding: 1px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  border: 1px solid var(--SmartThemeBorderColor, #4a4a4a);
+  opacity: 0.75;
+}
+.bbi-world-tag.is-locked {
+  border-color: var(--SmartThemeQuoteColor, #b58b4a);
+  opacity: 1;
+}
+.bbi-world-select {
+  margin-left: auto;
+  min-width: 140px;
+  padding: 3px 6px;
+  border-radius: 6px;
+  border: 1px solid var(--SmartThemeBorderColor, #4a4a4a);
+  background: var(--black50a, rgba(0, 0, 0, 0.3));
+  color: inherit;
+}
+.bbi-world-hint {
+  margin: 6px 0 0;
+  font-size: 12px;
+  opacity: 0.7;
+}
+.bbi-world-custom {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 8px 12px;
+  margin-top: 10px;
+}
 /* —— 计数药丸:与设置页版本号同款观感 —— */
 .bbi-count {
   border: 0;

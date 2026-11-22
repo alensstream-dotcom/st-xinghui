@@ -156,6 +156,29 @@ describe('本地提示词编译器：连身裙与外衣遮蔽', () => {
   });
 });
 
+describe('本地提示词编译器：脱衣后的服装漂移屏蔽', () => {
+  it('外衣判定 removed 时,把衬衣/外套类压进角色负面,不管内衣状态', () => {
+    const entries = [entry('温岚', { sex: '1girl' })];
+    const nakedTop = assembleImageCharacters(
+      image('1girl, upper body', [{ name: '温岚' }]),
+      entries,
+      new Map([outfit('温岚', { outer: { tag: 'white shirt', status: 'removed' }, bra: { tag: 'pink bra', status: 'removed' } })]),
+    );
+    const uc = nakedTop.characters[0].uc ?? '';
+    for (const word of ['shirt', 'blouse', 'dress', 'coat', 'robe', 'hanfu']) expect(uc).toContain(word);
+    expect(nakedTop.characters[0].tag).toContain('topless');
+
+    // 上半身镜头里也必须有这条屏蔽词,否则 NAI 会照世界观默认衣装补一件上衣
+    const stillPinned = assembleImageCharacters(
+      image('1girl, close-up', [{ name: '温岚' }]),
+      entries,
+      new Map([outfit('温岚', { outer: { tag: 'white shirt', status: 'removed' }, bra: worn('pink bra') })]),
+    );
+    expect(stillPinned.characters[0].uc).toContain('shirt');
+    expect(stillPinned.characters[0].tag).toContain('pink bra');
+  });
+});
+
 describe('本地提示词编译器：外貌与导演 tag 的合流', () => {
   it('顺序是固定外貌 → 五层服装 → 导演 tag,导演的动作与 source#/target# 必须留下', () => {
     const entries = [
