@@ -22,7 +22,7 @@ describe('normalizeImagePath', () => {
   it('解码并去掉前导斜杠,让 extra 与图库两侧的写法能相等', () => {
     // extra 里是服务端原样返回的未编码路径,图库那边是逐段 encodeURIComponent 的
     const fromExtra = '/user/images/星绘_爱丽丝/bbi_a_0_b-g1.png';
-    const fromGallery = 'user/images/%E6%9F%8F%E5%AE%9D%E7%BB%98_%E7%88%B1%E4%B8%BD%E4%B8%9D/bbi_a_0_b-g1.png';
+    const fromGallery = 'user/images/%E6%98%9F%E7%BB%98_%E7%88%B1%E4%B8%BD%E4%B8%9D/bbi_a_0_b-g1.png';
     expect(normalizeImagePath(fromExtra)).toBe(normalizeImagePath(fromGallery));
   });
 
@@ -34,7 +34,7 @@ describe('normalizeImagePath', () => {
 describe('missingImages', () => {
   it('标记后按归一化口径命中,编码与否都认', () => {
     markImageMissing('/user/images/星绘_爱丽丝/a.png');
-    expect(isImageMissing('user/images/%E6%9F%8F%E5%AE%9D%E7%BB%98_%E7%88%B1%E4%B8%BD%E4%B8%9D/a.png')).toBe(true);
+    expect(isImageMissing('user/images/%E6%98%9F%E7%BB%98_%E7%88%B1%E4%B8%BD%E4%B8%9D/a.png')).toBe(true);
     expect(isImageMissing('/user/images/星绘_爱丽丝/a.png')).toBe(true);
   });
 
@@ -103,7 +103,7 @@ describe('confirmImageMissing', () => {
 
   it('编码过的路径也认得出是 user/images,并与未编码写法同键', async () => {
     vi.mocked(probeUserImage).mockResolvedValue({ exists: false });
-    const encoded = 'user/images/%E6%9F%8F%E5%AE%9D%E7%BB%98_%E7%88%B1%E4%B8%BD%E4%B8%9D/a.png';
+    const encoded = 'user/images/%E6%98%9F%E7%BB%98_%E7%88%B1%E4%B8%BD%E4%B8%9D/a.png';
     expect(await confirmImageMissing(encoded)).toBe(true);
     expect(isImageMissing(path)).toBe(true);
   });

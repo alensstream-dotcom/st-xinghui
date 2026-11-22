@@ -20,6 +20,7 @@ import type { BookMemoryContext } from '@/autoTag/bookMemory';
 import { isAiStoryMessage, isStoryMessage, type STContext } from '@/st/context';
 import type { AutoTagSettings } from '@/state/settings';
 import { worldAnchorBlock, type WorldAnchorConfig } from '@/state/worldAnchor';
+import type { CharTagEntry } from '@/state/charTags';
 import {
   activeComfyPreset,
   activeComfyPromptSet,
@@ -552,7 +553,7 @@ worldPreset 只在首楼(首次进入聊天、还没有锁定世界观时)填写
 - hair 四要素仍然要齐：① 发色原子词（black hair / brown hair / blonde hair / red hair / silver hair，必填，不许留空）；② 长度原子词（short hair / medium hair / long hair / very long hair）+ 直卷原子词（straight hair / wavy hair / curly hair，直发可不写）；③ 扎发形态（披散写 hair down；扎发优先用正背面一致的明确词：high ponytail / twin braids / side ponytail / low bun / single hair bun）；④ 刘海（blunt bangs / parted bangs / side-swept bangs / hair over one eye / forehead）。
 - 正文没明确要求时尽量不用正背面差异极大的 half updo——同一套发型从正面看像披散、从背面看像扎起，换角度就会被画成另一个发型。
 - eyes 必须写「明确瞳色 + 标准 Danbooru 眼型（tsurime / tareme / jitome / sanpaku）」，例如 "brown eyes, tareme"；严禁写 "sharp eyes" 这类没有瞳色的自造词，也不许留空。
-- body 必须写清身高与胸型比例，例如 "petite, small breasts, slender" / "tall female, athletic, medium breasts" / "curvy, voluptuous, large breasts, wide hips"。
+- body 只写 2～3 个精准核心词，写清体型与胸型即可，例如 "curvy, large breasts" / "slender, medium breasts" / "petite, small breasts" / "athletic, small breasts"。严禁堆砌 6～7 个形容词（"tall female, slender, curvy, voluptuous, long legs, wide hips, large breasts" 这种长串会让同一角色在不同图里体型忽大忽小）；除非正文明确写了身高极高，否则不要默认加 "tall female" 与 "long legs"。
 - skin 写清肤色，例如 "fair skin" / "pale skin" / "tan"。
 - extra 专门放常戴眼镜（round eyewear / semi-rimless eyewear）、常驻首饰发饰（necklace / earrings / choker / hairclip）或标志印记（mole under eye / freckles / fang / ahoge），保证跨场景稳定佩戴；只属于某套特定衣服的配饰不要写在这里，写进那一层的服装 tag。
 - 同人角色必填 fandom，格式 "character name (copyright name)"，括号原样写、不转义；原创角色留空。
@@ -563,6 +564,7 @@ worldPreset 只在首楼(首次进入聊天、还没有锁定世界观时)填写
 - 在不违背正文的前提下，正文没写明的维度里，必须在「发色发型剪影 / 眼型 / 肤色与体型原型 / extra 标志特征」这 4 项中至少错开 3 项。
 - extra 必须承担辨识度：除常戴眼镜与常驻首饰外，还要在符合人设与世界观的标志特征里挑 1～2 项写进 extra，例如 "mole under eye" / "mole under mouth" / "freckles" / "fang" / "ahoge" / "round eyewear" / "semi-rimless eyewear" / "choker" / "hair ribbon" / "hairclip" / "forehead mark" / "earrings"，避免千人一面。
 - 禁止同楼多名女角重复 "long hair, ponytail" 或 "curvy, large breasts" 这类同款组合——同框会画成同一个人。
+- 输入里带【已高频占用的特征（新女角建档必须避开）】时，其中列出 ≥2 次的发色、扎发形态、刘海、眼型、配饰，在正文没有写死的维度上一律禁止复用；必须主动换成低频或没用过的组合（high ponytail / twin braids / side braid / low bun / short hair / wavy hair，换一组瞳色与标志特征）。
 
 规则 4（五层服装：视觉指纹 + 时代世界观统一）：
 - 先按正文与设定把统一的时代与世界观定下来（校园 / 都市职场 / 古风 / 奇幻），再落实到剪裁与面料；同一个世界观里不许混进另一个时代的单品。
@@ -607,6 +609,9 @@ export function buildDirectorSystemPrompt(
       : `本楼 0～${maxImages} 张；有合格镜头就按上限给满，不要因为没有把握而只给一张。`;
   return `你是镜头导演。从「目标正文」里挑值得画的瞬间，并把这一刻镜头里看得见的东西写成 NAI 提示词。
 你不写外貌、不写服装：外貌由档案硬拼、服装由五层状态硬拼，你写了也会被替换，只会挤掉真正该写的动作。
+
+**已建档女角色的 characters[].tag 绝对禁止出现**：性别人数词（1girl / 2girls / girl）、发色发型刘海词（hair / bangs / ponytail / braids / bun）、瞳色眼型肤色词（eyes / tsurime / tareme / fair skin / tan）、体型词（petite / slender / curvy / large breasts / long legs）、任何服装词（dress / robe / hanfu / skirt / shirt / bra / pantyhose / socks / shoes…）。写了也会被程序整条剥掉，等于白写。
+characters[].nl 只描述动作、表情与空间关系；需要提到衣服时必须以【当前角色服装只读参考】为准，严禁另行发明款式、颜色或袜子。
 ${world ? `\n【本聊天世界观】${worldAnchorBlock(world)}\n场景、服装、道具必须是这个世界观里的东西;上表里的「防穿帮负面」是这一楼绝不能出现的单品。\n` : ''}
 
 ${countRule}
@@ -661,7 +666,8 @@ P18 峰值=拳头落在他胸口那句；光线=lamp light, dim lighting；动�
 2. 用第三人称的情形：女主独处、多女主同框、侧面曲线、含胸或背后环抱（from side / three-quarter view / from below / from above）。
 3. 连续两张图、或跨楼出现相同体位时，必须强制轮换机位与景别，严禁连续两张都锁死 pov + from above。
 4. pov hands 只代表男主伸手摸女主；女主主动伸手朝镜头写 outstretched hand, reaching towards viewer，严禁写 pov hands。
-5. **pov 与男主入镜互斥**：男主整个人或上半身入镜时（背后环抱、侧面贴身、面对面同框、两人都在画面里），一律用第三人称 front view / three-quarter view / from side / from behind，严禁写 pov；只有男主完全在镜头之外、最多露出手（pov hands）或局部身体时，才允许写 pov。
+5. **高低差禁仰拍**：画面里出现「一方站立 + 另一方坐姿/跪姿/抱腿/躺在地上」这类高低差互动时，严禁用 from below / low angle 仰拍（会把站着的画成巨人、坐着的缩成小人）；必须改用 from side, eye-level 或 three-quarter view, eye-level，并在 Base.nl 里写明「两个正常成年人、身高比例正常」。
+6. **pov 与男主入镜互斥**：男主整个人或上半身入镜时（背后环抱、侧面贴身、面对面同框、两人都在画面里），一律用第三人称 front view / three-quarter view / from side / from behind，严禁写 pov；只有男主完全在镜头之外、最多露出手（pov hands）或局部身体时，才允许写 pov。
 
 四、表情、视线、景别与主被动
 1. 表情只从标准 Danbooru 词表挑：smile, grin, laughing, blush, embarrassed, frown, pout, surprised, crying, tears, angry, serious, sad, worried, scared, smug, seductive smile, expressionless, half-closed eyes, open mouth, clenched teeth, ahegao。
@@ -723,11 +729,75 @@ async function dualChannelPreamble(
 }
 
 /** 任务 A：五层服装状态填表(顺带报告建档与永久变化)。 */
-export async function buildStateSyncMessages(input: DualChannelInput): Promise<ChatMsg[]> {
+export async function buildStateSyncMessages(
+  input: DualChannelInput,
+  entries: CharTagEntry[] = [],
+): Promise<ChatMsg[]> {
   const messages = await dualChannelPreamble(input, stateSyncSystemPrompt(input.world));
   const last = messages[messages.length - 1];
-  last.content = `${last.content}\n\n【本楼起始服装快照】\n${input.outfitSnapshot}`;
+  const usedTraits = buildUsedTraitsSummary(entries);
+  last.content = `${last.content}\n\n【本楼起始服装快照】\n${input.outfitSnapshot}\n\n【已高频占用的特征（新女角建档必须避开）】\n${usedTraits}`;
   return messages;
+}
+
+/**
+ * 防撞脸不能只靠提示词喊「要错开」,得把「已经用滥了什么」摊开给模型看。
+ * 统计角色库里所有女性角色的发色/扎发/刘海/眼型/配饰出现次数,≥2 次的列为高频占用。
+ */
+export function buildUsedTraitsSummary(entries: CharTagEntry[]): string {
+  const buckets: Record<string, Map<string, number>> = {
+    hairColor: new Map(),
+    hairStyle: new Map(),
+    bangs: new Map(),
+    eyes: new Map(),
+    extra: new Map(),
+  };
+  const bump = (bucket: keyof typeof buckets, value: string) => {
+    const key = value.trim().toLowerCase();
+    if (!key) return;
+    buckets[bucket].set(key, (buckets[bucket].get(key) ?? 0) + 1);
+  };
+  for (const entry of entries) {
+    const sex = entry.fields.sex.toLowerCase();
+    if (/boy|male/.test(sex) && !/girl|female/.test(sex)) continue;
+    for (const token of entry.fields.hair.split(',').map(item => item.trim()).filter(Boolean)) {
+      if (/(?:black|brown|blonde|red|pink|blue|purple|green|grey|gray|silver|white|orange) hair$/.test(token)) {
+        bump('hairColor', token);
+      } else if (/ponytail|twintails|braid|bun|bob|updo|hair down|short hair|long hair|medium hair|very long hair/.test(token)) {
+        bump('hairStyle', token);
+      } else if (/bangs/.test(token)) {
+        bump('bangs', token);
+      }
+    }
+    for (const token of entry.fields.eyes.split(',').map(item => item.trim()).filter(Boolean)) {
+      if (/tsurime|tareme|jitome|sanpaku/.test(token)) bump('eyes', token);
+    }
+    for (const token of entry.fields.extra.split(',').map(item => item.trim()).filter(Boolean)) bump('extra', token);
+  }
+  const render = (bucket: keyof typeof buckets, label: string) => {
+    const hot = [...buckets[bucket].entries()].filter(([, count]) => count >= 2).sort((a, b) => b[1] - a[1]);
+    return hot.length ? `${label}[${hot.map(([word, count]) => `${word}×${count}`).join(', ')}]` : '';
+  };
+  const parts = [
+    render('hairColor', '发色'),
+    render('hairStyle', '发型'),
+    render('bangs', '刘海'),
+    render('eyes', '眼型'),
+    render('extra', '配饰'),
+  ].filter(Boolean);
+  return parts.length ? parts.join('；') : '（暂无高频占用，仍须按规则 3 主动错开）';
+}
+
+/** 导演的 user 尾巴:只读服装快照 + 上一张图。抽出来是为了能单独断言这两块一定存在。 */
+export function directorReferenceBlocks(outfitSnapshot: string, lastImageSummary: string): string {
+  return [
+    outfitSnapshot.trim()
+      ? `【当前角色服装只读参考（绝不要在 tag 里重写衣服；nl 如需提及衣物必须与此严格一致，不得另编丝袜/裙子/颜色）】\n${outfitSnapshot}`
+      : '',
+    lastImageSummary ? `【上一张图】${lastImageSummary}（不要重复它的体位与机位）` : '',
+  ]
+    .filter(Boolean)
+    .join('\n\n');
 }
 
 /** 任务 B：导演选帧(输出完整 Base.tag/nl + 角色 tag/nl)。 */
@@ -740,8 +810,7 @@ export async function buildDirectorMessages(
     buildDirectorSystemPrompt(input.nlOn, input.minImages, input.maxImages, input.world),
   );
   const last = messages[messages.length - 1];
-  if (lastImageSummary) {
-    last.content = `${last.content}\n\n【上一张图】${lastImageSummary}（不要重复它的体位与机位）`;
-  }
+  const referenceBlocks = directorReferenceBlocks(input.outfitSnapshot, lastImageSummary);
+  if (referenceBlocks) last.content = `${last.content}\n\n${referenceBlocks}`;
   return messages;
 }

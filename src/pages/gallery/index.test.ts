@@ -121,7 +121,7 @@ async function change(target: TestNode): Promise<void> {
   await nextTick();
 }
 
-const prefix = '\u67cf\u5b9d\u7ed8_';
+const prefix = '\u661f\u7ed8_';
 const alpha = `${prefix}Alpha`;
 const beta = `${prefix}Beta`;
 const expandedKey = 'bbi.ui.galleryExpanded.v1';

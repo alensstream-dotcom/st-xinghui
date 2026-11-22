@@ -268,6 +268,40 @@ function extractDistinctiveFeatures(entry: CharTagEntry | undefined): string[] {
 }
 
 /**
+ * 导演通道只能写「这一格正在发生什么」，不能写「这个人长什么样、穿什么」。
+ * 一旦这个女角已经在角色库里（外貌有档案）、或已有五层服装状态，导演再写发色/瞳色/体型/性别人数词/衣物，
+ * 就是在和权威数据抢方向盘——古风楼被塞进 pleated skirt、银发角色被写成 blonde，都是这么来的。
+ * 所以这里在合流之前先硬清洗一遍：只留动作、表情、视线、姿势与 source#/target#/mutual# 标记。
+ */
+const SEX_WORD_TAG = /^(?:1girl|2girls|3girls|multiple girls|1boy|2boys|3boys|multiple boys|girl|boy|solo)$/i;
+const HAIR_TAG = /\b(hair|bangs|ponytail|twintails|braid|braids|bun|bob|updo|ahoge)\b/i;
+const EYE_SKIN_TAG = /\b(eyes|tsurime|tareme|jitome|sanpaku|pale skin|fair skin|dark skin|tan)\b/i;
+const STATIC_BODY_TAG = /\b(tall female|petite|slender|curvy|voluptuous|flat chest|small breasts|medium breasts|large breasts|huge breasts|wide hips|long legs)\b/i;
+const GARMENT_TAG = /\b(dress|robe|hanfu|kimono|cheongsam|skirt|pants|jeans|shorts|shirt|blouse|coat|jacket|blazer|sweater|uniform|bra|panties|underwear|dudou|pantyhose|stockings|thighhighs|socks|shoes|heels|boots|sneakers)\b/i;
+/** 这些词说明这一格正在发生接触（手在头发里、抓着衣领），属于动作，不算外貌/服装声明。 */
+const ACTION_TOUCH_TAG = /\b(hand|hands|holding|touching|grabbing|pulling|lifting|unbuttoning|pressed|against|around|on her|on his)\b/i;
+
+export function stripLeakedAppearanceAndOutfit(
+  tags: string[],
+  hasLibraryEntry: boolean,
+  hasOutfitState: boolean,
+): string[] {
+  return tags.filter(tag => {
+    const token = tag.trim();
+    if (!token) return false;
+    // 标记词(source#/target#/mutual#)永远是动作,不许动。
+    if (token.includes('#')) return true;
+    if (hasLibraryEntry && SEX_WORD_TAG.test(token)) return false;
+    if (ACTION_TOUCH_TAG.test(token)) return true;
+    if (hasLibraryEntry && HAIR_TAG.test(token)) return false;
+    if (hasLibraryEntry && EYE_SKIN_TAG.test(token)) return false;
+    if (hasLibraryEntry && STATIC_BODY_TAG.test(token)) return false;
+    if (hasOutfitState && GARMENT_TAG.test(token)) return false;
+    return true;
+  });
+}
+
+/**
  * 这一格「实际被遮住」的部位。状态表说了算:
  * - 上半身遮住 = 胸罩穿好,或外衣穿好且胸罩没被脱掉(外衣敞开时胸罩若还在也算遮住)
  * - 下半身遮住 = 下装/内裤穿好,或连身衣整体穿好
@@ -280,6 +314,10 @@ interface CoverState {
 }
 
 const CONFLICT_UPPER = /^(?:bare breasts|topless|exposed breasts|exposed chest|nipples?|bare chest|nude)$/i;
+const PROPORTION_GUARDRAILS = ['giantess', 'size difference', 'miniature'];
+const HEIGHT_GAP_SHOT = /\b(sitting|kneeling|kneel|crouching|lying|floor seat|on lap|seiza)\b/i;
+const STANDING_TAG = /\b(standing|walking|leaning forward)\b/i;
+
 const CONFLICT_LOWER = /^(?:bottomless|nude|naked|completely nude|fully nude|pussy|spread pussy|pussy juice)$/i;
 
 function describeCoverage(outfit: CharOutfitState | undefined): CoverState {
@@ -337,6 +375,9 @@ export function assembleImageCharacters(
     if (!isMaleEntry(entry, character.tag)) femaleIndexes.push(index);
   });
 
+  // 站+坐/跪的高低差画面,NAI 特别容易把站着的画成巨人、坐着的缩成小人。
+  const allTags = [image.tag, ...image.characters.map(item => item.tag)].join(', ');
+  const heightGapShot = HEIGHT_GAP_SHOT.test(allTags) && STANDING_TAG.test(allTags);
   const characters: ImageCharacterPrompt[] = image.characters.map((character, index) => {
     const entry = entriesAtPos.find(item => item.name === character.name);
     if (isMaleEntry(entry, character.tag)) {
@@ -359,7 +400,17 @@ export function assembleImageCharacters(
     // 景别裁切必须在合流之后做：外貌里的腿型词与 hosiery 里的鞋子词都可能来自任意一路。
     // 服装层的 tag 本身可能带逗号（"sheer black pantyhose, black leather loafers"），
     // 先拆成原子词再过滤，否则鞋子词会把整串丝袜一起带走。
-    const directorTags = resolveCoverConflicts(dropLocalizedMarkers(splitTags(character.tag)), cover);
+    const hasLibraryEntry = Boolean(entry?.fields.hair.trim() || entry?.fields.eyes.trim());
+    const hasOutfitState = Boolean(
+      outfitState &&
+        [outfitState.layers.outer, outfitState.layers.bra, outfitState.layers.bottom, outfitState.layers.panties, outfitState.layers.hosiery].some(
+          layer => Boolean(layer?.tag.trim()) || layer?.status === 'worn' || layer?.status === 'disheveled',
+        ),
+    );
+    const directorTags = resolveCoverConflicts(
+      stripLeakedAppearanceAndOutfit(dropLocalizedMarkers(splitTags(character.tag)), hasLibraryEntry, hasOutfitState),
+      cover,
+    );
     const filtered = dedupeTags(
       [
         ...fixedTags,
@@ -379,6 +430,7 @@ export function assembleImageCharacters(
       ...compiledOutfit.negative,
       ...buildSelfAntiDriftNegative(entry),
       ...guardrailNegatives(world, mergedPositive),
+      ...(heightGapShot ? PROPORTION_GUARDRAILS : []),
     ];
     if (femaleIndexes.length >= 2) {
       for (const otherIndex of femaleIndexes) {

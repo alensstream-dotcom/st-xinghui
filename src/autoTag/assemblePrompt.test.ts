@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { assembleImageCharacters, isOnePieceOuter } from '@/autoTag/assemblePrompt';
+import { assembleImageCharacters, isOnePieceOuter, stripLeakedAppearanceAndOutfit } from '@/autoTag/assemblePrompt';
 import { parseImagePlan, type ImageInsertion } from '@/autoTag/protocol';
 import { emptyCharFields, type CharTagEntry } from '@/state/charTags';
 import type { CharOutfitState, OutfitLayerState } from '@/state/outfitState';
@@ -466,5 +466,113 @@ describe('世界观防穿帮豁免', () => {
     const uc = result.characters[0].uc ?? '';
     expect(uc).not.toContain('jeans');
     expect(uc).toContain('sneakers');
+  });
+});
+
+describe('状态表唯一权威：导演偷塞的外貌与服装全部剥离', () => {
+  it('已建档女角 + 已有服装状态时，导演写的 1girl / blue eyes / large breasts / white dress / hanfu 全被剥掉', () => {
+    const entries = [
+      entry('温岚', {
+        sex: '1girl',
+        hair: 'long black hair, straight hair, hair down, blunt bangs',
+        eyes: 'brown eyes, tareme',
+        skin: 'fair skin',
+        body: 'petite, small breasts',
+        extra: 'mole under eye',
+      }),
+    ];
+    const outfits = new Map([
+      outfit('温岚', {
+        outer: worn('plain white silk taoist robe, long sleeves, cross-collar, ankle-length'),
+        bra: worn('white cotton dudou'),
+        bottom: off(''),
+        panties: worn('white silk drawers'),
+        hosiery: worn('white silk socks'),
+      }),
+    ]);
+    const result = assembleImageCharacters(
+      image('1girl, cowboy shot', [
+        {
+          name: '温岚',
+          tag: '1girl, blue eyes, large breasts, white dress, hanfu, blush, looking up, kneeling, target#pulling her close',
+        },
+      ]),
+      entries,
+      outfits,
+    );
+    const tag = result.characters[0].tag;
+    // 角色库外貌保留
+    expect(tag).toContain('long black hair');
+    expect(tag).toContain('brown eyes');
+    expect(tag).toContain('small breasts');
+    // 状态表五层保留（道袍穿好时肚兜属被遮住的内层,按可见性规则不进 tag）
+    expect(tag).toContain('taoist robe');
+    expect(tag).toContain('white silk socks');
+    expect(tag).not.toContain('white cotton dudou');
+    // 导演偷塞的外貌/服装/人数词被清掉
+    expect(tag).not.toContain('blue eyes');
+    expect(tag).not.toContain('large breasts');
+    expect(tag).not.toContain('white dress');
+    expect(tag).not.toContain('hanfu');
+    expect(tag.split(',').map(item => item.trim())).not.toContain('1girl');
+    // 纯动作/表情/标记保留
+    expect(tag).toContain('blush');
+    expect(tag).toContain('looking up');
+    expect(tag).toContain('kneeling');
+    expect(tag).toContain('target#pulling her close');
+  });
+
+  it('stripLeakedAppearanceAndOutfit 不动标记词与「手在头发里」这类接触动作', () => {
+    const kept = stripLeakedAppearanceAndOutfit(
+      ['1girl', 'silver hair', 'blue eyes', 'slender', 'white dress', 'hand in hair', 'holding her hair', 'blush'],
+      true,
+      true,
+    );
+    expect(kept).toEqual(['hand in hair', 'holding her hair', 'blush']);
+  });
+});
+
+describe('状态表 priority：冲突只剔导演的词', () => {
+  it('bra worn 与导演 bare breasts 冲突时保留 white cotton bra、剔掉 bare breasts', () => {
+    const entries = [entry('温岚', { sex: '1girl', hair: 'long black hair', eyes: 'brown eyes' })];
+    const outfits = new Map([outfit('温岚', { bra: worn('white cotton bra, plunge neckline') })]);
+    const result = assembleImageCharacters(
+      image('1girl, upper body', [{ name: '温岚', tag: 'bare breasts, topless, blush' }]),
+      entries,
+      outfits,
+    );
+    const tag = result.characters[0].tag;
+    expect(tag).toContain('white cotton bra');
+    expect(tag).not.toContain('bare breasts');
+    expect(tag).not.toContain('topless');
+    expect(tag).toContain('blush');
+  });
+});
+
+describe('比例防畸变', () => {
+  it('站着 + 跪着的高低差画面会给角色负面补 giantess / size difference / miniature', () => {
+    const entries = [entry('温岚', { sex: '1girl', hair: 'long black hair' })];
+    const result = assembleImageCharacters(
+      image('1girl, 1boy, bedroom, cowboy shot', [
+        { name: '温岚', tag: 'kneeling, blush' },
+        { name: '李斌', tag: '1boy, faceless male, standing', uc: '' },
+      ]),
+      entries,
+      new Map(),
+    );
+    const uc = result.characters[0].uc ?? '';
+    expect(uc).toContain('giantess');
+    expect(uc).toContain('size difference');
+    expect(uc).toContain('miniature');
+  });
+
+  it('没有高低差时不会无端加比例负面', () => {
+    const entries = [entry('温岚', { sex: '1girl', hair: 'long black hair' })];
+    const result = assembleImageCharacters(
+      image('1girl, upper body', [{ name: '温岚', tag: 'standing, blush' }]),
+      entries,
+      new Map(),
+    );
+    expect(result.characters[0].uc ?? '').not.toContain('giantess');
   });
 });

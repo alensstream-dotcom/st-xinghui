@@ -1,7 +1,13 @@
 import { describe, expect, it } from 'vitest';
 
-import { buildDirectorSystemPrompt, stateSyncSystemPrompt } from '@/autoTag/prompt';
+import {
+  buildDirectorSystemPrompt,
+  buildUsedTraitsSummary,
+  directorReferenceBlocks,
+  stateSyncSystemPrompt,
+} from '@/autoTag/prompt';
 import { WORLD_PRESETS, defaultWorldAnchor } from '@/state/worldAnchor';
+import { emptyCharFields, type CharTagEntry } from '@/state/charTags';
 
 /**
  * 五条防偏见硬规则是「出图违和」的历史修复总结：情绪戏画成呆看镜头、递枪被画成枪口对人、
@@ -104,5 +110,67 @@ describe('导演通道：omitFeatures 与 pov 口径', () => {
   it('一姿势一图红线与节拍均衡', () => {
     expect(text).toContain('一姿势一图红线');
     expect(text).toContain('节拍均衡');
+  });
+});
+
+function charEntry(name: string, fields: Partial<Record<string, string>>): CharTagEntry {
+  return { name, fields: { ...emptyCharFields(), ...fields }, raw: '', nl: '', source: 'manual', desc: '', history: [] };
+}
+
+describe('防撞脸：高频占用统计', () => {
+  it('统计出 ≥2 次的发色 / 发型 / 配饰，并忽略男性条目', () => {
+    const summary = buildUsedTraitsSummary([
+      charEntry('甲', { sex: '1girl', hair: 'long black hair, hair down, blunt bangs', eyes: 'brown eyes, tareme', extra: 'forehead mark, earrings' }),
+      charEntry('乙', { sex: '1girl', hair: 'long black hair, hair down, parted bangs', eyes: 'brown eyes, tsurime', extra: 'forehead mark, choker' }),
+      charEntry('丙', { sex: '1girl', hair: 'silver hair, twin braids', eyes: 'blue eyes, tareme', extra: 'earrings' }),
+      charEntry('男主', { sex: '1boy', hair: 'black hair, short hair', eyes: 'brown eyes', extra: 'glasses' }),
+    ]);
+    expect(summary).toContain('long black hair×2');
+    expect(summary).toContain('发型[hair down×2]');
+    expect(summary).toContain('earrings×2');
+    expect(summary).toContain('forehead mark×2');
+    expect(summary).not.toContain('black hair×3');
+  });
+
+  it('没有重复时不瞎编，给出明确的空状态', () => {
+    const summary = buildUsedTraitsSummary([charEntry('甲', { sex: '1girl', hair: 'long black hair', eyes: 'brown eyes, tareme', extra: 'mole under eye' })]);
+    expect(summary).toContain('暂无高频占用');
+  });
+});
+
+describe('导演只读参考块', () => {
+  it('把服装快照以只读块附进去，并声明不许重写衣服', () => {
+    const block = directorReferenceBlocks('温岚｜outer: white silk taoist robe, worn', '入画角色：温岚｜Base：1girl, bedroom');
+    expect(block).toContain('【当前角色服装只读参考');
+    expect(block).toContain('绝不要在 tag 里重写衣服');
+    expect(block).toContain('white silk taoist robe');
+    expect(block).toContain('【上一张图】');
+  });
+
+  it('没有快照也没有上一张图时返回空串（不产生空标题）', () => {
+    expect(directorReferenceBlocks('  ', '')).toBe('');
+  });
+});
+
+describe('导演通道：外貌/服装禁写与比例防畸变', () => {
+  const text = buildDirectorSystemPrompt(true, 1, 3);
+
+  it('明写已建档女角色禁止写人数词/发色/瞳色/体型/服装', () => {
+    expect(text).toContain('绝对禁止出现');
+    expect(text).toContain('性别人数词');
+    expect(text).toContain('任何服装词');
+    expect(text).toContain('写了也会被程序整条剥掉');
+  });
+
+  it('高低差互动禁仰拍', () => {
+    expect(text).toContain('高低差禁仰拍');
+    expect(text).toContain('严禁用 from below / low angle 仰拍');
+  });
+
+  it('状态表提示词要求 body 只写 2～3 个精准核心词', () => {
+    const sync = stateSyncSystemPrompt({ ...defaultWorldAnchor(), presetId: 'modern', lockedByUser: true });
+    expect(sync).toContain('body 只写 2～3 个精准核心词');
+    expect(sync).toContain('不要默认加 "tall female" 与 "long legs"');
+    expect(sync).toContain('已高频占用的特征');
   });
 });

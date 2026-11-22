@@ -279,7 +279,7 @@ async function runDualChannel(params: {
   const input: DualChannelInput = { ...params.input, outfitSnapshot: outfitSnapshotText };
 
   const [stateMsgs, directorMsgs] = await Promise.all([
-    buildStateSyncMessages(input),
+    buildStateSyncMessages(input, params.entries),
     buildDirectorMessages(input, lastImageSummary),
   ]);
 
