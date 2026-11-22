@@ -58,6 +58,11 @@ export interface CharTagEntry {
   source: CharTagSource;
   desc: string;
   history: CharTagChangeRecord[];
+  /**
+   * 立绘缓存键(IndexedDB 里的 key)。只存键名,绝不把图片本体写进聊天记录或设置。
+   * 空/不存在 = 还没生成立绘。
+   */
+  portraitKey?: string;
 }
 
 export interface CharTagNewOp {
@@ -212,6 +217,7 @@ function normalizeEntry(raw: unknown): CharTagEntry | null {
   const legacyTags = typeof value.tags === 'string' ? value.tags.trim() : '';
   const rawTag = typeof value.raw === 'string' ? value.raw.trim() : legacyTags;
   if (!rawTag && charFieldsEmpty(fields)) return null;
+  const portraitKey = typeof value.portraitKey === 'string' ? value.portraitKey.trim() : '';
   return {
     name,
     fields,
@@ -220,6 +226,7 @@ function normalizeEntry(raw: unknown): CharTagEntry | null {
     source: value.source === 'book' || value.source === 'ai' ? value.source : 'manual',
     desc: typeof value.desc === 'string' ? value.desc : '',
     history: normalizeHistory(value.history),
+    ...(portraitKey ? { portraitKey } : {}),
   };
 }
 
@@ -500,6 +507,7 @@ export function upsertCharTag(
   const name = entry.name.trim();
   if (!name || !buildEntryTag(entry)) return false;
   const previous = findCharTag(oldName ?? name);
+  const keptPortrait = entry.portraitKey ?? previous?.portraitKey ?? '';
   const next: CharTagEntry = {
     name,
     fields: normalizeFields(entry.fields),
@@ -510,6 +518,7 @@ export function upsertCharTag(
     history: entry.history.length
       ? entry.history.map(record => ({ ...record }))
       : (previous?.history.map(record => ({ ...record })) ?? []),
+    ...(keptPortrait ? { portraitKey: keptPortrait } : {}),
   };
   if (opts.recordChanges && previous) {
     const at = Date.now();

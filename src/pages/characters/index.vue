@@ -4,7 +4,9 @@ import ConfirmDialog from '@/components/ConfirmDialog.vue';
 import Icon from '@/components/Icon.vue';
 import ModalMask from '@/components/ModalMask.vue';
 import { generateCharTags } from '@/autoTag/charAnchors';
+import { generateCharacterPortrait } from '@/autoTag/portrait';
 import { rerollCharacterAppearance } from '@/autoTag/rerollChar';
+import { deletePortrait, readPortraitUrl } from '@/state/portraits';
 import { readBookMemory } from '@/autoTag/bookMemory';
 import {
   CHAR_TAG_FIELDS,
@@ -29,7 +31,7 @@ import {
   upsertGlobalCharTag,
 } from '@/state/globalCharTags';
 import { getContext } from '@/st/context';
-import { computed, ref } from 'vue';
+import { computed, ref, watch } from 'vue';
 
 /**
  * 角色管理 —— 两层固定外貌库:
@@ -129,6 +131,16 @@ function openEntry(entry: CharTagEntry, scope: Scope) {
   draftSource.value = entry.source;
   draftDesc.value = entry.desc;
   historyOpen.value = false;
+  draftPortraitKey.value = entry.portraitKey;
+  draftPortrait.value = portraitUrls.value[entry.name] ?? '';
+  if (!draftPortrait.value && entry.portraitKey) {
+    void readPortraitUrl(entry.portraitKey).then(url => {
+      if (url) {
+        portraitUrls.value[entry.name] = url;
+        if (draft.value?.name === entry.name) draftPortrait.value = url;
+      }
+    });
+  }
 }
 
 function addEntry(scope: Scope = 'chat') {
@@ -235,6 +247,129 @@ async function rerollAppearance() {
   }
 }
 
+/* ============ 立绘:列表封面 + 弹窗预览 ============ */
+
+const portraitUrls = ref<Record<string, string>>({});
+/** 卡片上正在生成立绘的角色名(同一时刻只允许一个,避免并发挤爆 NAI 闸门)。 */
+const portraitBusy = ref<string | null>(null);
+/** 弹窗里的大图预览:新生成的不落库,点「保存」才把 portraitKey 写进条目。 */
+const draftPortrait = ref('');
+const draftPortraitKey = ref<string | undefined>(undefined);
+/** 全屏灯箱。 */
+const lightboxSrc = ref('');
+
+const portraitSignature = computed(() =>
+  [...globalCharTagLib.entries, ...chatEntries.value].map(entry => `${entry.name}:${entry.portraitKey ?? ''}`).join('|'),
+);
+
+watch(
+  portraitSignature,
+  async () => {
+    for (const entry of [...globalCharTagLib.entries, ...chatEntries.value]) {
+      const key = entry.portraitKey;
+      if (!key || portraitUrls.value[entry.name]) continue;
+      try {
+        const url = await readPortraitUrl(key);
+        if (url) portraitUrls.value[entry.name] = url;
+      } catch (error) {
+        console.warn('[星绘] 读取立绘失败', entry.name, error);
+      }
+    }
+  },
+  { immediate: true },
+);
+
+/** 把当前草稿拼成条目(只用于生成立绘,不落盘)。 */
+function draftEntry(name: string): CharTagEntry {
+  const d = draft.value!;
+  return {
+    name,
+    fields: { ...d.fields },
+    raw: d.raw,
+    nl: d.nl,
+    source: draftSource.value,
+    desc: draftDesc.value,
+    history: [],
+    ...(draftPortraitKey.value ? { portraitKey: draftPortraitKey.value } : {}),
+  };
+}
+
+/** 列表卡片:生成立绘并立刻写进对应层级的库。 */
+async function generatePortraitFor(entry: CharTagEntry, scope: Scope) {
+  if (portraitBusy.value) return;
+  portraitBusy.value = entry.name;
+  try {
+    const result = await generateCharacterPortrait(entry);
+    portraitUrls.value[entry.name] = result.dataUrl;
+    const next: CharTagEntry = { ...entry, portraitKey: result.key };
+    if (scope === 'global') upsertGlobalCharTag(next);
+    else upsertCharTag(next, entry.name, { recordChanges: false });
+    toastr.success(`${entry.name} 的立绘已生成`, '星绘');
+  } catch (error) {
+    toastr.error(`生成立绘失败:${(error as Error).message}`, '星绘');
+  } finally {
+    portraitBusy.value = null;
+  }
+}
+
+/** 弹窗:按当前表单字段生成/刷新立绘(只预览,保存才落库)。 */
+async function refreshDraftPortrait() {
+  const d = draft.value;
+  if (!d || portraitBusy.value) return;
+  const name = d.name.trim();
+  if (!name) {
+    toastr.warning('先填角色名再生成立绘', '星绘');
+    return;
+  }
+  portraitBusy.value = name;
+  try {
+    const result = await generateCharacterPortrait(draftEntry(name));
+    draftPortrait.value = result.dataUrl;
+    draftPortraitKey.value = result.key;
+    markManual();
+    toastr.success('立绘已更新,满意就点「保存」', '星绘');
+  } catch (error) {
+    toastr.error(`生成立绘失败:${(error as Error).message}`, '星绘');
+  } finally {
+    portraitBusy.value = null;
+  }
+}
+
+/** 弹窗:重Roll 形象 + 自动出立绘(两步一起做)。 */
+async function rerollAndPortrait() {
+  const d = draft.value;
+  if (!d || rerolling.value || portraitBusy.value) return;
+  const name = d.name.trim();
+  if (!name) {
+    toastr.warning('先填角色名再重Roll', '星绘');
+    return;
+  }
+  rerolling.value = true;
+  try {
+    const others = chatEntries.value.filter(entry => entry.name !== name);
+    const next = await rerollCharacterAppearance({
+      name,
+      currentEntry: draftEntry(name),
+      otherEntries: others,
+      userHint: rerollHint.value,
+    });
+    d.fields.hair = next.hair;
+    d.fields.eyes = next.eyes;
+    d.fields.skin = next.skin;
+    d.fields.body = next.body;
+    d.fields.extra = next.extra;
+    markManual();
+    const result = await generateCharacterPortrait(draftEntry(name));
+    draftPortrait.value = result.dataUrl;
+    draftPortraitKey.value = result.key;
+    toastr.success('新形象与新立绘已生成,满意就点「保存」', '星绘');
+  } catch (error) {
+    toastr.error(`重Roll并出图失败:${(error as Error).message}`, '星绘');
+  } finally {
+    rerolling.value = false;
+  }
+}
+
 function confirmEntry() {
   const d = draft.value;
   if (!d) return;
@@ -255,6 +390,7 @@ function confirmEntry() {
     source: draftSource.value,
     desc: draftDesc.value,
     history: [],
+    ...(draftPortraitKey.value ? { portraitKey: draftPortraitKey.value } : {}),
   };
   const ok =
     draftScope.value === 'global'
@@ -271,8 +407,15 @@ function askRemove() {
 function confirmRemove() {
   confirmDeleteOpen.value = false;
   if (!editingName.value) return;
-  if (editingScope.value === 'global') removeGlobalCharTag(editingName.value);
-  else removeCharTag(editingName.value);
+  const name = editingName.value;
+  const existing = editingScope.value === 'global'
+    ? globalCharTagLib.entries.find(entry => entry.name === name)
+    : chatEntries.value.find(entry => entry.name === name);
+  if (editingScope.value === 'global') removeGlobalCharTag(name);
+  else removeCharTag(name);
+  // 立绘是本地缓存,条目删了就没必要留着(换个名字再建也不会命中同键)
+  if (existing?.portraitKey) void deletePortrait(existing.portraitKey);
+  delete portraitUrls.value[name];
   closeEntry();
 }
 
@@ -408,24 +551,37 @@ function sourceLabel(entry: CharTagEntry): string {
           <p class="bbi-field-hint">
             所有聊天生效,仅手动维护——AI 不会修改全局角色,适合玩家角色等固定形象。本聊天有同名角色时以本聊天为准。
           </p>
-          <ul v-if="globalCharTagLib.entries.length" class="bbi-char-grid">
-          <li v-for="entry in globalCharTagLib.entries" :key="entry.name" class="bbi-char-card">
-            <button class="bbi-char-card-btn" type="button" @click="openEntry(entry, 'global')">
-              <span class="bbi-char-card-head">
-                <span class="bbi-char-name">{{ entry.name }}</span>
-                <span class="bbi-char-pills">
+          <ul v-if="globalCharTagLib.entries.length" class="bbi-portrait-grid">
+          <li v-for="entry in globalCharTagLib.entries" :key="entry.name" class="bbi-portrait-card">
+            <button class="bbi-portrait-btn" type="button" @click="openEntry(entry, 'global')">
+              <img
+                v-if="portraitUrls[entry.name]"
+                class="bbi-portrait-img"
+                :src="portraitUrls[entry.name]"
+                :alt="entry.name"
+                loading="lazy"
+              />
+              <span v-else class="bbi-portrait-placeholder">
+                <Icon name="characters" />
+                <span>暂无立绘</span>
+              </span>
+              <span class="bbi-portrait-caption">
+                <span class="bbi-portrait-name">{{ entry.name }}</span>
+                <span class="bbi-portrait-tags">
                   <span class="bbi-char-pill is-global">全局</span>
-                  <span v-if="charTagBaseNames.has(entry.name)" class="bbi-char-pill is-override" title="本聊天有同名角色,当前聊天以本聊天的为准">
-                    本聊天已覆盖
-                  </span>
+                  <span v-if="charTagBaseNames.has(entry.name)" class="bbi-char-pill is-override" title="本聊天有同名角色,当前聊天以本聊天的为准">本聊天已覆盖</span>
                 </span>
               </span>
-              <span v-if="chipsOf(entry).length" class="bbi-char-chips">
-                <span v-for="chip in chipsOf(entry)" :key="chip.label" class="bbi-chip" :title="chip.label">
-                  {{ chip.value }}
-                </span>
-              </span>
-              <span v-else class="bbi-char-raw">{{ entry.raw }}</span>
+            </button>
+            <button
+              v-if="!portraitUrls[entry.name]"
+              class="bbi-portrait-gen"
+              type="button"
+              :disabled="!!portraitBusy"
+              @click.stop="generatePortraitFor(entry, 'global')"
+            >
+              
+              <span>{{ portraitBusy === entry.name ? '生成中…' : '生成立绘' }}</span>
             </button>
           </li>
           </ul>
@@ -461,36 +617,45 @@ function sourceLabel(entry: CharTagEntry): string {
           <p class="bbi-field-hint">
             仅当前聊天生效:星绘书角色自动建档,AI 随剧情报告永久变化;可查看历史并回滚。
           </p>
-          <ul v-if="chatEntries.length" class="bbi-char-grid">
-          <li v-for="entry in chatEntries" :key="entry.name" class="bbi-char-card">
-            <button class="bbi-char-card-btn" type="button" @click="openEntry(entry, 'chat')">
-              <span class="bbi-char-card-head">
-                <span class="bbi-char-name">{{ entry.name }}</span>
-                <span class="bbi-char-pills">
+          <ul v-if="chatEntries.length" class="bbi-portrait-grid">
+          <li v-for="entry in chatEntries" :key="entry.name" class="bbi-portrait-card">
+            <button class="bbi-portrait-btn" type="button" @click="openEntry(entry, 'chat')">
+              <img
+                v-if="portraitUrls[entry.name]"
+                class="bbi-portrait-img"
+                :src="portraitUrls[entry.name]"
+                :alt="entry.name"
+                loading="lazy"
+              />
+              <span v-else class="bbi-portrait-placeholder">
+                <Icon name="characters" />
+                <span>暂无立绘</span>
+              </span>
+              <span class="bbi-portrait-caption">
+                <span class="bbi-portrait-name">{{ entry.name }}</span>
+                <span class="bbi-portrait-tags">
                   <span
                     class="bbi-char-pill"
                     :class="{ 'is-book': entry.source === 'book', 'is-ai': entry.source === 'ai' }"
-                  >
-                    {{ sourceLabel(entry) }}
-                  </span>
-                  <span v-if="globalNameSet.has(entry.name)" class="bbi-char-pill is-override" title="与全局库同名,当前聊天以本条为准">
-                    覆盖全局
-                  </span>
+                  >{{ sourceLabel(entry) }}</span>
+                  <span v-if="globalNameSet.has(entry.name)" class="bbi-char-pill is-override" title="与全局库同名,当前聊天以本条为准">覆盖全局</span>
                   <span
                     v-if="entry.history.length"
                     class="bbi-char-history-badge"
                     :title="`${entry.history.length} 条变更记录,点卡片查看`"
-                  >
-                    <Icon name="history" />{{ entry.history.length }}
-                  </span>
+                  ><Icon name="history" />{{ entry.history.length }}</span>
                 </span>
               </span>
-              <span v-if="chipsOf(entry).length" class="bbi-char-chips">
-                <span v-for="chip in chipsOf(entry)" :key="chip.label" class="bbi-chip" :title="chip.label">
-                  {{ chip.value }}
-                </span>
-              </span>
-              <span v-else class="bbi-char-raw">{{ entry.raw }}</span>
+            </button>
+            <button
+              v-if="!portraitUrls[entry.name]"
+              class="bbi-portrait-gen"
+              type="button"
+              :disabled="!!portraitBusy"
+              @click.stop="generatePortraitFor(entry, 'chat')"
+            >
+              
+              <span>{{ portraitBusy === entry.name ? '生成中…' : '生成立绘' }}</span>
             </button>
           </li>
           </ul>
@@ -513,6 +678,45 @@ function sourceLabel(entry: CharTagEntry): string {
           </span>
           <button class="bbi-icon-mini" type="button" title="关闭" @click="closeEntry"><Icon name="close" /></button>
         </header>
+
+        <!-- ===== 立绘预览:大图 + 生成/刷新 + 重Roll并出图 ===== -->
+        <div class="bbi-portrait-panel">
+          <button
+            v-if="draftPortrait"
+            class="bbi-portrait-preview"
+            type="button"
+            title="点击全屏查看"
+            @click="lightboxSrc = draftPortrait"
+          >
+            <img :src="draftPortrait" alt="立绘预览" />
+            <span class="bbi-portrait-preview-hint">点击全屏</span>
+          </button>
+          <div v-else class="bbi-portrait-preview is-empty">
+            <Icon name="characters" />
+            <span>还没有立绘</span>
+          </div>
+          <div class="bbi-portrait-panel-side">
+            <button
+              class="bbi-btn bbi-btn-sm"
+              type="button"
+              :disabled="!!portraitBusy || rerolling"
+              @click="refreshDraftPortrait"
+            >
+              {{ portraitBusy ? '出图中…' : draftPortrait ? '刷新立绘' : '生成立绘' }}
+            </button>
+            <button
+              class="bbi-btn bbi-btn-sm"
+              type="button"
+              :disabled="rerolling || !!portraitBusy"
+              @click="rerollAndPortrait"
+            >
+              {{ rerolling ? '重Roll中…' : '重Roll形象并出图' }}
+            </button>
+            <span class="bbi-field-hint">
+              立绘只用固定外貌 + 白底全身构图,不读剧情。生成后先预览,点「保存」才写进角色库。
+            </span>
+          </div>
+        </div>
 
         <!-- 作用域:仅新建时可选;已有条目换层用底部「提升为全局 / 复制到本聊天」 -->
         <div v-if="!editingName" class="bbi-modal-field">
@@ -717,6 +921,13 @@ function sourceLabel(entry: CharTagEntry): string {
         建档记录的回滚会删除整个条目。
       </template>
     </ConfirmDialog>
+    <!-- ===== 立绘全屏灯箱 ===== -->
+    <div v-if="lightboxSrc" class="bbi-portrait-lightbox" @click="lightboxSrc = ''">
+      <img :src="lightboxSrc" alt="立绘大图" />
+      <button class="bbi-portrait-lightbox-close" type="button" title="关闭" @click.stop="lightboxSrc = ''">
+        <Icon name="close" />
+      </button>
+    </div>
   </section>
 </template>
 
@@ -1130,6 +1341,216 @@ function sourceLabel(entry: CharTagEntry): string {
   color: var(--bbi-danger);
   border-color: var(--bbi-danger);
   background: var(--bbi-danger-soft);
+}
+
+
+/* ===== 立绘卡片:竖版 3:4,底部渐变蒙层只留名字与标签 ===== */
+.bbi-portrait-grid {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+.bbi-portrait-card {
+  position: relative;
+  min-width: 0;
+}
+.bbi-portrait-btn {
+  display: block;
+  width: 100%;
+  padding: 0;
+  border: 1px solid var(--bbi-line);
+  border-radius: 10px;
+  overflow: hidden;
+  background: var(--bbi-panel);
+  color: inherit;
+  cursor: pointer;
+  transition: border-color 0.15s, transform 0.15s;
+}
+.bbi-portrait-btn:hover {
+  border-color: var(--bbi-line-strong);
+  transform: translateY(-1px);
+}
+.bbi-portrait-img {
+  display: block;
+  width: 100%;
+  aspect-ratio: 3 / 4;
+  object-fit: cover;
+  background: var(--bbi-panel-alt, #222);
+}
+.bbi-portrait-placeholder {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  width: 100%;
+  aspect-ratio: 3 / 4;
+  color: var(--bbi-muted);
+  font-size: 12px;
+  background: repeating-linear-gradient(45deg, rgba(255,255,255,0.03) 0 8px, transparent 8px 16px);
+}
+.bbi-portrait-placeholder svg {
+  width: 26px;
+  height: 26px;
+  opacity: 0.7;
+}
+.bbi-portrait-caption {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 18px 8px 7px;
+  background: linear-gradient(to top, rgba(0, 0, 0, 0.82), rgba(0, 0, 0, 0.35) 55%, transparent);
+  text-align: left;
+}
+.bbi-portrait-name {
+  font-size: 13px;
+  font-weight: 600;
+  color: #fff;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.bbi-portrait-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+.bbi-portrait-tags .bbi-char-pill,
+.bbi-portrait-tags .bbi-char-history-badge {
+  background: rgba(255, 255, 255, 0.16);
+  color: #fff;
+  border: none;
+}
+.bbi-portrait-gen {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 8px;
+  border: 1px solid rgba(255, 255, 255, 0.35);
+  border-radius: 999px;
+  background: rgba(0, 0, 0, 0.55);
+  color: #fff;
+  font-size: 11px;
+  cursor: pointer;
+}
+.bbi-portrait-gen:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+/* ===== 弹窗立绘面板 ===== */
+.bbi-portrait-panel {
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+  margin-bottom: 12px;
+}
+.bbi-portrait-preview {
+  position: relative;
+  flex: 0 0 auto;
+  width: 132px;
+  padding: 0;
+  border: 1px solid var(--bbi-line);
+  border-radius: 10px;
+  overflow: hidden;
+  background: var(--bbi-panel);
+  cursor: zoom-in;
+}
+.bbi-portrait-preview img {
+  display: block;
+  width: 100%;
+  aspect-ratio: 3 / 4;
+  object-fit: cover;
+}
+.bbi-portrait-preview.is-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  aspect-ratio: 3 / 4;
+  color: var(--bbi-muted);
+  font-size: 12px;
+  cursor: default;
+}
+.bbi-portrait-preview-hint {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  padding: 3px 0;
+  font-size: 10px;
+  color: #fff;
+  background: rgba(0, 0, 0, 0.55);
+}
+.bbi-portrait-panel-side {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+/* ===== 全屏灯箱 ===== */
+.bbi-portrait-lightbox {
+  position: fixed;
+  inset: 0;
+  z-index: 100000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgba(0, 0, 0, 0.88);
+  cursor: zoom-out;
+}
+.bbi-portrait-lightbox img {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+  border-radius: 8px;
+}
+.bbi-portrait-lightbox-close {
+  position: absolute;
+  top: 14px;
+  right: 14px;
+  width: 34px;
+  height: 34px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid rgba(255, 255, 255, 0.4);
+  border-radius: 50%;
+  background: rgba(0, 0, 0, 0.5);
+  color: #fff;
+  cursor: pointer;
+}
+
+@media (max-width: 900px) {
+  .bbi-portrait-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+@media (max-width: 640px) {
+  .bbi-portrait-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .bbi-portrait-panel {
+    flex-direction: column;
+  }
+  .bbi-portrait-preview {
+    width: 100%;
+    max-width: 220px;
+  }
 }
 
 @media (max-width: 640px) {
