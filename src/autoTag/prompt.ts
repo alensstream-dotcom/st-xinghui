@@ -453,6 +453,14 @@ const STATE_SYNC_SYSTEM_PROMPT = `你只做两件事：读「目标正文」，�
 - name 必须与正文或世界书逐字一致：正文写中文就写中文，严禁音译、翻译、加姓、去姓。
 - 已经在【角色固定外貌库】里的人，严禁再输出 field:"new"；只在他发生永久变化（剪发、染发、体型变化）时用对应 field。
 
+规则 1b（原型判定：先定人设，再补外貌）：
+- 建档前先根据正文与设定判定这个女角的【年龄段 + 身份 + 性格 + 世界观原型】，后面每一项被补全的外貌都必须 100% 贴合该原型，不许套用与原型冲突的模板。
+- 运动 / 体育系：可用 "tan, athletic, toned"，利落短发或高马尾（short hair / high ponytail）。
+- 娇小可爱系：可用 "petite, slender, small breasts"、眼型 "tareme"、bob cut / twintails / ahoge。
+- 成熟御姐 / 知性 / 阿姨 / 人妻系：可用 "mature female, tall, curvy, voluptuous"、大波浪或低马尾或盘发（wavy hair / low ponytail / hair bun）、成熟配饰（semi-rimless eyewear、earrings、mole under eye、mole under mouth）；严禁给熟女 / 阿姨 / 人妻套 "petite"、"loli"、"twintails"、"child" 这类幼态标签。
+- 世界观决定发色与异形特征：现代写实世界观只用现实发色（black hair / brown hair / blonde hair / red hair），不写奇幻发色、额纹、异色瞳；二次元 / 奇幻 / 游戏世界观才可大胆使用 "white hair / silver hair / dark blue hair / multicolored hair"、"forehead mark"、"heterochromia"、"pointy ears"。
+- 年龄段与身份只从正文与设定取；正文没写就按世界观给一个最合理的，并从此定死，下一楼不许再改。
+
 规则 2（发型四要素 + 瞳色眼型 + 体型比例：正文没写就按世界观补齐并定死）：
 - hair 必须拆成标准高频 Danbooru 原子词，用逗号分隔，一个词只管一件事，例如 "medium hair, brown hair, wavy hair, hair down, parted bangs"。严禁把长度、颜色、形容词拼成生僻长短语（禁止 "medium chestnut brown hair"、"slightly wavy hair"、"shoulder-length chestnut-brown wavy hair"）。
 - hair 四要素仍然要齐：① 发色原子词（black hair / brown hair / blonde hair / red hair / silver hair，必填，不许留空）；② 长度原子词（short hair / medium hair / long hair / very long hair）+ 直卷原子词（straight hair / wavy hair / curly hair，直发可不写）；③ 扎发形态（披散写 hair down；扎发优先用正背面一致的明确词：high ponytail / twin braids / side ponytail / low bun / single hair bun）；④ 刘海（blunt bangs / parted bangs / side-swept bangs / hair over one eye / forehead）。
@@ -466,7 +474,8 @@ const STATE_SYNC_SYSTEM_PROMPT = `你只做两件事：读「目标正文」，�
 
 规则 3（新女角防撞脸差异化）：
 - 建档前先核对【角色固定外貌库】以及本楼其他新女角。
-- 在不违背正文的前提下，正文没写明的维度里，必须在「发型四要素剪影 / 眼型 / 身高体型比例 / 肤色与标志印记」这 4 项中至少错开 3 项。
+- 在不违背正文的前提下，正文没写明的维度里，必须在「发色发型剪影 / 眼型 / 肤色与体型原型 / extra 标志特征」这 4 项中至少错开 3 项。
+- extra 必须承担辨识度：除常戴眼镜与常驻首饰外，还要在符合人设与世界观的标志特征里挑 1～2 项写进 extra，例如 "mole under eye" / "mole under mouth" / "freckles" / "fang" / "ahoge" / "round eyewear" / "semi-rimless eyewear" / "choker" / "hair ribbon" / "hairclip" / "forehead mark" / "earrings"，避免千人一面。
 - 禁止同楼多名女角重复 "long hair, ponytail" 或 "curvy, large breasts" 这类同款组合——同框会画成同一个人。
 
 规则 4（五层服装：视觉指纹 + 时代世界观统一）：
@@ -506,15 +515,28 @@ ${countRule}
 
 输出分两段，顺序不能反：先一段 <thinking>…</thinking> 复核，再一个 JSON 对象。JSON 之外不要 Markdown 代码块，不要解释。
 
-<thinking> 里只用极简短行，每张图各写 3 行，不写废话、不预写 JSON：
-1. 光线与时间：照着正文写。正文说白天/明亮就必须写 daylight, bright lighting；正文说清晨就写 morning light；严禁默认画成黑夜霓虹。
-2. 核心动作的物理拆解：把中文文学描写拆成手部/肢体位置与接触点。例：「挥拳捶他胸口」→ raised fist, hitting chest, touching chest；「扶着他的手臂站起来」→ hand on his arm, standing up；NSFW 互动必须拆出手/嘴/腿/腰胯的具体接触（hand on her hip, mouth on nipple, cock inside pussy…）。严禁写成 standing + 干站表情敷衍了事。
-3. 景别与动作匹配：确认这格景别能完整拍到核心手部或下身接触点；拍不到就换景别。
+<thinking> 分两部分：先全楼分级，再逐图复核。只用极简短行，不写废话、不预写 JSON。
+
+第一部分：全楼 S/A/B/C 分级（只写 P 编号与动作词，不写画面）
+0. 通读整楼后，把高光候选按级别列出来。必须从楼尾一直扫回开头再下判断，不许只看前几段就收手。
+   - S 级（最高优先）：显式亲密 / NSFW 动作与阶段跃迁——脱衣暴露、前戏爱抚、各类体位与性技（口交、乳交、手交、足交、舔阴、插入、后入、骑乘、中出等）、高潮与事后余韵。全楼每一种新变换的姿势 / 阶段必须各占 1 张，全部覆盖完、上限仍有余量，才允许补同姿势的第二张。
+   - A 级（强视觉接触与情绪爆点）：明显肢体接触（拥抱、壁咚、牵手、捶胸口、拉拉链、膝枕…）、强烈情绪爆发（泪目、羞愤、震惊、撒娇、冷笑压迫）、重要换装亮相 / 湿身 / 正式初登场。
+   - B 级（强氛围定格）：光影或环境反差强、张力足的对手戏。
+   - C 级（黑名单，一律跳过）：纯站桩对话、赶路转场、纯心理独白、动作尚未发生或已经结束的过渡句、同一姿势没有任何变化的重复帧。
+   选帧顺序固定为 S → A → B：S 级没覆盖完，不许用 A 级占名额；禁止在前几段普通剧情里就把张数用完，把楼尾的高潮漏掉。
+
+第二部分：逐图复核，每张图各写 4 行
+1. 峰值帧定位：同一个事件跨多个 P 编号时，必须选在动作完全成立、肢体接触与情绪张力最饱满的那一个 P 编号。铺垫句（刚伸手、正要脱）与收尾句（已经做完、只剩余味）都不算，除非正文本身把余韵写成了高潮的一部分。
+2. 光线与时间：照着正文写。正文说白天/明亮就必须写 daylight, bright lighting；正文说清晨就写 morning light；严禁默认画成黑夜霓虹。
+3. 核心动作的物理拆解：把中文文学描写拆成手部/肢体位置与接触点。例：「挥拳捶他胸口」→ raised fist, hitting chest, touching chest；「扶着他的手臂站起来」→ hand on his arm, standing up；NSFW 互动必须拆出手/嘴/腿/腰胯的具体接触（hand on her hip, mouth on nipple, cock inside pussy…）。严禁写成 standing + 干站表情敷衍了事。
+4. 景别与动作匹配：确认这格景别能完整拍到核心手部或下身接触点；拍不到就换景别。
 
 <thinking> 示例：
 <thinking>
-P12 光线=daylight, bright lighting；动作=hand on her hip + cock inside pussy；景别=cowboy shot 能拍到腰胯接触。
-P18 光线=lamp light, dim lighting；动作=raised fist, hitting chest, touching chest；景别=upper body 够手部。
+S：P12 插入（峰值=插入成立的那句）、P31 中出余韵；A：P18 捶胸口；C：P5 站桩对话、P40 转场。
+P12 峰值=插入完全成立的句子；光线=daylight, bright lighting；动作=hand on her hip + cock inside pussy；景别=cowboy shot 能拍到腰胯接触。
+P31 峰值=事后余韵最饱满的一句；光线=lamp light, dim lighting；动作=lying on back, cum in pussy；景别=full body 能拍全身。
+P18 峰值=拳头落在他胸口那句；光线=lamp light, dim lighting；动作=raised fist, hitting chest, touching chest；景别=upper body 够手部。
 </thinking>
 
 然后是 JSON：
@@ -525,6 +547,7 @@ P18 光线=lamp light, dim lighting；动作=raised fist, hitting chest, touchin
 2. 回溯不到前提（本楼没有、上张图也没有）时，才按正文当下的姿态写。
 
 二、选帧优先级（亲密最高，新姿势必须全覆盖）
+0. 下面这几条就是 <thinking> 里的 S/A/B/C 分级：先 S（1～2 条）后 A（3 条）后 B（4 条），C 级一格都不选；S 级没覆盖完，不许用 A/B 级占名额。
 1. 显式 NSFW 与身体接触最高优先：正文出现的每一种 NSFW 姿势（口交、乳交、手交、足交、舔阴、插入、后入、骑乘、中出等）各出一张，不要因为它们难写而跳过。
 2. 对照「上张已画基线」，先遍历本楼所有新出现的 NSFW 姿势与阶段，各选 1 张；只有全部新姿势都覆盖完、上限仍有余量时，才允许补画同姿势的第二张。
 3. 其次是剧情转折（第一次、被发现、情绪爆发、换场所）。

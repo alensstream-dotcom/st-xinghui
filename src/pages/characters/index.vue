@@ -4,6 +4,7 @@ import ConfirmDialog from '@/components/ConfirmDialog.vue';
 import Icon from '@/components/Icon.vue';
 import ModalMask from '@/components/ModalMask.vue';
 import { generateCharTags } from '@/autoTag/charAnchors';
+import { rerollCharacterAppearance } from '@/autoTag/rerollChar';
 import { readBookMemory } from '@/autoTag/bookMemory';
 import {
   CHAR_TAG_FIELDS,
@@ -184,6 +185,54 @@ function closeEntry() {
 function markManual() {
   draftSource.value = 'manual';
   draftDesc.value = '';
+}
+
+/** 重Roll 偏好输入(可选)与进行中状态。 */
+const rerollHint = ref('');
+const rerolling = ref(false);
+
+/**
+ * 重Roll 形象:调文本模型按正文人设重新设计五个固定外貌字段,
+ * 结果只填进表单供预览;用户点「保存」才覆盖角色库。
+ */
+async function rerollAppearance() {
+  const d = draft.value;
+  if (!d || rerolling.value) return;
+  const name = d.name.trim();
+  if (!name) {
+    toastr.warning('先填角色名再重Roll', '星绘');
+    return;
+  }
+  rerolling.value = true;
+  try {
+    const current: CharTagEntry = {
+      name,
+      fields: { ...d.fields },
+      raw: d.raw,
+      nl: d.nl,
+      source: draftSource.value,
+      desc: draftDesc.value,
+      history: [],
+    };
+    const others = chatEntries.value.filter(entry => entry.name !== name);
+    const next = await rerollCharacterAppearance({
+      name,
+      currentEntry: current,
+      otherEntries: others,
+      userHint: rerollHint.value,
+    });
+    d.fields.hair = next.hair;
+    d.fields.eyes = next.eyes;
+    d.fields.skin = next.skin;
+    d.fields.body = next.body;
+    d.fields.extra = next.extra;
+    markManual();
+    toastr.success('已生成新形象,满意就点「保存」', '星绘');
+  } catch (error) {
+    toastr.error(`重Roll失败:${(error as Error).message}`, '星绘');
+  } finally {
+    rerolling.value = false;
+  }
 }
 
 function confirmEntry() {
@@ -517,6 +566,25 @@ function sourceLabel(entry: CharTagEntry): string {
           </div>
         </div>
         <span class="bbi-field-hint">只写固定基础特征;服装、表情、动作不入库,每次按剧情生成。</span>
+
+        <!-- 重Roll形象:仅本聊天角色(全局库是跨聊天模板,不该被重设计) -->
+        <div v-if="draftScope === 'chat'" class="bbi-modal-field bbi-char-reroll">
+          <span class="bbi-modal-label">重Roll形象</span>
+          <div class="bbi-char-reroll-row">
+            <input
+              v-model="rerollHint"
+              class="bbi-input"
+              placeholder="重Roll偏好(可选,如:微黑皮短发运动系)"
+              :disabled="rerolling"
+            />
+            <button class="bbi-btn bbi-btn-sm" type="button" :disabled="rerolling" @click="rerollAppearance">
+              {{ rerolling ? '重Roll中…' : '重Roll形象' }}
+            </button>
+          </div>
+          <span class="bbi-field-hint">
+            按正文已写死的人设重设计发型/瞳色/肤色/体型/标志特征,只填进下面表单供预览;反复点会换新方案,点「保存」才落盘。
+          </span>
+        </div>
 
         <label class="bbi-modal-field">
           <span class="bbi-modal-label">整串模式(可选)</span>
@@ -907,6 +975,21 @@ function sourceLabel(entry: CharTagEntry): string {
   font-size: 12px;
   font-weight: 600;
   color: var(--bbi-ink-soft);
+}
+
+/* —— 重Roll 形象 —— */
+.bbi-char-reroll-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.bbi-char-reroll-row .bbi-input {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.bbi-char-reroll-row .bbi-btn {
+  flex: 0 0 auto;
+  white-space: nowrap;
 }
 
 /* —— 弹窗内历史面板 —— */
