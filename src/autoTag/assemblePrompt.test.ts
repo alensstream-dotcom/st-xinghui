@@ -310,3 +310,29 @@ describe('建档容错与导演标记清理', () => {
     expect(him?.tag).toBe('1boy, faceless male, source#licking nipple');
   });
 });
+
+describe('景别裁切：下身词与鞋袜', () => {
+  it('upper body 时外貌里的 long legs / thick thighs 一并清掉,full body 保留', () => {
+    const entries = [entry('温岚', { sex: '1girl', hair: 'long black hair', body: 'long legs, thick thighs, slender' })];
+    const upper = assembleImageCharacters(image('1girl, upper body', [{ name: '温岚' }]), entries, new Map());
+    expect(upper.characters[0].tag).toContain('slender');
+    expect(upper.characters[0].tag).not.toContain('long legs');
+    expect(upper.characters[0].tag).not.toContain('thick thighs');
+
+    const full = assembleImageCharacters(image('1girl, full body', [{ name: '温岚' }]), entries, new Map());
+    expect(full.characters[0].tag).toContain('long legs');
+  });
+
+  it('cowboy shot / medium shot 时 hosiery 里的鞋子词被清掉,丝袜本身保留', () => {
+    const entries = [entry('温岚', { sex: '1girl' })];
+    const outfits = new Map([
+      outfit('温岚', { hosiery: worn('20 denier sheer black pantyhose, black leather loafers') }),
+    ]);
+    const cowboy = assembleImageCharacters(image('1girl, cowboy shot', [{ name: '温岚' }]), entries, outfits);
+    expect(cowboy.characters[0].tag).toContain('sheer black pantyhose');
+    expect(cowboy.characters[0].tag).not.toContain('loafers');
+
+    const wide = assembleImageCharacters(image('1girl, wide shot', [{ name: '温岚' }]), entries, outfits);
+    expect(wide.characters[0].tag).toContain('loafers');
+  });
+});

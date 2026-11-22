@@ -454,7 +454,9 @@ const STATE_SYNC_SYSTEM_PROMPT = `你只做两件事：读「目标正文」，�
 - 已经在【角色固定外貌库】里的人，严禁再输出 field:"new"；只在他发生永久变化（剪发、染发、体型变化）时用对应 field。
 
 规则 2（发型四要素 + 瞳色眼型 + 体型比例：正文没写就按世界观补齐并定死）：
-- hair 必须同时写齐 4 要素：① 明确发色（black / brown / blonde / red / silver 等，必填，不许留空）；② 长度与直卷度（short / medium / long / very long + straight / wavy / curly）；③ 扎发形态（披散必须写 hair down；扎发写明 high ponytail / low twintails / twin braids / single hair bun / half updo）；④ 刘海款式（blunt bangs / parted bangs / side-swept bangs / hair over one eye / forehead）。严禁只写 "short-medium hair" 或 "long hair, ponytail" 这类缺色缺形态的残缺词。
+- hair 必须拆成标准高频 Danbooru 原子词，用逗号分隔，一个词只管一件事，例如 "medium hair, brown hair, wavy hair, hair down, parted bangs"。严禁把长度、颜色、形容词拼成生僻长短语（禁止 "medium chestnut brown hair"、"slightly wavy hair"、"shoulder-length chestnut-brown wavy hair"）。
+- hair 四要素仍然要齐：① 发色原子词（black hair / brown hair / blonde hair / red hair / silver hair，必填，不许留空）；② 长度原子词（short hair / medium hair / long hair / very long hair）+ 直卷原子词（straight hair / wavy hair / curly hair，直发可不写）；③ 扎发形态（披散写 hair down；扎发优先用正背面一致的明确词：high ponytail / twin braids / side ponytail / low bun / single hair bun）；④ 刘海（blunt bangs / parted bangs / side-swept bangs / hair over one eye / forehead）。
+- 正文没明确要求时尽量不用正背面差异极大的 half updo——同一套发型从正面看像披散、从背面看像扎起，换角度就会被画成另一个发型。
 - eyes 必须写「明确瞳色 + 标准 Danbooru 眼型（tsurime / tareme / jitome / sanpaku）」，例如 "brown eyes, tareme"；严禁写 "sharp eyes" 这类没有瞳色的自造词，也不许留空。
 - body 必须写清身高与胸型比例，例如 "petite, small breasts, slender" / "tall female, athletic, medium breasts" / "curvy, voluptuous, large breasts, wide hips"。
 - skin 写清肤色，例如 "fair skin" / "pale skin" / "tan"。
@@ -470,7 +472,10 @@ const STATE_SYNC_SYSTEM_PROMPT = `你只做两件事：读「目标正文」，�
 规则 4（五层服装：视觉指纹 + 时代世界观统一）：
 - 先按正文与设定把统一的时代与世界观定下来（校园 / 都市职场 / 古风 / 奇幻），再落实到剪裁与面料；同一个世界观里不许混进另一个时代的单品。
 - 五层固定为 outer(外衣/上装)、bra(胸罩)、bottom(下装裙裤)、panties(内裤)、hosiery(袜子/丝袜/鞋)。每层 status 只能是 worn(穿着)、disheveled(还在身上但形态变了)、removed(已离开身体)。
-- set_outfit 必须给出具体「版型/剪裁 + 主色 + 面料或关键部件」，例如 "white cotton bra"、"navy pleated skirt"；裤袜要写明颜色与透明度，例如 "20 denier sheer black pantyhose"。严禁孤立笼统词（"school uniform"、"dress"、"pantyhose"）。
+- set_outfit 的每一层必须锁死 4 个具体视觉锚点：主色 + 材质面料 + 领口与袖长（long sleeves / short sleeves / sleeveless / spaghetti straps / square neckline / off-shoulder / backless）+ 裙长或版型（mini dress / knee-length / midi / maxi / bodycon / a-line / pleated）。
+- 例："light blue chiffon dress, short sleeves, square neckline, knee-length, a-line" 合格；"light blue fitted dress" 不合格（缺袖长、缺材质、缺领口，换角度就会被画成另一款裙子）。
+- 裤袜与丝袜同样写清颜色、透明度与丹数，例如 "20 denier sheer black pantyhose"；鞋写清种类与颜色，例如 "black leather loafers"。
+- 严禁孤立笼统词（"school uniform"、"dress"、"pantyhose"）。
 - 同一件衣服的指纹逐字复用，同义改写会让模型画成另一件。
 - 未明确脱掉、换装或场景跳跃时，保持上一状态。
 - 半敞、解扣、滑落、撩裙、拉到胸下、拨到一边，一律 disheveled + stateTag（"unbuttoned, open front" / "lifted above chest" / "pulled down under breasts" / "pulled aside"），不许写成 removed。
@@ -484,7 +489,7 @@ const STATE_SYNC_SYSTEM_PROMPT = `你只做两件事：读「目标正文」，�
 建档（一次填齐四要素 hair、带瞳色眼型 eyes、sex、skin、body、extra）：
 {"name":"温岚","field":"new","position":"P2","reason":"本楼首次出场","fields":{"sex":"1girl","hair":"long black hair, straight hair, hair down, blunt bangs, white hairclip","eyes":"brown eyes, tareme","skin":"fair skin","body":"petite, medium breasts, slender","extra":"round eyewear, necklace, mole under eye","fandom":""}}
 整套换装：
-{"op":"set_outfit","name":"温岚","sceneHint":"school morning","position":"P2","layers":{"outer":{"tag":"white cotton school shirt, short sleeves","status":"worn"},"bra":{"tag":"white cotton bra","status":"worn"},"bottom":{"tag":"navy pleated wool skirt","status":"worn"},"panties":{"tag":"white cotton panties","status":"worn"},"hosiery":{"tag":"20 denier sheer black pantyhose","status":"worn"}}}
+{"op":"set_outfit","name":"温岚","sceneHint":"school morning","position":"P2","layers":{"outer":{"tag":"white cotton school shirt, short sleeves, sailor collar","status":"worn"},"bra":{"tag":"white cotton bra, plunge neckline","status":"worn"},"bottom":{"tag":"navy wool pleated skirt, knee-length, a-line","status":"worn"},"panties":{"tag":"white cotton panties, low rise","status":"worn"},"hosiery":{"tag":"20 denier sheer black pantyhose","status":"worn"}}}
 单层变化：
 {"op":"update_layer","name":"温岚","layer":"bra","status":"disheveled","stateTag":"pulled down under breasts","position":"P9"}
 - sex 必须写；其余确实不知道的字段留空字符串，不要编。表情、动作、场景、光线一律不写。`;
@@ -499,7 +504,20 @@ function buildDirectorSystemPrompt(nlOn: boolean, minImages: number, maxImages: 
 
 ${countRule}
 
-只输出一个 JSON 对象，不要 Markdown 代码块，不要解释：
+输出分两段，顺序不能反：先一段 <thinking>…</thinking> 复核，再一个 JSON 对象。JSON 之外不要 Markdown 代码块，不要解释。
+
+<thinking> 里只用极简短行，每张图各写 3 行，不写废话、不预写 JSON：
+1. 光线与时间：照着正文写。正文说白天/明亮就必须写 daylight, bright lighting；正文说清晨就写 morning light；严禁默认画成黑夜霓虹。
+2. 核心动作的物理拆解：把中文文学描写拆成手部/肢体位置与接触点。例：「挥拳捶他胸口」→ raised fist, hitting chest, touching chest；「扶着他的手臂站起来」→ hand on his arm, standing up；NSFW 互动必须拆出手/嘴/腿/腰胯的具体接触（hand on her hip, mouth on nipple, cock inside pussy…）。严禁写成 standing + 干站表情敷衍了事。
+3. 景别与动作匹配：确认这格景别能完整拍到核心手部或下身接触点；拍不到就换景别。
+
+<thinking> 示例：
+<thinking>
+P12 光线=daylight, bright lighting；动作=hand on her hip + cock inside pussy；景别=cowboy shot 能拍到腰胯接触。
+P18 光线=lamp light, dim lighting；动作=raised fist, hitting chest, touching chest；景别=upper body 够手部。
+</thinking>
+
+然后是 JSON：
 {"images":[{"position":"P12","tag":"1girl, 1boy, bedroom, pov, from above, cowboy shot, dim lighting, vaginal sex","nl":"${nlOn ? 'He holds her waist down on the bed and pushes into her from the front.' : ''}","characters":[{"name":"温岚","omitFeatures":[],"tag":"half-closed eyes, looking at viewer, blush, open mouth, lying on back, spread legs, target#pushing into her","nl":"${nlOn ? 'She lies on her back with her legs spread wide as he pushes into her.' : ''}"},{"name":"李斌","omitFeatures":[],"tag":"1boy, faceless male, penis, source#pushing into her","nl":""}],"size":"portrait"}]}
 
 一、基础姿态（先把人放在正确的位置上，再谈动作）

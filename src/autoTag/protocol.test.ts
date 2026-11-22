@@ -525,3 +525,11 @@ describe('建档字段完整性', () => {
 function entryStub(name: string): CharTagEntry {
   return { name, fields: emptyCharFields(), raw: '', nl: '', source: 'manual', desc: '', history: [] };
 }
+describe('导演通道 thinking 块', () => {
+  it('忽略 <thinking> 复核段，只解析后面的 JSON', () => {
+    const raw =
+      '<thinking>\nP12 光线=daylight, bright lighting；动作=hand on her hip；景别=cowboy shot 够。\n</thinking>\n{"images":[{"position":"P1","tag":"1girl, daylight, bright lighting, cowboy shot, hand on her hip"}]}';
+    const plan = parseImagePlanWithRange(raw, [{ id: 'P1', sourceLine: 0, text: '第一幕结束' }], 0, 1);
+    expect(plan.images[0].tag).toBe('1girl, daylight, bright lighting, cowboy shot, hand on her hip');
+  });
+});

@@ -40,6 +40,12 @@ function dropLocalizedMarkers(tags: string[]): string[] {
   return tags.filter(tag => !DIRECTOR_MARKER.test(tag) || !HAS_CJK.test(tag));
 }
 
+/** 只在全身/腿长镜头里才有意义的纯下身词：上半身构图写进去会让 NAI 硬塞一双腿。 */
+const LEG_ONLY = /\b(?:long legs?|short legs?|slender legs?|thick thighs?|bare legs?|shapely legs?|wide hips?)\b/i;
+/** 鞋子类词：半身构图拍不到脚，留着会被画成蜷脚塞进画面。 */
+const SHOE_WORD = /\b(?:flats?|heels?|high heels?|shoes?|boots?|sneakers?|sandals?|loafers?|pumps?|mary janes?|slippers?)\b/i;
+const SHOES_HIDDEN_SHOT = /\b(?:cowboy shot|medium shot|upper body|close-up|face focus)\b/i;
+
 function normalizeSexTag(raw: string): string {
   const s = raw.trim().toLowerCase();
   if (!s) return '';
@@ -261,12 +267,20 @@ export function assembleImageCharacters(
       !outfitsAtPos.get(character.name) && entry?.fields.outfit.trim()
         ? splitTags(entry.fields.outfit)
         : [];
-    const mergedPositive = dedupeTags([
-      ...fixedTags,
-      ...compiledOutfit.positive,
-      ...fallbackOutfit,
-      ...dropLocalizedMarkers(splitTags(character.tag)),
-    ]);
+    // 景别裁切必须在合流之后做：外貌里的腿型词与 hosiery 里的鞋子词都可能来自任意一路。
+    // 服装层的 tag 本身可能带逗号（"sheer black pantyhose, black leather loafers"），
+    // 先拆成原子词再过滤，否则鞋子词会把整串丝袜一起带走。
+    const filtered = dedupeTags(
+      [
+        ...fixedTags,
+        ...compiledOutfit.positive,
+        ...fallbackOutfit,
+        ...dropLocalizedMarkers(splitTags(character.tag)),
+      ].flatMap(tag => splitTags(tag)),
+    ).filter(tag => !(upperOnly && LEG_ONLY.test(tag)));
+    const mergedPositive = SHOES_HIDDEN_SHOT.test(image.tag)
+      ? filtered.filter(tag => !SHOE_WORD.test(tag))
+      : filtered;
 
     const negativeParts = [
       ...splitTags(character.uc ?? ''),
