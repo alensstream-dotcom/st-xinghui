@@ -1,6 +1,7 @@
 import type { ImageCharacterPrompt, ImageInsertion } from '@/autoTag/protocol';
 import type { CharTagEntry } from '@/state/charTags';
 import type { CharOutfitState } from '@/state/outfitState';
+import type { WorldAnchorConfig } from '@/state/worldAnchor';
 
 /**
  * 本地确定性编译器（计划书步骤 5）。
@@ -74,28 +75,51 @@ function isUpperOnlyShot(baseTag: string): boolean {
   return hasUpperCue && !hasLowerOrFullCue;
 }
 
-function isOnePieceOuter(outerTag: string): boolean {
-  return /\b(dress|gown|kimono|yukata|hanfu|cheongsam|qipao|nightgown|bodysuit|leotard|swimsuit|onesie)\b/i.test(
+export function isOnePieceOuter(outerTag: string): boolean {
+  return /\b(dress|gown|kimono|yukata|hanfu|robe|taoist robe|cloak|tunic|trench coat|cheongsam|qipao|nightgown|bodysuit|leotard|swimsuit|onesie)\b/i.test(
     outerTag,
   );
 }
 
-/** 从角色库硬拼固定外貌（自动跳过 omitFeatures 中本帧临时摘下的眼镜/首饰）。 */
+/** 连身长款词:长袍/长裙类外衣把下身整个罩住,没有「掀开」就不该让短裙词抢画面。 */
+const LONG_HEM = /\b(?:ankle-length|full-length|floor-length|long|maxi)\b/i;
+/** 短裙类词:只有换装或掀开时才允许与长袍同框。 */
+export const SHORT_SKIRT = /\b(?:miniskirt|microskirt|short skirt|pleated skirt|skater skirt)\b/i;
+
+/**
+ * omitFeatures 的匹配器:按逗号分词后做「整词/词边界」比对,绝不做子串包含。
+ * 旧实现用 `lower.includes(omit)`,摘 hairpin 时会连带把 `hair`、`long hair` 一起摘掉——
+ * 结果就是「角色变金发」。这里改成词边界匹配,`hairpin` 只命中 hairpin 本身。
+ */
+function buildOmitMatcher(omitFeatures: string[]): (token: string) => boolean {
+  const items = omitFeatures
+    .flatMap(value => splitTags(value))
+    .map(value => value.trim().toLowerCase())
+    .filter(Boolean);
+  if (!items.length) return () => false;
+  const patterns = items.map(item => new RegExp(`(?:^|\\s)${item.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?:$|\\s)`, 'i'));
+  return (token: string) => {
+    const lower = token.trim().toLowerCase();
+    if (!lower) return false;
+    return patterns.some(pattern => pattern.test(lower));
+  };
+}
+
+/**
+ * 从角色库硬拼固定外貌。
+ *
+ * 关键红线:omitFeatures 只允许过滤 `extra`(眼镜、首饰、发饰等临时可摘的东西)。
+ * 发色/发型/瞳色/肤色/体型是身份本身,任何情况下都不许被 omit —— 少了它们 NAI 会
+ * 按默认值另画一个人(最典型的就是「黑发被画成金发」)。
+ */
 function buildFixedAppearanceTags(
   entry: CharTagEntry | undefined,
   omitFeatures: string[] = [],
 ): string[] {
   if (!entry) return [];
-  const omitSet = new Set(omitFeatures.map(s => s.trim().toLowerCase()).filter(Boolean));
-  const filterOmit = (raw: string) =>
-    splitTags(raw).filter(t => {
-      const lower = t.toLowerCase();
-      if (!lower) return false;
-      for (const omit of omitSet) {
-        if (lower === omit || lower.includes(omit)) return false;
-      }
-      return true;
-    });
+  const isOmitted = buildOmitMatcher(omitFeatures);
+  const filterOmit = (raw: string) => splitTags(raw).filter(t => !isOmitted(t));
+  const identity = (raw: string) => splitTags(raw);
 
   const fields = entry.fields;
   const hasStructured =
@@ -105,19 +129,23 @@ function buildFixedAppearanceTags(
     Boolean(fields.skin.trim()) ||
     Boolean(fields.body.trim()) ||
     Boolean(fields.extra.trim());
+  // 只有整串 tag 没有结构化字段时无从区分「身份」与「配饰」,这里只能按整词过滤配饰;
+  // 结构化条目则走下面 identity() 的通道,omit 只落在 extra 上。
   if (!hasStructured && entry.raw.trim()) return filterOmit(entry.raw);
 
   const tags: string[] = [];
-  const push = (raw: string) => {
-    for (const t of filterOmit(raw)) tags.push(t);
+  /** 身份字段:不受 omit 影响。 */
+  const pushIdentity = (raw: string) => {
+    for (const t of identity(raw)) tags.push(t);
   };
-  push(fields.fandom);
-  push(normalizeSexTag(fields.sex) || 'girl');
-  push(fields.hair);
-  push(fields.eyes);
-  push(fields.skin);
-  push(fields.body);
-  push(fields.extra);
+  pushIdentity(fields.fandom);
+  pushIdentity(normalizeSexTag(fields.sex) || 'girl');
+  pushIdentity(fields.hair);
+  pushIdentity(fields.eyes);
+  pushIdentity(fields.skin);
+  pushIdentity(fields.body);
+  // 只有 extra(眼镜/首饰/发饰)允许被本帧临时摘掉
+  for (const t of filterOmit(fields.extra)) tags.push(t);
   return dedupeTags(tags);
 }
 
@@ -240,16 +268,67 @@ function extractDistinctiveFeatures(entry: CharTagEntry | undefined): string[] {
 }
 
 /**
+ * 这一格「实际被遮住」的部位。状态表说了算:
+ * - 上半身遮住 = 胸罩穿好,或外衣穿好且胸罩没被脱掉(外衣敞开时胸罩若还在也算遮住)
+ * - 下半身遮住 = 下装/内裤穿好,或连身衣整体穿好
+ * - 连身长袍穿好且没掀开时,短裙词一律不出现(否则百褶裙会盖掉道袍下摆)
+ */
+interface CoverState {
+  upper: boolean;
+  lower: boolean;
+  suppressShortSkirt: boolean;
+}
+
+const CONFLICT_UPPER = /^(?:bare breasts|topless|exposed breasts|exposed chest|nipples?|bare chest|nude)$/i;
+const CONFLICT_LOWER = /^(?:bottomless|nude|naked|completely nude|fully nude|pussy|spread pussy|pussy juice)$/i;
+
+function describeCoverage(outfit: CharOutfitState | undefined): CoverState {
+  const layers = outfit?.layers;
+  if (!layers) return { upper: false, lower: false, suppressShortSkirt: false };
+  const outerWorn = layers.outer?.status === 'worn';
+  const onePiece = outerWorn && isOnePieceOuter(layers.outer?.tag ?? '');
+  const upper = layers.bra?.status === 'worn' || (outerWorn && layers.bra?.status !== 'removed');
+  const lower = layers.bottom?.status === 'worn' || layers.panties?.status === 'worn' || onePiece;
+  const longHem = onePiece && LONG_HEM.test(layers.outer?.tag ?? '') && layers.outer?.status !== 'disheveled';
+  return { upper, lower, suppressShortSkirt: longHem };
+}
+
+/** 把与状态表冲突的露点词从导演给的 tag 里剔掉(只剔冲突词,不动动作/表情/标记)。 */
+function resolveCoverConflicts(tags: string[], cover: CoverState): string[] {
+  if (!cover.upper && !cover.lower) return tags;
+  return tags.filter(tag => {
+    const token = tag.trim();
+    if (cover.upper && CONFLICT_UPPER.test(token)) return false;
+    if (cover.lower && CONFLICT_LOWER.test(token)) return false;
+    return true;
+  });
+}
+
+/**
  * 把导演通道挑出的这一格，编译成最终要发给 NAI 的插入内容。
  *
  * 顺序是固定的：固定外貌 → 五层服装 → 导演给的角色 tag（表情/视线/动作/source#/target#）。
  * 男角色跳过外貌与五层，只留导演给的 boy + 必要局部动作。
  * 返回的对象里不带 omitFeatures——那是组装期的一次性开关，序列化进正文只会变成脏 tag。
  */
+/**
+ * 世界观防穿帮词:只屏蔽「正文没写却被凭空画出来」的单品。
+ * 正文明确写了黑丝/短裙/牛仔裤,这个世界观就得让路——正文优先于世界观默认。
+ */
+function guardrailNegatives(world: WorldAnchorConfig | undefined, positive: string[]): string[] {
+  if (!world) return [];
+  const lower = positive.map(tag => tag.toLowerCase());
+  return splitTags(world.negativeGuardrails).filter(word => {
+    const w = word.toLowerCase();
+    return !lower.some(tag => tag === w || tag.split(/\s+/).includes(w) || tag.includes(w));
+  });
+}
+
 export function assembleImageCharacters(
   image: ImageInsertion,
   entriesAtPos: CharTagEntry[],
   outfitsAtPos: Map<string, CharOutfitState>,
+  world?: WorldAnchorConfig,
 ): ImageInsertion {
   const upperOnly = isUpperOnlyShot(image.tag);
   const femaleIndexes: number[] = [];
@@ -268,7 +347,11 @@ export function assembleImageCharacters(
     }
 
     const fixedTags = buildFixedAppearanceTags(entry, character.omitFeatures);
-    const compiledOutfit = compileOutfitForFrame(outfitsAtPos.get(character.name), upperOnly);
+    const outfitState = outfitsAtPos.get(character.name);
+    const compiledOutfit = compileOutfitForFrame(outfitState, upperOnly);
+    // 状态表说「穿着」、导演说「裸着」时必须有一方认输:这里让状态表赢。
+    // 原因是状态表逐楼回放、有历史依据,导演这一格只看到本段文字,最容易写反。
+    const cover = describeCoverage(outfitState);
     const fallbackOutfit =
       !outfitsAtPos.get(character.name) && entry?.fields.outfit.trim()
         ? splitTags(entry.fields.outfit)
@@ -276,14 +359,17 @@ export function assembleImageCharacters(
     // 景别裁切必须在合流之后做：外貌里的腿型词与 hosiery 里的鞋子词都可能来自任意一路。
     // 服装层的 tag 本身可能带逗号（"sheer black pantyhose, black leather loafers"），
     // 先拆成原子词再过滤，否则鞋子词会把整串丝袜一起带走。
+    const directorTags = resolveCoverConflicts(dropLocalizedMarkers(splitTags(character.tag)), cover);
     const filtered = dedupeTags(
       [
         ...fixedTags,
         ...compiledOutfit.positive,
         ...fallbackOutfit,
-        ...dropLocalizedMarkers(splitTags(character.tag)),
+        ...directorTags,
       ].flatMap(tag => splitTags(tag)),
-    ).filter(tag => !(upperOnly && LEG_ONLY.test(tag)));
+    )
+      .filter(tag => !(upperOnly && LEG_ONLY.test(tag)))
+      .filter(tag => !(cover.suppressShortSkirt && SHORT_SKIRT.test(tag)));
     const mergedPositive = SHOES_HIDDEN_SHOT.test(image.tag)
       ? filtered.filter(tag => !SHOE_WORD.test(tag))
       : filtered;
@@ -292,6 +378,7 @@ export function assembleImageCharacters(
       ...splitTags(character.uc ?? ''),
       ...compiledOutfit.negative,
       ...buildSelfAntiDriftNegative(entry),
+      ...guardrailNegatives(world, mergedPositive),
     ];
     if (femaleIndexes.length >= 2) {
       for (const otherIndex of femaleIndexes) {

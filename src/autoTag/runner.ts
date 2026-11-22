@@ -355,7 +355,7 @@ async function runDualChannel(params: {
       params.lockedNames,
     );
     const outfitsAtPos = outfitAtPosition(outfitsBefore, storedOutfitOps, img.sourceLine);
-    return assembleImageCharacters(img, entriesAtPos, outfitsAtPos);
+    return assembleImageCharacters(img, entriesAtPos, outfitsAtPos, params.input.world);
   });
 
   const plan: ImagePlan = { images: assembledImages, changes: statePlan.changes };

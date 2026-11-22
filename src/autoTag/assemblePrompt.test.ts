@@ -1,9 +1,10 @@
 import { describe, expect, it } from 'vitest';
 
-import { assembleImageCharacters } from '@/autoTag/assemblePrompt';
+import { assembleImageCharacters, isOnePieceOuter } from '@/autoTag/assemblePrompt';
 import { parseImagePlan, type ImageInsertion } from '@/autoTag/protocol';
 import { emptyCharFields, type CharTagEntry } from '@/state/charTags';
 import type { CharOutfitState, OutfitLayerState } from '@/state/outfitState';
+import { WORLD_PRESETS, defaultWorldAnchor } from '@/state/worldAnchor';
 
 function entry(name: string, fields: Partial<Record<string, string>> = {}): CharTagEntry {
   return {
@@ -357,5 +358,113 @@ describe('景别裁切：下身词与鞋袜', () => {
 
     const wide = assembleImageCharacters(image('1girl, wide shot', [{ name: '温岚' }]), entries, outfits);
     expect(wide.characters[0].tag).toContain('loafers');
+  });
+});
+
+describe('核心外貌锁死：omitFeatures 只摘配饰', () => {
+  it('omitFeatures 写了 hair / eyes 也不许摘掉发型瞳色，只摘 extra 里的发饰', () => {
+    const entries = [
+      entry('温岚', {
+        sex: '1girl',
+        hair: 'long black hair, straight hair',
+        eyes: 'brown eyes, tareme',
+        skin: 'fair skin',
+        body: 'petite, small breasts',
+        extra: 'hairpin, round eyewear, mole under eye',
+      }),
+    ];
+    const result = assembleImageCharacters(
+      image('1girl, upper body', [{ name: '温岚', omitFeatures: ['hair', 'eyes', 'hairpin', 'round eyewear'] }]),
+      entries,
+      new Map(),
+    );
+    const tag = result.characters[0].tag;
+    expect(tag).toContain('long black hair');
+    expect(tag).toContain('straight hair');
+    expect(tag).toContain('brown eyes');
+    expect(tag).toContain('fair skin');
+    expect(tag).toContain('small breasts');
+    expect(tag).not.toContain('hairpin');
+    expect(tag).not.toContain('round eyewear');
+    expect(tag).toContain('mole under eye');
+  });
+});
+
+describe('状态表与导演穿脱冲突仲裁', () => {
+  it('bra 穿着时导演写的 bare breasts / topless / nipples 全被剔掉', () => {
+    const entries = [entry('温岚', { sex: '1girl', hair: 'long black hair' })];
+    const outfits = new Map([
+      outfit('温岚', { bra: worn('white cotton bra'), bottom: worn('navy wool skirt') }),
+    ]);
+    const result = assembleImageCharacters(
+      image('1girl, cowboy shot', [
+        { name: '温岚', tag: 'blush, bare breasts, topless, nipples, sitting' },
+      ]),
+      entries,
+      outfits,
+    );
+    const tag = result.characters[0].tag;
+    expect(tag).not.toContain('bare breasts');
+    expect(tag).not.toContain('topless');
+    expect(tag).not.toContain('nipples');
+    expect(tag).toContain('white cotton bra');
+    expect(tag).toContain('sitting');
+  });
+
+  it('下装穿着时导演写的 bottomless / nude / pussy 被剔掉', () => {
+    const entries = [entry('温岚', { sex: '1girl' })];
+    const outfits = new Map([
+      outfit('温岚', { bottom: worn('navy wool trousers'), panties: worn('white cotton panties') }),
+    ]);
+    const result = assembleImageCharacters(
+      image('1girl, full body', [{ name: '温岚', tag: 'bottomless, nude, pussy, standing' }]),
+      entries,
+      outfits,
+    );
+    const tag = result.characters[0].tag;
+    expect(tag).not.toContain('bottomless');
+    expect(tag).not.toContain('nude');
+    expect(tag).not.toContain('pussy');
+    expect(tag).toContain('navy wool trousers');
+  });
+});
+
+describe('连身长袍压住短裙', () => {
+  it('isOnePieceOuter 认得道袍/斗篷/风衣', () => {
+    expect(isOnePieceOuter('white silk taoist robe')).toBe(true);
+    expect(isOnePieceOuter('long black cloak')).toBe(true);
+    expect(isOnePieceOuter('beige trench coat')).toBe(true);
+    expect(isOnePieceOuter('white cotton shirt')).toBe(false);
+  });
+
+  it('长袍穿好未掀开时，bottom 里的 short skirt 词不出现', () => {
+    const entries = [entry('苏青', { sex: '1girl' })];
+    const outfits = new Map([
+      outfit('苏青', {
+        outer: worn('plain white silk taoist robe, ankle-length'),
+        bottom: worn('black pleated miniskirt'),
+      }),
+    ]);
+    const result = assembleImageCharacters(image('1girl, full body', [{ name: '苏青' }]), entries, outfits);
+    expect(result.characters[0].tag).toContain('taoist robe');
+    expect(result.characters[0].tag).not.toContain('miniskirt');
+    expect(result.characters[0].tag).not.toContain('pleated skirt');
+  });
+});
+
+describe('世界观防穿帮豁免', () => {
+  it('正文明确写了的牛仔裤不再被古风负面屏蔽', () => {
+    const world = { ...defaultWorldAnchor(), ...WORLD_PRESETS.chinese_ancient, presetId: 'chinese_ancient' as const, lockedByUser: true };
+    const entries = [entry('苏青', { sex: '1girl' })];
+    const outfits = new Map([outfit('苏青', { bottom: worn('blue denim jeans') })]);
+    const result = assembleImageCharacters(
+      image('1girl, full body', [{ name: '苏青' }]),
+      entries,
+      outfits,
+      world,
+    );
+    const uc = result.characters[0].uc ?? '';
+    expect(uc).not.toContain('jeans');
+    expect(uc).toContain('sneakers');
   });
 });

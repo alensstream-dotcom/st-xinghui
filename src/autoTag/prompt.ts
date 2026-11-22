@@ -441,6 +441,85 @@ export interface DualChannelInput {
   world: WorldAnchorConfig;
 }
 
+/**
+ * 规则 5 的 set_outfit 示例必须跟着世界观走。
+ * 写死一套现代校服当例子,古风聊天里模型会照着抄出百褶裙和黑丝——
+ * 示例本身就是最强的污染源,所以每个世界观各给一套自己的。
+ */
+const OUTFIT_EXAMPLES: Record<string, { sceneHint: string; layers: Record<string, { tag: string; status: string }> }> = {
+  modern: {
+    sceneHint: 'school morning',
+    layers: {
+      outer: { tag: 'white cotton school shirt, short sleeves, sailor collar', status: 'worn' },
+      bra: { tag: 'white cotton bra, plunge neckline', status: 'worn' },
+      bottom: { tag: 'navy wool pleated skirt, knee-length, a-line', status: 'worn' },
+      panties: { tag: 'white cotton panties, low rise', status: 'worn' },
+      hosiery: { tag: '20 denier sheer black pantyhose', status: 'worn' },
+    },
+  },
+  chinese_ancient: {
+    sceneHint: 'dusk in the inner courtyard',
+    layers: {
+      outer: { tag: 'plain white silk taoist robe, long sleeves, cross-collar, ankle-length', status: 'worn' },
+      bra: { tag: 'white cotton dudou, cross-collar', status: 'worn' },
+      bottom: { tag: '', status: 'worn' },
+      panties: { tag: 'white silk drawers, high waist', status: 'worn' },
+      hosiery: { tag: 'white silk socks, embroidered cloth shoes', status: 'worn' },
+    },
+  },
+  western_fantasy: {
+    sceneHint: 'the tavern hearth',
+    layers: {
+      outer: { tag: 'cream linen blouse, long sleeves, square neckline, cinched waist', status: 'worn' },
+      bra: { tag: 'linen bodice stay, front lacing', status: 'worn' },
+      bottom: { tag: 'brown wool skirt, floor-length, a-line', status: 'worn' },
+      panties: { tag: 'linen drawers, knee-length', status: 'worn' },
+      hosiery: { tag: 'grey wool stockings, brown leather boots', status: 'worn' },
+    },
+  },
+  retro_republic: {
+    sceneHint: 'a rainy evening on the street',
+    layers: {
+      outer: { tag: 'ivory silk qipao, short sleeves, mandarin collar, ankle-length', status: 'worn' },
+      bra: { tag: 'cream cotton dudou, plain', status: 'worn' },
+      bottom: { tag: '', status: 'worn' },
+      panties: { tag: 'cream cotton drawers, mid-rise', status: 'worn' },
+      hosiery: { tag: 'sheer silk stockings, black cloth shoes', status: 'worn' },
+    },
+  },
+  urban_fantasy: {
+    sceneHint: 'late night in the apartment',
+    layers: {
+      outer: { tag: 'black knit turtleneck sweater, long sleeves, slim fit', status: 'worn' },
+      bra: { tag: 'black lace bralette, thin straps', status: 'worn' },
+      bottom: { tag: 'charcoal wool trousers, straight leg', status: 'worn' },
+      panties: { tag: 'black cotton panties, low rise', status: 'worn' },
+      hosiery: { tag: 'black ankle boots, leather', status: 'worn' },
+    },
+  },
+  scifi_cyberpunk: {
+    sceneHint: 'the neon alley at night',
+    layers: {
+      outer: { tag: 'graphite technical jacket, long sleeves, high collar, cropped', status: 'worn' },
+      bra: { tag: 'grey seamless sports bra, racerback', status: 'worn' },
+      bottom: { tag: 'black tactical trousers, tapered', status: 'worn' },
+      panties: { tag: 'grey seamless briefs', status: 'worn' },
+      hosiery: { tag: 'black combat boots, reinforced toe', status: 'worn' },
+    },
+  },
+};
+
+function outfitExampleJson(world: WorldAnchorConfig): string {
+  const example = OUTFIT_EXAMPLES[world.presetId] ?? OUTFIT_EXAMPLES.modern;
+  return JSON.stringify({
+    op: 'set_outfit',
+    name: '示例角色',
+    sceneHint: example.sceneHint,
+    position: 'P2',
+    layers: example.layers,
+  });
+}
+
 export function stateSyncSystemPrompt(world: WorldAnchorConfig): string {
   return `你只做两件事：读「目标正文」，① 为其中应当建档的角色报告建档与永久变化；② 为每个在场角色维护一张五层服装状态表。你不选画面、不写提示词、不写动作、不写表情。
 
@@ -489,9 +568,9 @@ worldPreset 只在首楼(首次进入聊天、还没有锁定世界观时)填写
 - 先按正文与设定把统一的时代与世界观定下来（校园 / 都市职场 / 古风 / 奇幻），再落实到剪裁与面料；同一个世界观里不许混进另一个时代的单品。
 - 五层固定为 outer(外衣/上装)、bra(胸罩)、bottom(下装裙裤)、panties(内裤)、hosiery(袜子/丝袜/鞋)。每层 status 只能是 worn(穿着)、disheveled(还在身上但形态变了)、removed(已离开身体)。
 - set_outfit 的每一层必须锁死 4 个具体视觉锚点：主色 + 材质面料 + 领口与袖长（long sleeves / short sleeves / sleeveless / spaghetti straps / square neckline / off-shoulder / backless）+ 裙长或版型（mini dress / knee-length / midi / maxi / bodycon / a-line / pleated）。
-- 例："light blue chiffon dress, short sleeves, square neckline, knee-length, a-line" 合格；"light blue fitted dress" 不合格（缺袖长、缺材质、缺领口，换角度就会被画成另一款裙子）。
-- 裤袜与丝袜同样写清颜色、透明度与丹数，例如 "20 denier sheer black pantyhose"；鞋写清种类与颜色，例如 "black leather loafers"。
-- 严禁孤立笼统词（"school uniform"、"dress"、"pantyhose"）。
+- 每一个 tag 都要能被「同世界观、没见过这张图」的人画出同一件衣服：颜色 + 面料 + 领口 + 袖长 + 长度/版型。缺任何一项，换角度就会被画成另一款。
+- 鞋袜同样写清颜色与形制（透明度、丹数、鞋型），用上面【本聊天世界观】服装映射里的词汇；规则 5 给的是本世界观可直接照抄的示例。
+- 严禁孤立笼统词：只写品类不写形制（例如只写「裙子」「袜子」「上衣」「制服」）一律不合格。
 - 同一件衣服的指纹逐字复用，同义改写会让模型画成另一件。
 - 未明确脱掉、换装或场景跳跃时，保持上一状态。
 - 半敞、解扣、滑落、撩裙、拉到胸下、拨到一边，一律 disheveled + stateTag（"unbuttoned, open front" / "lifted above chest" / "pulled down under breasts" / "pulled aside"），不许写成 removed。
@@ -500,15 +579,17 @@ worldPreset 只在首楼(首次进入聊天、还没有锁定世界观时)填写
 - **禁止无故重复 set_outfit**：只要某角色在【本楼起始服装快照】或本楼前文已有服装记录，除非正文明确写出「换了一套新衣服/换装/换上另一件外衣」，否则严禁再输出 set_outfit——set_outfit 会清空覆盖原有五层，是跨楼服装漂移的头号来源。
 - 衣襟微敞、滑落、解扣、撩裙、脱去或穿回某一件，一律只用 update_layer（disheveled + stateTag，或 removed / worn）。
 - 服装词汇必须贴合上面【本聊天世界观】的服装映射，不许把别的时代的单品混进来。
+- **连身服饰不得凭空补下装**：当 outer 是连身长袍 / 道袍 / 汉服长衫 / 连身裙 / 旗袍 / 和服（robe, taoist robe, hanfu, dress, kimono, cheongsam）时，只要正文没有明确写出另穿短裙、裤子或丝袜，bottom 与 hosiery 的 tag 必须留空字符串——不许脑补短裙、百褶裙、丝袜这类没写过的单品。只有正文明确写出才填。
+- **正文写的优先于世界观默认**：正文明确写了黑丝、短裙、牛仔裤、运动鞋，就必须按正文写进对应层，不许因为「古风不该有」而改写成别的单品；防穿帮只针对正文没写却被凭空补出来的东西。
 - 没有发生穿脱就输出 "outfitOps": []——这是常态，绝大多数楼层只有 0～2 条 update_layer。
 - position 是目标正文段尾的 P 编号；set_outfit 填首次出场那一段，update_layer 填变化发生的那一段。
 - 男角色同样要记（他的外套披到她身上、他的衬衫被脱下，都靠这条判断归属）。
 
 规则 5（标准 JSON 示例，照抄结构，字段名一个都不许改）：
 建档（一次填齐四要素 hair、带瞳色眼型 eyes、sex、skin、body、extra）：
-{"name":"温岚","field":"new","position":"P2","reason":"本楼首次出场","fields":{"sex":"1girl","hair":"long black hair, straight hair, hair down, blunt bangs, white hairclip","eyes":"brown eyes, tareme","skin":"fair skin","body":"petite, medium breasts, slender","extra":"round eyewear, necklace, mole under eye","fandom":""}}
-整套换装：
-{"op":"set_outfit","name":"温岚","sceneHint":"school morning","position":"P2","layers":{"outer":{"tag":"white cotton school shirt, short sleeves, sailor collar","status":"worn"},"bra":{"tag":"white cotton bra, plunge neckline","status":"worn"},"bottom":{"tag":"navy wool pleated skirt, knee-length, a-line","status":"worn"},"panties":{"tag":"white cotton panties, low rise","status":"worn"},"hosiery":{"tag":"20 denier sheer black pantyhose","status":"worn"}}}
+{"name":"温岚","field":"new","position":"P2","reason":"本楼首次出场","fields":{"sex":"1girl","hair":"long black hair, straight hair, hair down, blunt bangs","eyes":"brown eyes, tareme","skin":"fair skin","body":"petite, medium breasts, slender","extra":"necklace, mole under eye","fandom":""}}
+整套换装（下面是本世界观「${world.label}」的示例，只学结构；衣物一律换成正文实际写的，正文没写的层留空字符串）：
+${outfitExampleJson(world)}
 单层变化：
 {"op":"update_layer","name":"温岚","layer":"bra","status":"disheveled","stateTag":"pulled down under breasts","position":"P9"}
 - sex 必须写；其余确实不知道的字段留空字符串，不要编。表情、动作、场景、光线一律不写。`;
@@ -536,7 +617,11 @@ ${countRule}
 
 第一部分：全楼 S/A/B/C 分级（只写 P 编号与动作词，不写画面）
 0. 通读整楼后，把高光候选按级别列出来。必须从楼尾一直扫回开头再下判断，不许只看前几段就收手。
-   - S 级（最高优先）：显式亲密 / NSFW 动作与阶段跃迁——脱衣暴露、前戏爱抚、各类体位与性技（口交、乳交、手交、足交、舔阴、插入、后入、骑乘、中出等）、高潮与事后余韵。全楼每一种新变换的姿势 / 阶段必须各占 1 张，全部覆盖完、上限仍有余量，才允许补同姿势的第二张。
+   节拍均衡：正文超过 15～20 段、且上限 ≥ 3 张时，名额必须跨段分布——覆盖前半段（铺垫/挑逗/冲突）、中段（升温/转折）、后半段（高潮/余韵）；严禁把名额全扎在楼尾最后几段，也严禁全压在前半段。
+   - S 级（最高优先，两类平级，谁先出现谁先占）：
+     ① 高张力暧昧挑逗与支配 / 服从、强肢体拉扯：勾项圈、抬下巴、贴耳压迫、解衣拉扯、壁咚、扯领带、按在墙上、抓腕压制、强迫对视、膝枕挑逗、隔着衣服抚摸。
+     ② 显式亲密 / NSFW 动作与阶段跃迁：脱衣暴露、前戏爱抚、各类体位与性技（口交、乳交、手交、足交、舔阴、插入、后入、骑乘、中出等）、高潮与事后余韵。
+     这两类不许互相让位：不许因为「还没到正戏」就把挑逗名场面降成 A 级，也不许因为挑逗写得多就把正戏挤掉。全楼每一个不重复的 S 级场面各占 1 张。
    - A 级（强视觉接触与情绪爆点）：明显肢体接触（拥抱、壁咚、牵手、捶胸口、拉拉链、膝枕…）、强烈情绪爆发（泪目、羞愤、震惊、撒娇、冷笑压迫）、重要换装亮相 / 湿身 / 正式初登场。
    - B 级（强氛围定格）：光影或环境反差强、张力足的对手戏。
    - C 级（黑名单，一律跳过）：纯站桩对话、赶路转场、纯心理独白、动作尚未发生或已经结束的过渡句、同一姿势没有任何变化的重复帧。
@@ -565,8 +650,8 @@ P18 峰值=拳头落在他胸口那句；光线=lamp light, dim lighting；动�
 
 二、选帧优先级（亲密最高，新姿势必须全覆盖）
 0. 下面这几条就是 <thinking> 里的 S/A/B/C 分级：先 S（1～2 条）后 A（3 条）后 B（4 条），C 级一格都不选；S 级没覆盖完，不许用 A/B 级占名额。
-1. 显式 NSFW 与身体接触最高优先：正文出现的每一种 NSFW 姿势（口交、乳交、手交、足交、舔阴、插入、后入、骑乘、中出等）各出一张，不要因为它们难写而跳过。
-2. 对照「上张已画基线」，先遍历本楼所有新出现的 NSFW 姿势与阶段，各选 1 张；只有全部新姿势都覆盖完、上限仍有余量时，才允许补画同姿势的第二张。
+1. 显式 NSFW 与身体接触最高优先：正文出现的每一种 NSFW 姿势（口交、乳交、手交、足交、舔阴、插入、后入、骑乘、中出等）与每一种挑逗/支配场面各出一张，不要因为它们难写而跳过。
+2. **一姿势一图红线**：全楼所有不重复的 S 级与 A 级名场面各选 1 张之前，绝对禁止对同一个动作或体位画第 2 张；只有全部高光覆盖完、上限仍有余量时，才允许补同姿势第 2 张，且必须换机位与景别。宁可少一张，也不许拿两个名额画同一个动作。
 3. 其次是剧情转折（第一次、被发现、情绪爆发、换场所）。
 4. 日常走动与静态环境只有本身构成剧情节点时才选。
 5. 一段只写同一个动作的延续时合并成一格；不同姿势推进必须分开各占一张。
@@ -576,6 +661,7 @@ P18 峰值=拳头落在他胸口那句；光线=lamp light, dim lighting；动�
 2. 用第三人称的情形：女主独处、多女主同框、侧面曲线、含胸或背后环抱（from side / three-quarter view / from below / from above）。
 3. 连续两张图、或跨楼出现相同体位时，必须强制轮换机位与景别，严禁连续两张都锁死 pov + from above。
 4. pov hands 只代表男主伸手摸女主；女主主动伸手朝镜头写 outstretched hand, reaching towards viewer，严禁写 pov hands。
+5. **pov 与男主入镜互斥**：男主整个人或上半身入镜时（背后环抱、侧面贴身、面对面同框、两人都在画面里），一律用第三人称 front view / three-quarter view / from side / from behind，严禁写 pov；只有男主完全在镜头之外、最多露出手（pov hands）或局部身体时，才允许写 pov。
 
 四、表情、视线、景别与主被动
 1. 表情只从标准 Danbooru 词表挑：smile, grin, laughing, blush, embarrassed, frown, pout, surprised, crying, tears, angry, serious, sad, worried, scared, smug, seductive smile, expressionless, half-closed eyes, open mouth, clenched teeth, ahegao。
@@ -586,7 +672,7 @@ P18 峰值=拳头落在他胸口那句；光线=lamp light, dim lighting；动�
 6. source#<英文动作> / target#<英文动作> / mutual#<英文动作> 后面只能跟英文动作词，并成对绑定（发起方配主动姿态、承受方配被动姿态，两侧动作词逐字相同）；严禁写角色姓名或中文。单向动作只写一对，双方对等互动才用 mutual#。
 7. Base.tag 含 1boy 且该男角色参与了互动时，characters 数组必须包含他的角色块并配齐 source# 或 target#；不许只写女角色把他漏掉。男角色只写 1boy, faceless male + 必要的局部动作，不写外貌。
 8. 遇到未建档的一次性背景路人入画时，由你在当帧 characters[].tag 里一次性写全可见外貌与服装（这一次由你写，因为他没有档案可拼）。
-9. omitFeatures 只列本帧临时摘掉的词（只拍下半身就写 ["hair","eyes","skin","body"]）；看得见就不要摘。
+9. omitFeatures 只用于本帧临时摘下或看不见的**配饰**：眼镜、耳环、项链、发饰、帽子、手套（例如 ["round eyewear"]）。严禁把 hair / eyes / skin / body 放进去——发型与瞳色是这个人的身份，任何镜头都不许丢；镜头拍不到的部分由程序自己裁，不需要你摘。
 ${nlOn ? 'nl 用一句简短完整英文写这一格的画面（谁在做什么、接触点、空间关系），不写内心活动、不写剧情总结。' : '本通道不需要 nl，一律给空字符串。'}
 五、五条防偏见硬规则（逐条对照检查，命中就必须改）
 1. 递交物品/工具非攻击握持原则：剧情是递出、收起或展示枪械/刀剑/工具，而不是威胁攻击时，动作 tag 与 nl 都必须写明非攻击握持姿势与朝向，例如 "offering handgun on open palm"、"holding gun by barrel"、"grip facing him"、"offering knife by handle, blade pointing away"；严禁写 "pointing"、"aiming"、"aiming at viewer"、"pointing gun at"。是威胁/战斗才允许指向，且必须写清谁指向谁。
