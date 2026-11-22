@@ -340,6 +340,17 @@ function firstPosition(positions: Map<string, number>): { position: string; sour
 }
 
 /** 建档字段:hair 与 eyes 是二次元身份锚点,缺任一条则该条建档不可用(调用方丢弃)。 */
+const NEW_RECORD_META = new Set(['name', 'field', 'position', 'at', 'value', 'nl', 'reason', 'fields']);
+
+/** 顶层直接写外貌的建档记录(没有 fields 包裹)只取字段键。 */
+function newFieldSourceFromRecord(record: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(record)) {
+    if (!NEW_RECORD_META.has(key)) out[key] = value;
+  }
+  return out;
+}
+
 function parseNewFields(raw: Record<string, unknown>, skipMale: boolean): string | null {
   const fields: Partial<Record<CharTagField, string>> = {};
   for (const field of CHAR_TAG_FIELDS) {
@@ -383,7 +394,10 @@ function parseChanges(
         ? (o.fields as Record<string, unknown>)
         : null;
     if (field === 'new') {
-      const parsedFields = fields ? parseNewFields(fields, !!knownMaleProfiles) : null;
+      // 兜底:模型偶尔把外貌字段直接摊在顶层(漏掉 fields 包裹),那种写法不该整条丢掉,
+      // 把记录本身当字段表用,元信息键排除掉即可。
+      const fieldSource = fields ?? newFieldSourceFromRecord(o);
+      const parsedFields = parseNewFields(fieldSource, !!knownMaleProfiles);
       if (!parsedFields) continue;
       value = parsedFields;
     }

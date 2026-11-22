@@ -6,6 +6,7 @@ import {
   parseImagePlan as parseImagePlanWithRange,
 } from '@/autoTag/protocol';
 import { parseImageTagContent, parseImageTags } from '@/st/imageTagRegex';
+import { buildEntryTag, emptyCharFields, type CharTagEntry } from '@/state/charTags';
 
 const segments = [
   { id: 'P1', sourceLine: 0, text: '第一幕结束' },
@@ -481,3 +482,46 @@ describe('NovelAI story selection', () => {
       .images[0].characters).toHaveLength(1);
   });
 });
+
+describe('建档字段完整性', () => {
+  const segmentsOne = [{ id: 'P1', sourceLine: 0, text: '第一幕结束' }];
+
+  it('四要素 hair、带瞳色眼型 eyes、skin、body、extra 全部解析并写进角色库', () => {
+    const fields = {
+      sex: '1girl',
+      hair: 'long black hair, straight hair, hair down, blunt bangs, white hairclip',
+      eyes: 'brown eyes, tareme',
+      skin: 'fair skin',
+      body: 'petite, medium breasts, slender',
+      extra: 'round eyewear, necklace, mole under eye',
+      fandom: 'asuna (sword art online)',
+    };
+    const raw = `{"images":[],"changes":[{"name":"温岚","field":"new","position":"P1","fields":${JSON.stringify(fields)}}]}`;
+    const [change] = parseImagePlanWithRange(raw, segmentsOne, 0, 1).changes;
+    const parsed = JSON.parse(change.value) as Record<string, string>;
+    expect(parsed).toEqual(fields);
+
+    // 建档之后的入口 tag 就是这些字段拼出来的，缺一项都会让外貌丢到别的楼层去补
+    const profile: CharTagEntry = { ...entryStub('温岚'), fields: { ...emptyCharFields(), ...parsed } };
+    const tag = buildEntryTag(profile);
+    expect(tag).toContain('long black hair, straight hair, hair down, blunt bangs, white hairclip');
+    expect(tag).toContain('brown eyes, tareme');
+    expect(tag).toContain('fair skin');
+    expect(tag).toContain('petite, medium breasts, slender');
+    expect(tag).toContain('round eyewear, necklace, mole under eye');
+  });
+
+  it('漏掉 fields 包裹、外貌摊在顶层时也能入库', () => {
+    const raw =
+      '{"images":[],"changes":[{"name":"红发卷发女人","field":"new","position":"P1","sex":"1girl","hair":"red hair, wavy hair, long hair, hair down, side-swept bangs","eyes":"green eyes, tsurime"}]}';
+    const [change] = parseImagePlanWithRange(raw, segmentsOne, 0, 1).changes;
+    const parsed = JSON.parse(change.value) as Record<string, string>;
+    expect(parsed.hair).toContain('red hair');
+    expect(parsed.eyes).toBe('green eyes, tsurime');
+    expect(parsed.sex).toBe('1girl');
+  });
+});
+
+function entryStub(name: string): CharTagEntry {
+  return { name, fields: emptyCharFields(), raw: '', nl: '', source: 'manual', desc: '', history: [] };
+}
