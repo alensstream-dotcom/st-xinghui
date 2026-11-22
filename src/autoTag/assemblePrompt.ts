@@ -29,6 +29,17 @@ function dedupeTags(tags: string[]): string[] {
   return out;
 }
 
+/**
+ * 导演偶尔把「source#李斌」「target#温岚」这种中文人名写进标记位。标记后面只该跟
+ * 英文动作词；带着中文的标记在 NovelAI 里既不是动作也不是权重，留着只会污染提示词。
+ */
+const DIRECTOR_MARKER = /^(?:source|target|mutual)#/i;
+const HAS_CJK = /[\u4e00-\u9fff\u3040-\u30ff]/;
+
+function dropLocalizedMarkers(tags: string[]): string[] {
+  return tags.filter(tag => !DIRECTOR_MARKER.test(tag) || !HAS_CJK.test(tag));
+}
+
 function normalizeSexTag(raw: string): string {
   const s = raw.trim().toLowerCase();
   if (!s) return '';
@@ -238,7 +249,8 @@ export function assembleImageCharacters(
   const characters: ImageCharacterPrompt[] = image.characters.map((character, index) => {
     const entry = entriesAtPos.find(item => item.name === character.name);
     if (isMaleEntry(entry, character.tag)) {
-      const male: ImageCharacterPrompt = { name: character.name, tag: character.tag, nl: character.nl };
+      const maleTag = dropLocalizedMarkers(splitTags(character.tag)).join(', ');
+      const male: ImageCharacterPrompt = { name: character.name, tag: maleTag, nl: character.nl };
       if (character.uc) male.uc = character.uc;
       return male;
     }
@@ -253,7 +265,7 @@ export function assembleImageCharacters(
       ...fixedTags,
       ...compiledOutfit.positive,
       ...fallbackOutfit,
-      ...splitTags(character.tag),
+      ...dropLocalizedMarkers(splitTags(character.tag)),
     ]);
 
     const negativeParts = [
@@ -284,5 +296,5 @@ export function assembleImageCharacters(
     return result;
   });
 
-  return { ...image, characters };
+  return { ...image, tag: dropLocalizedMarkers(splitTags(image.tag)).join(', '), characters };
 }

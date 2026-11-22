@@ -306,10 +306,31 @@ describe('changes parsing', () => {
   it('drops unusable new profiles without failing the whole plan', () => {
     // 建档坏一条只该丢这条:为它作废整次输出会连图一起没有,那是更坏的结果
     const raw =
-      '{"images":[{"position":"P1","tag":"a"}],"changes":[{"name":"旧格式","field":"new","value":"1girl, red eyes","position":"P1"},{"name":"缺瞳色","field":"new","fields":{"hair":"long black hair"},"position":"P1"}]}';
+      '{"images":[{"position":"P1","tag":"a"}],"changes":[{"name":"旧格式","field":"new","value":"1girl, red eyes","position":"P1"},{"name":"全空","field":"new","fields":{"sex":"1girl"},"position":"P1"}]}';
     const plan = parseImagePlan(raw, segments, 1);
     expect(plan.changes).toEqual([]);
     expect(plan.images).toHaveLength(1);
+  });
+
+  it('accepts a new profile missing sex and secondary fields, defaulting sex to 1girl', () => {
+    // 实测模型常漏 sex / 漏瞳色:只要有一项能画出来的外貌就入库,否则角色库空、外貌全丢
+    const raw =
+      '{"images":[],"changes":[{"name":"温岚","field":"new","position":"P1","fields":{"hair":"long black hair, straight hair","body":"slender"}}]}';
+    const [change] = parseImagePlan(raw, segments, 1).changes;
+    expect(change.field).toBe('new');
+    const fields = JSON.parse(change.value) as Record<string, string>;
+    expect(fields.sex).toBe('1girl');
+    expect(fields.hair).toBe('long black hair, straight hair');
+    expect(fields.body).toBe('slender');
+    expect(fields.eyes ?? '').toBe('');
+  });
+
+  it('accepts a new profile that only carries a fandom identity', () => {
+    const raw =
+      '{"images":[],"changes":[{"name":"学姐","field":"new","position":"P1","fields":{"fandom":"genshin impact"}}]}';
+    const fields = JSON.parse(parseImagePlan(raw, segments, 1).changes[0].value) as Record<string, string>;
+    expect(fields.fandom).toBe('genshin impact');
+    expect(fields.sex).toBe('1girl');
   });
 
   it('treats a new profile as floor-wide, defaulting a missing or unknown position', () => {

@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { assembleImageCharacters } from '@/autoTag/assemblePrompt';
-import type { ImageInsertion } from '@/autoTag/protocol';
+import { parseImagePlan, type ImageInsertion } from '@/autoTag/protocol';
 import { emptyCharFields, type CharTagEntry } from '@/state/charTags';
 import type { CharOutfitState, OutfitLayerState } from '@/state/outfitState';
 
@@ -171,7 +171,7 @@ describe('本地提示词编译器：外貌与导演 tag 的合流', () => {
       image('1girl, 1boy, bedroom, cowboy shot', [
         {
           name: '温岚',
-          tag: 'parted lips, lying on back, spread legs, source#李斌, target#温岚, mutual#vaginal sex',
+          tag: 'parted lips, lying on back, spread legs, target#pushing into her',
           nl: 'She lies on her back.',
         },
       ]),
@@ -179,7 +179,7 @@ describe('本地提示词编译器：外貌与导演 tag 的合流', () => {
       outfits,
     );
     const tag = result.characters[0].tag ?? '';
-    const order = ['long black hair', 'brown eyes', 'slender', 'white shirt', 'jeans', 'source#李斌'];
+    const order = ['long black hair', 'brown eyes', 'slender', 'white shirt', 'jeans', 'target#pushing into her'];
     let cursor = -1;
     for (const token of order) {
       const at = tag.indexOf(token);
@@ -187,6 +187,7 @@ describe('本地提示词编译器：外貌与导演 tag 的合流', () => {
       cursor = at;
     }
     expect(tag).toContain('lying on back');
+    expect(tag).not.toContain('mutual#');
     expect(result.characters[0].nl).toBe('She lies on her back.');
   });
 
@@ -209,16 +210,17 @@ describe('本地提示词编译器：外貌与导演 tag 的合流', () => {
   });
 
   it('男角色跳过外貌与五层,只保留导演给的 boy 与局部动作', () => {
+    // 导演原先爱把中文人名塞进标记位,那串现在会被清掉(见「导演标记清理」那组用例)
     const entries = [entry('李斌', { sex: '1boy', hair: 'short black hair', body: 'tall' })];
     const outfits = new Map([outfit('李斌', { outer: worn('black jacket') })]);
     const result = assembleImageCharacters(
       image('1girl, 1boy, bedroom, cowboy shot', [
-        { name: '李斌', tag: '1boy, faceless male, penis, source#李斌, target#温岚' },
+        { name: '李斌', tag: '1boy, faceless male, penis, source#thrusting into her' },
       ]),
       entries,
       outfits,
     );
-    expect(result.characters[0].tag).toBe('1boy, faceless male, penis, source#李斌, target#温岚');
+    expect(result.characters[0].tag).toBe('1boy, faceless male, penis, source#thrusting into her');
     expect(result.characters[0].uc).toBeUndefined();
   });
 
@@ -243,5 +245,68 @@ describe('本地提示词编译器：外貌与导演 tag 的合流', () => {
     expect(her?.uc).not.toContain('twintails');
     expect(other?.uc).toContain('twintails');
     expect(other?.uc).not.toContain('round eyewear');
+  });
+});
+
+describe('建档容错与导演标记清理', () => {
+  it('漏写 sex 的 field:"new" 也能入库,并拼出固定外貌', () => {
+    const raw =
+      '{"images":[],"changes":[{"name":"温岚","field":"new","position":"P1","fields":{"hair":"long black hair, straight hair","body":"slender"}}]}';
+    const segments = [{ id: 'P1', sourceLine: 0, text: '第一幕结束' }];
+    const plan = parseImagePlan(raw, segments, 0, 1);
+    const change = plan.changes.find(item => item.field === 'new');
+    expect(change).toBeTruthy();
+    const fields = JSON.parse(change!.value) as Record<string, string>;
+    const profile: CharTagEntry = { ...entry('温岚'), fields: { ...emptyCharFields(), ...fields } };
+
+    const result = assembleImageCharacters(
+      image('1girl, bedroom, upper body', [{ name: '温岚', tag: 'parted lips' }]),
+      [profile],
+      new Map(),
+    );
+    expect(result.characters[0].tag).toContain('girl');
+    expect(result.characters[0].tag).toContain('long black hair');
+    expect(result.characters[0].tag).toContain('slender');
+  });
+
+  it('带中文人名的 source# / target# / mutual# 会被清掉,英文原样保留', () => {
+    const entries = [
+      entry('温岚', { sex: '1girl' }),
+      entry('李斌', { sex: '1boy' }),
+    ];
+    const result = assembleImageCharacters(
+      image('1girl, 1boy, bedroom, upper body', [
+        { name: '温岚', tag: 'parted lips, target#温岚, source#李斌, mutual#舔吮' },
+        { name: '李斌', tag: '1boy, faceless male, source#李斌' },
+      ]),
+      entries,
+      new Map(),
+    );
+    const her = result.characters.find(item => item.name === '温岚');
+    const him = result.characters.find(item => item.name === '李斌');
+    expect(her?.tag).toContain('parted lips');
+    expect(her?.tag).not.toContain('target#温岚');
+    expect(her?.tag).not.toContain('source#李斌');
+    expect(her?.tag).not.toContain('mutual#舔吮');
+    expect(him?.tag).toBe('1boy, faceless male');
+  });
+
+  it('正确的英文 source#licking nipple / target#licking nipple 原样保留', () => {
+    const entries = [
+      entry('温岚', { sex: '1girl' }),
+      entry('李斌', { sex: '1boy' }),
+    ];
+    const result = assembleImageCharacters(
+      image('1girl, 1boy, bedroom, upper body', [
+        { name: '温岚', tag: 'arched back, target#licking nipple' },
+        { name: '李斌', tag: '1boy, faceless male, source#licking nipple' },
+      ]),
+      entries,
+      new Map(),
+    );
+    const her = result.characters.find(item => item.name === '温岚');
+    const him = result.characters.find(item => item.name === '李斌');
+    expect(her?.tag).toBe('girl, arched back, target#licking nipple');
+    expect(him?.tag).toBe('1boy, faceless male, source#licking nipple');
   });
 });

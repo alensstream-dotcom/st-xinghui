@@ -446,7 +446,9 @@ const STATE_SYNC_SYSTEM_PROMPT = `你只做一件事：读「目标正文」，�
 规则 1（建档 changes）：
 - 男性角色不建档。
 - 已经在【角色固定外貌库】里的人，严禁再输出 field:"new"；只在他发生永久变化（剪发、染发、体型变化）时用对应 field。
-- 首次出场的女性用 field:"new"，一次填齐：hair（长度+颜色+发型+发饰四要素）、eyes（瞳色+眼型）、body（身高+胸型）、extra（眼镜/首饰等常驻物）、sex（1girl）。
+- 首次出场的女性用 field:"new"，一次填齐：sex（1girl）、hair（长度+颜色+发型+发饰四要素）、eyes（瞳色+眼型）、skin（肤色）、body（身高+胸型）、extra（眼镜/首饰等常驻物）。完整写法照抄这个结构，字段名一个都不许改：
+{"name":"温岚","field":"new","position":"P2","reason":"本楼首次出场","fields":{"sex":"1girl","hair":"long black hair, straight hair, hairpin","eyes":"brown eyes, round eyes","skin":"fair skin","body":"slender, medium breasts","extra":"round glasses"}}
+- 少写一项（例如没写 skin 或 extra）不会导致整条被丢，但 sex 必须写；确实不知道的字段留空字符串，不要编。
 - 同楼多个新女角必须彼此错开至少 3 项（发色、发型、瞳色、体型），撞脸会让同一张图里两个人长得一样。
 
 规则 2（五层 outfitOps）：
@@ -458,6 +460,8 @@ const STATE_SYNC_SYSTEM_PROMPT = `你只做一件事：读「目标正文」，�
 - 服装 tag 必须是具体剪裁与面料的英文指纹（类别 + 版型/剪裁 + 主色 + 关键部件），例如 "white cotton bra"、"navy pleated skirt"；禁止孤立笼统词（"clothes"、"outfit"、"lingerie"）。
 - 同一件衣服的指纹逐字复用，同义改写会让模型画成另一件。
 - disheveled 必须写 stateTag（"unbuttoned, open front" / "lifted above chest" / "pulled aside"）；worn 与 removed 不写 stateTag。removed 时 tag 仍然填这件衣物本身。
+- 半敞与全脱必须分清：正文没写「脱掉/褪下/踢掉」这类彻底离开身体的动作，这一层就保持上一状态，形体变了只是 disheveled——衬衫敞开、裙摆被掀到腰上、胸罩被拉到胸下、内裤被拨到一边，全都是 disheveled + stateTag，不许写成 removed。
+- 只有正文明确把这件衣物脱下来、扔开、褪到脚下，才写 removed。拿不准就保持原状态。
 - 没有发生穿脱就输出 "outfitOps": []——这是常态，绝大多数楼层只有 0～2 条 update_layer。
 - position 是目标正文段尾的 P 编号；set_outfit 填首次出场那一段，update_layer 填变化发生的那一段。
 - 男角色同样要记（他的外套披到她身上、他的衬衫被脱下，都靠这条判断归属）。
@@ -474,7 +478,7 @@ function buildDirectorSystemPrompt(nlOn: boolean, minImages: number, maxImages: 
 ${countRule}
 
 只输出一个 JSON 对象，不要 Markdown 代码块，不要解释：
-{"images":[{"position":"P12","tag":"1girl, 1boy, bedroom, from front, cowboy shot, dim lighting, vaginal sex","nl":"${nlOn ? 'He holds her waist down on the bed and pushes into her from the front.' : ''}","characters":[{"name":"温岚","omitFeatures":[],"tag":"parted lips, looking up at him, lying on back, spread legs, source#李斌, target#温岚, mutual#vaginal sex","nl":"${nlOn ? 'She lies on her back with her legs spread wide as he pushes into her.' : ''}"}],"size":"portrait"}]}
+{"images":[{"position":"P12","tag":"1girl, 1boy, bedroom, from front, cowboy shot, dim lighting, vaginal sex","nl":"${nlOn ? 'He holds her waist down on the bed and pushes into her from the front.' : ''}","characters":[{"name":"温岚","omitFeatures":[],"tag":"parted lips, looking up at him, lying on back, spread legs, target#pushing into her","nl":"${nlOn ? 'She lies on her back with her legs spread wide as he pushes into her.' : ''}"},{"name":"李斌","omitFeatures":[],"tag":"1boy, faceless male, penis, source#pushing into her","nl":""}],"size":"portrait"}]}
 
 选帧优先级：
 1. 露骨性行为与身体接触最高优先：正文里出现的每一种 NSFW 姿势各出一张（口交、乳交、手交、足交、舔阴、插入、后入、骑乘、中出等），不要因为它们「难写」而跳过。
@@ -490,7 +494,17 @@ Base.tag 必须齐全（顺序也按这个顺序写）：
 - 环境光：dim lighting / window light / warm colors 等
 - 共享核心互动/亲密动作：这一格两个人共同构成的动作（vaginal sex / fellatio / cunnilingus / paizuri / footjob 等），只写一次
 
-characters[].tag 必须写：表情与视线、个人姿势与动作、可见的解剖部位、以及 source#-target#-mutual# 锁定主被动（他动她写 source#他的名字、target#她的名字；她自己动只写她自己）。
+characters[].tag 必须写：表情与视线、个人姿势与动作、可见的解剖部位、以及 source#-target#-mutual# 锁定主被动。
+
+source# / target# / mutual# 的写法（会被直接送进 NovelAI，写错就是废提示词）：
+- # 后面【只能跟英文动作词】，严禁写角色姓名、严禁写中文。写的是「谁在做这个动作」，不是「谁和谁」。
+- 单向动作（他插她、他舔她、她握他）：只写一对，施动方的 tag 写 source#<动作>，受动方的 tag 写 target#<动作>，同一个动作的词必须一模一样。
+  正确：男方 "source#pushing into her"、女方 "target#pushing into her"；男方 "source#licking her nipple"、女方 "target#licking her nipple"。
+  也正确：她自己动的只写她自己 "source#rubbing her clit"，不加 target#。
+  错误（会被清理掉，等于没锁主被动）："source#李斌, target#温岚"、"source#高圆圆"、"mutual#licking nipple"。
+- 双方对等互动（接吻、互相抚摸、面对面同时动作）才用 mutual#<动作>，两侧写同一个词，例如两人的 tag 都写 "mutual#kiss"。
+- 单向动作不要再叠写 mutual#：source#/target# 与 mutual# 不能同时出现在同一格里。
+- 凡是 Base.tag 里有 1boy、且这个男角色在这一格里参与了动作（他插/他舔/他抱/他按住/他被她握着），characters 数组就必须包含他的角色块，并配齐对应的 source#<动作>（他施动）或 target#<动作>（他受动），不许只写女角色把他漏掉。
 男角色只写 boy + 必要的局部动作（例如 "1boy, faceless male, penis"），不要写他的外貌。
 同一体位不要连着出两张：换机位（from front → pov → from above）或换景别，让读者看到不同角度。
 

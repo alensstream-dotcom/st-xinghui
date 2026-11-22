@@ -347,7 +347,15 @@ function parseNewFields(raw: Record<string, unknown>, skipMale: boolean): string
     const text = typeof value === 'string' ? value.trim().replace(/[\r\n]+/g, ' ') : '';
     if (text) fields[field] = text;
   }
-  if (!fields.hair || !fields.eyes || (skipMale && isNaiMaleAppearance(fields.sex ?? ''))) return null;
+  // 模型常漏写 sex：女性建档默认补 1girl。否则 isNaiMaleAppearance('') 之外还会被
+  // 「缺 sex 就不是女性」的判据整条丢掉，表现成「角色库里一个新角色都没有、外貌全丢」。
+  if (!fields.sex) fields.sex = '1girl';
+  if (skipMale && isNaiMaleAppearance(fields.sex)) return null;
+  // 只要有一项能画出来的东西就入库：发/瞳/体型/常驻物/同人身份任意一项非空。
+  // 缺 eyes 之类的次要字段不再静默丢弃整条新角色——后面的楼层还能补。
+  const appearanceFields: CharTagField[] = ['fandom', 'hair', 'eyes', 'body', 'extra'];
+  const hasAppearance = appearanceFields.some(field => (fields[field] ?? '').trim() !== '');
+  if (!hasAppearance) return null;
   return JSON.stringify(fields);
 }
 
