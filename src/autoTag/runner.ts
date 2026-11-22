@@ -276,10 +276,14 @@ async function runDualChannel(params: {
   const outfitsBefore = outfitStatesBeforeFloor(params.floor);
   const outfitSnapshotText = buildOutfitSnapshotText(outfitsBefore);
   const lastImageSummary = summarizeLastFloorImage(getContext()?.chat ?? [], params.floor);
-  const input: DualChannelInput = { ...params.input, outfitSnapshot: outfitSnapshotText };
+  const input: DualChannelInput = {
+    ...params.input,
+    outfitSnapshot: outfitSnapshotText,
+    entries: params.entries,
+  };
 
   const [stateMsgs, directorMsgs] = await Promise.all([
-    buildStateSyncMessages(input, params.entries),
+    buildStateSyncMessages(input),
     buildDirectorMessages(input, lastImageSummary),
   ]);
 
@@ -324,12 +328,16 @@ async function runDualChannel(params: {
   const statePlan = parseStateSyncPlan(stateRaw, params.segments, {
     knownMaleProfiles: params.maleNames,
   });
-  // 首楼识别:用户手动锁过就不覆盖(applyDetectedWorldPreset 内部判断)
+  // 首楼识别:用户手动锁过就不覆盖(applyDetectedWorldPreset 内部判断)。
+  // 注意必须把结果接住:本楼拼装要用「刚识别出来的」世界观,不然首楼还是按旧预设
+  // 拼素服与负面,得等到下一楼才生效。
+  let world = params.input.world;
   if (statePlan.worldPreset) {
     const applied = applyDetectedWorldPreset(statePlan.worldPreset);
-    if (applied.lockedByUser === false && applied.presetId !== input.world.presetId) {
+    if (!applied.lockedByUser && applied.presetId !== params.input.world.presetId) {
       console.info(`[星绘] 已识别本聊天世界观：${applied.label}`);
     }
+    world = applied;
   }
   const directorPlan = parseImagePlan(
     directorRaw,
@@ -355,7 +363,7 @@ async function runDualChannel(params: {
       params.lockedNames,
     );
     const outfitsAtPos = outfitAtPosition(outfitsBefore, storedOutfitOps, img.sourceLine);
-    return assembleImageCharacters(img, entriesAtPos, outfitsAtPos, params.input.world);
+    return assembleImageCharacters(img, entriesAtPos, outfitsAtPos, world);
   });
 
   const plan: ImagePlan = { images: assembledImages, changes: statePlan.changes };

@@ -4,7 +4,7 @@ import { assembleImageCharacters, isOnePieceOuter, stripLeakedAppearanceAndOutfi
 import { parseImagePlan, type ImageInsertion } from '@/autoTag/protocol';
 import { emptyCharFields, type CharTagEntry } from '@/state/charTags';
 import type { CharOutfitState, OutfitLayerState } from '@/state/outfitState';
-import { WORLD_PRESETS, defaultWorldAnchor } from '@/state/worldAnchor';
+import { WORLD_PRESETS, applyDetectedWorldPreset, defaultWorldAnchor } from '@/state/worldAnchor';
 
 function entry(name: string, fields: Partial<Record<string, string>> = {}): CharTagEntry {
   return {
@@ -574,5 +574,75 @@ describe('比例防畸变', () => {
       new Map(),
     );
     expect(result.characters[0].uc ?? '').not.toContain('giantess');
+  });
+});
+
+describe('P0 回归：全裸/遮蔽/脱下装的三处边界', () => {
+  it('五层全 removed 时仍剥离导演偷塞的衣物词（hasOutfitState 不能因为 tag 空判 false）', () => {
+    const entries = [entry('温岚', { sex: '1girl', hair: 'long black hair' })];
+    const nude = new Map([outfit('温岚', {})]);
+    const result = assembleImageCharacters(
+      image('1girl, 1boy, bedroom, upper body', [
+        { name: '温岚', tag: '1girl, white dress, hanfu, blue eyes, lying on bed' },
+      ]),
+      entries,
+      nude,
+    );
+    const tag = result.characters[0].tag;
+    expect(tag).not.toContain('white dress');
+    expect(tag).not.toContain('hanfu');
+    expect(tag).not.toContain('blue eyes');
+    // 动作与姿势必须留着,别把导演写对的也一起删掉
+    expect(tag).toContain('lying on bed');
+  });
+
+  it('外衣穿着时 cover.upper 为 true：导演写的 topless 被剔掉', () => {
+    const entries = [entry('温岚', { sex: '1girl', hair: 'long black hair' })];
+    const outerOn = new Map([outfit('温岚', { outer: worn('black jacket'), bra: off('white bra') })]);
+    const result = assembleImageCharacters(
+      image('1girl, upper body', [{ name: '温岚', tag: 'topless, blush' }]),
+      entries,
+      outerOn,
+    );
+    expect(result.characters[0].tag).not.toContain('topless');
+    expect(result.characters[0].tag).toContain('blush');
+  });
+
+  it('下装已脱但仍穿内裤时,负面照样压 skirt/pants/shorts', () => {
+    const entries = [entry('温岚', { sex: '1girl', hair: 'long black hair' })];
+    const bottomOff = new Map([
+      outfit('温岚', { outer: worn('white shirt'), bottom: off('blue pleated skirt'), panties: worn('white panties') }),
+    ]);
+    const result = assembleImageCharacters(
+      image('1girl, full body', [{ name: '温岚' }]),
+      entries,
+      bottomOff,
+    );
+    const uc = result.characters[0].uc ?? '';
+    expect(uc).toContain('skirt');
+    expect(uc).toContain('pants');
+    expect(uc).toContain('shorts');
+    expect(result.characters[0].tag).toContain('white panties');
+  });
+});
+
+describe('P0 回归：首楼世界观当楼生效', () => {
+  it('检测到 chinese_ancient 后同一楼拼装就带古风防穿帮负面，且不压正文已写的汉服', () => {
+    const world = applyDetectedWorldPreset('chinese_ancient');
+    const entries = [entry('温岚', { sex: '1girl', hair: 'long black hair' })];
+    const wardrobe = new Map([outfit('温岚', { outer: worn('plain white traditional hanfu') })]);
+    const withWorld = assembleImageCharacters(
+      image('1girl, full body', [{ name: '温岚' }]),
+      entries,
+      wardrobe,
+      world,
+    );
+    expect(withWorld.characters[0].tag).toContain('hanfu');
+    expect(withWorld.characters[0].uc ?? '').toContain('jeans');
+    // 正文明写了汉服，世界观负面就不能再把 hanfu 当穿帮词压掉
+    expect(withWorld.characters[0].uc ?? '').not.toContain('hanfu');
+
+    const withoutWorld = assembleImageCharacters(image('1girl, full body', [{ name: '温岚' }]), entries, wardrobe);
+    expect(withoutWorld.characters[0].uc ?? '').not.toContain('jeans');
   });
 });

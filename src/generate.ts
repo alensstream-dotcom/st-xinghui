@@ -23,6 +23,7 @@
  */
 
 import type { ImageCharacterPrompt } from '@/autoTag/protocol';
+import { proportionGuardrailsFor } from '@/autoTag/assemblePrompt';
 import { comfySimpleParams, composeNegative, composePositive, validateSimpleConfig, type SimpleGenValues } from '@/backends/comfyTemplates';
 import { generateComfyImage, randomSeed, type ComfyImageResult } from '@/backends/comfyui';
 import { buildMossPrompt, type ComicLayout } from '@/backends/mossLayout';
@@ -243,9 +244,13 @@ export async function generateImage(
     let result: ComfyImageResult;
     let meta: GenerationMeta;
     if (isNai) {
-      // 渠道负面 + 本次额外负面:立绘要压鱼眼/俯角,世界观要压穿帮单品
+      // 渠道负面 + 本次额外负面:立绘要压鱼眼/俯角,世界观要压穿帮单品,
+      // 高低差构图要压「站着变巨人、坐着变小人」(组装期已进角色 uc,这里再压一层全局)。
       let naiConn = effectiveNai();
-      const extraNegative = input.extraNegative?.trim();
+      const proportionNegative = proportionGuardrailsFor(
+        [input.prompt, ...characters.map(character => `${character.tag} ${character.nl ?? ''}`)].join(', '),
+      ).join(', ');
+      const extraNegative = [input.extraNegative?.trim(), proportionNegative].filter(Boolean).join(', ');
       if (extraNegative) {
         const merged = [fullNegativePrompt(naiConn), extraNegative].filter(Boolean).join(', ');
         naiConn = {

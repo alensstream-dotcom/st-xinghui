@@ -205,6 +205,12 @@ function compileOutfitForFrame(
     const effectiveBottomStatus = !bottom?.tag && isOnePieceOuter(outer?.tag ?? '')
       ? outer?.status
       : bottom?.status;
+    // 下装脱了就是脱了:无论内裤还穿没穿,都要把裙/裤压进负面。
+    // 以前只有「内裤也脱了」才压,于是「裤子脱了、内裤还在」时模型会自己补一条裙子回来。
+    if (effectiveBottomStatus === 'removed') {
+      positive.push('bottomless');
+      negative.push('skirt', 'pants', 'shorts');
+    }
     if (bottom) {
       if (bottom.status === 'worn' && bottom.tag) positive.push(bottom.tag);
       if (bottom.status === 'disheveled' && bottom.tag) {
@@ -274,7 +280,7 @@ function extractDistinctiveFeatures(entry: CharTagEntry | undefined): string[] {
  * 所以这里在合流之前先硬清洗一遍：只留动作、表情、视线、姿势与 source#/target#/mutual# 标记。
  */
 const SEX_WORD_TAG = /^(?:1girl|2girls|3girls|multiple girls|1boy|2boys|3boys|multiple boys|girl|boy|solo)$/i;
-const HAIR_TAG = /\b(hair|bangs|ponytail|twintails|braid|braids|bun|bob|updo|ahoge)\b/i;
+const HAIR_TAG = /\b(hair|bangs|ponytail|twintails|braid|braids|braided|bun|bob|updo|ahoge)\b/i;
 const EYE_SKIN_TAG = /\b(eyes|tsurime|tareme|jitome|sanpaku|pale skin|fair skin|dark skin|tan)\b/i;
 const STATIC_BODY_TAG = /\b(tall female|petite|slender|curvy|voluptuous|flat chest|small breasts|medium breasts|large breasts|huge breasts|wide hips|long legs)\b/i;
 const GARMENT_TAG = /\b(dress|robe|hanfu|kimono|cheongsam|skirt|pants|jeans|shorts|shirt|blouse|coat|jacket|blazer|sweater|uniform|bra|panties|underwear|dudou|pantyhose|stockings|thighhighs|socks|shoes|heels|boots|sneakers)\b/i;
@@ -320,12 +326,25 @@ const STANDING_TAG = /\b(standing|walking|leaning forward)\b/i;
 
 const CONFLICT_LOWER = /^(?:bottomless|nude|naked|completely nude|fully nude|pussy|spread pussy|pussy juice)$/i;
 
+/**
+ * 高低差构图(一人站、一人坐/跪/躺)的比例防畸变词。
+ *
+ * 组装期把它加进角色 uc;生成期还要用它压全局负面(Base 层),否则 NAI 仍会把
+ * 站着的人拉成巨人、坐着的人缩成小人。判据只此一处,两个阶段共用。
+ */
+export function proportionGuardrailsFor(text: string): string[] {
+  return HEIGHT_GAP_SHOT.test(text) && STANDING_TAG.test(text) ? [...PROPORTION_GUARDRAILS] : [];
+}
+
 function describeCoverage(outfit: CharOutfitState | undefined): CoverState {
   const layers = outfit?.layers;
   if (!layers) return { upper: false, lower: false, suppressShortSkirt: false };
   const outerWorn = layers.outer?.status === 'worn';
   const onePiece = outerWorn && isOnePieceOuter(layers.outer?.tag ?? '');
-  const upper = layers.bra?.status === 'worn' || (outerWorn && layers.bra?.status !== 'removed');
+  // 上身穿没穿看「外衣穿着」或「胸罩穿着」——外衣穿着时上身就是被遮住的,
+  // 哪怕里面没穿胸罩。以前写成 `bra worn || (outer worn && bra !== removed)`,
+  // 外衣穿好、胸罩已脱时会判成 false,于是导演写的 topless 被放行,人就被画成光着上身。
+  const upper = outerWorn || layers.bra?.status === 'worn';
   const lower = layers.bottom?.status === 'worn' || layers.panties?.status === 'worn' || onePiece;
   const longHem = onePiece && LONG_HEM.test(layers.outer?.tag ?? '') && layers.outer?.status !== 'disheveled';
   return { upper, lower, suppressShortSkirt: longHem };
@@ -401,12 +420,7 @@ export function assembleImageCharacters(
     // 服装层的 tag 本身可能带逗号（"sheer black pantyhose, black leather loafers"），
     // 先拆成原子词再过滤，否则鞋子词会把整串丝袜一起带走。
     const hasLibraryEntry = Boolean(entry?.fields.hair.trim() || entry?.fields.eyes.trim());
-    const hasOutfitState = Boolean(
-      outfitState &&
-        [outfitState.layers.outer, outfitState.layers.bra, outfitState.layers.bottom, outfitState.layers.panties, outfitState.layers.hosiery].some(
-          layer => Boolean(layer?.tag.trim()) || layer?.status === 'worn' || layer?.status === 'disheveled',
-        ),
-    );
+    const hasOutfitState = Boolean(outfitState);
     const directorTags = resolveCoverConflicts(
       stripLeakedAppearanceAndOutfit(dropLocalizedMarkers(splitTags(character.tag)), hasLibraryEntry, hasOutfitState),
       cover,
@@ -433,13 +447,14 @@ export function assembleImageCharacters(
       ...(heightGapShot ? PROPORTION_GUARDRAILS : []),
     ];
     if (femaleIndexes.length >= 2) {
+      // mergedPositive 在这个角色里是常量,循环外建一次即可(以前放在内层循环里反复建 Set)
+      const ownLower = new Set(mergedPositive.map(tag => tag.toLowerCase()));
       for (const otherIndex of femaleIndexes) {
         if (otherIndex === index) continue;
         const other = image.characters[otherIndex];
         const otherEntry = entriesAtPos.find(item => item.name === other.name);
-        const own = new Set(mergedPositive.map(t => t.toLowerCase()));
         for (const feature of extractDistinctiveFeatures(otherEntry)) {
-          if (own.has(feature.toLowerCase())) continue;
+          if (ownLower.has(feature.toLowerCase())) continue;
           negativeParts.push(feature);
         }
       }

@@ -83,8 +83,10 @@ export function buildPortraitCharacterTag(entry: CharTagEntry, world?: WorldAnch
       tags.push(tag);
     }
   }
-  tags.push(...splitTags(portraitAttireFor(config, fields.outfit)));
+  // 旧版条目的外貌常常只存在 raw 里(没拆成 hair/eyes/… 字段)。先看结构化字段空不空,
+  // 空才回落 raw——以前把回落写在「追加素服之后」,素服永远非空,raw 分支永远走不到。
   if (!tags.length) tags.push(...splitTags(entry.raw ?? ''));
+  tags.push(...splitTags(portraitAttireFor(config, fields.outfit)));
   const body = dedupe(tags.filter(tag => !/^\d+(?:girl|boy)s?$/i.test(tag)));
   return dedupe([`${sexWord(entry)}`, ...body, 'slight smile']).join(', ');
 }

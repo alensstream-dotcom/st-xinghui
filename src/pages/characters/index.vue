@@ -31,6 +31,14 @@ import {
   upsertGlobalCharTag,
 } from '@/state/globalCharTags';
 import { getContext } from '@/st/context';
+import { applyMessageText } from '@/st/messageEdit';
+import {
+  BBI_OUTFIT_EXTRA_KEY,
+  deriveOutfitStates,
+  readOutfitFloorDelta,
+  type CharOutfitState,
+  type OutfitLayerKey,
+} from '@/state/outfitState';
 import {
   WORLD_PRESETS,
   WORLD_PRESET_IDS,
@@ -614,6 +622,79 @@ function confirmRollback() {
   }
 }
 
+/** 五层服装状态:回放整段聊天得到的账本,只读展示 + 单角色清除。 */
+const OUTFIT_LAYER_ORDER: OutfitLayerKey[] = ['outer', 'bra', 'bottom', 'panties', 'hosiery'];
+const OUTFIT_LAYER_CN: Record<OutfitLayerKey, string> = {
+  outer: '外衣',
+  bra: '胸罩',
+  bottom: '下装',
+  panties: '内裤',
+  hosiery: '袜/鞋',
+};
+const OUTFIT_STATUS_CN: Record<string, string> = {
+  worn: '穿着',
+  disheveled: '半敞/凌乱',
+  removed: '已脱',
+};
+
+const editingOutfit = computed<CharOutfitState | null>(() => {
+  const name = editingName.value?.trim();
+  if (!name) return null;
+  const chat = getContext()?.chat ?? [];
+  return deriveOutfitStates(chat, chat.length).get(name) ?? null;
+});
+
+const editingOutfitRows = computed(() =>
+  OUTFIT_LAYER_ORDER.map(layer => {
+    const state = editingOutfit.value?.layers[layer];
+    return {
+      layer,
+      label: OUTFIT_LAYER_CN[layer],
+      tag: state?.tag ?? '',
+      status: state?.status ?? 'worn',
+      statusLabel: OUTFIT_STATUS_CN[state?.status ?? 'worn'] ?? '穿着',
+    };
+  }),
+);
+
+/**
+ * 清掉这个角色在所有楼层里记的服装变更。
+ * 排查「明明穿着却画成裸的」时最有用:账本是逐楼 op 回放出来的,删掉这些 op 就等于从没穿过/脱过。
+ */
+async function resetEditingOutfit() {
+  const name = editingName.value?.trim();
+  if (!name) return;
+  const context = getContext();
+  const chat = context?.chat ?? [];
+  const chatId = context?.getCurrentChatId?.() ?? '';
+  if (!chat.length || !context?.saveChat || !chatId) {
+    toastr.warning('当前没有打开的聊天,无法改写服装记录', '星绘');
+    return;
+  }
+  let touched = 0;
+  for (let floor = 0; floor < chat.length; floor += 1) {
+    const message = chat[floor];
+    const delta = readOutfitFloorDelta(message);
+    if (!delta || !delta.ops.length) continue;
+    const kept = delta.ops.filter(op => op.op.name !== name);
+    if (kept.length === delta.ops.length) continue;
+    const value = kept.length ? { ...delta, ops: kept } : undefined;
+    const result = await applyMessageText(
+      floor,
+      text => text,
+      chatId,
+      message.swipe_id ?? 0,
+      message,
+      { key: BBI_OUTFIT_EXTRA_KEY, value },
+    );
+    if (result === 'saved') touched += 1;
+  }
+  toastr[touched ? 'success' : 'info'](
+    touched ? `已清除 ${touched} 楼里「${name}」的服装记录` : `「${name}」没有服装记录`,
+    '星绘',
+  );
+}
+
 function sourceLabel(entry: CharTagEntry): string {
   return entry.source === 'book' ? '星绘书' : entry.source === 'ai' ? 'AI 维护' : '手动';
 }
@@ -856,6 +937,34 @@ function sourceLabel(entry: CharTagEntry): string {
             </span>
           </div>
         </div>
+
+        <!-- ===== 五层服装状态:账本回放结果,只读查看 + 单角色清除 ===== -->
+        <details v-if="editingName" class="bbi-outfit-audit">
+          <summary>
+            当前服装状态(账本回放)
+            <span class="bbi-outfit-audit-sub">
+              {{ editingOutfit ? '有新状态' : '暂无记录' }}
+            </span>
+          </summary>
+          <template v-if="editingOutfit">
+            <ul class="bbi-outfit-list">
+              <li v-for="row in editingOutfitRows" :key="row.layer">
+                <span class="bbi-outfit-layer">{{ row.label }}</span>
+                <span class="bbi-outfit-status" :class="`is-${row.status}`">{{ row.statusLabel }}</span>
+                <span class="bbi-outfit-tag">{{ row.tag || '—' }}</span>
+              </li>
+            </ul>
+            <p class="bbi-field-hint">
+              这些状态是逐楼回放出来的:画错多半是某楼把「掀开/解扣」记成了「脱下」,可在这里清除后重新生成本楼 tag。
+            </p>
+            <button class="bbi-btn bbi-btn-sm bbi-btn-danger" type="button" @click="resetEditingOutfit">
+              清除「{{ editingName }}」的服装记录
+            </button>
+          </template>
+          <p v-else class="bbi-field-hint">
+            这个角色还没有服装记录(没出过图,或所在楼层没有服装变更)。
+          </p>
+        </details>
 
         <!-- 作用域:仅新建时可选;已有条目换层用底部「提升为全局 / 复制到本聊天」 -->
         <div v-if="!editingName" class="bbi-modal-field">
@@ -1630,6 +1739,82 @@ function sourceLabel(entry: CharTagEntry): string {
 .bbi-portrait-gen:disabled {
   opacity: 0.6;
   cursor: default;
+}
+
+/* ===== 弹窗服装状态折叠区 ===== */
+.bbi-outfit-audit {
+  margin: 0 0 12px;
+  padding: 8px 10px;
+  border: 1px solid var(--bbi-line);
+  border-radius: 10px;
+  background: var(--bbi-bg-soft, rgba(255, 255, 255, 0.02));
+}
+.bbi-outfit-audit > summary {
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--bbi-text);
+  list-style: none;
+}
+.bbi-outfit-audit > summary::-webkit-details-marker {
+  display: none;
+}
+.bbi-outfit-audit > summary::before {
+  content: '▸';
+  display: inline-block;
+  width: 12px;
+  color: var(--bbi-muted);
+  transition: transform 0.15s ease;
+}
+.bbi-outfit-audit[open] > summary::before {
+  transform: rotate(90deg);
+}
+.bbi-outfit-audit-sub {
+  margin-left: 6px;
+  font-weight: 400;
+  color: var(--bbi-muted);
+}
+.bbi-outfit-list {
+  margin: 8px 0 6px;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  gap: 4px;
+}
+.bbi-outfit-list li {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  font-size: 12px;
+  line-height: 1.5;
+}
+.bbi-outfit-layer {
+  flex: 0 0 44px;
+  color: var(--bbi-muted);
+}
+.bbi-outfit-status {
+  flex: 0 0 auto;
+  padding: 0 6px;
+  border-radius: 999px;
+  border: 1px solid var(--bbi-line);
+  font-size: 11px;
+}
+.bbi-outfit-status.is-worn {
+  color: #6cc48a;
+  border-color: rgba(108, 196, 138, 0.5);
+}
+.bbi-outfit-status.is-disheveled {
+  color: #d8a94b;
+  border-color: rgba(216, 169, 75, 0.5);
+}
+.bbi-outfit-status.is-removed {
+  color: #d96a6a;
+  border-color: rgba(217, 106, 106, 0.5);
+}
+.bbi-outfit-tag {
+  flex: 1 1 auto;
+  word-break: break-word;
+  color: var(--bbi-text);
 }
 
 /* ===== 弹窗立绘面板 ===== */

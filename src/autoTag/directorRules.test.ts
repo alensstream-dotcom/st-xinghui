@@ -2,10 +2,14 @@ import { describe, expect, it } from 'vitest';
 
 import {
   buildDirectorSystemPrompt,
+  buildStateSyncMessages,
   buildUsedTraitsSummary,
   directorReferenceBlocks,
   stateSyncSystemPrompt,
 } from '@/autoTag/prompt';
+import type { PreparedTargetText } from '@/autoTag/clean';
+import type { STContext } from '@/st/context';
+import type { AutoTagSettings } from '@/state/settings';
 import { WORLD_PRESETS, defaultWorldAnchor } from '@/state/worldAnchor';
 import { emptyCharFields, type CharTagEntry } from '@/state/charTags';
 
@@ -125,8 +129,11 @@ describe('防撞脸：高频占用统计', () => {
       charEntry('丙', { sex: '1girl', hair: 'silver hair, twin braids', eyes: 'blue eyes, tareme', extra: 'earrings' }),
       charEntry('男主', { sex: '1boy', hair: 'black hair, short hair', eyes: 'brown eyes', extra: 'glasses' }),
     ]);
-    expect(summary).toContain('long black hair×2');
-    expect(summary).toContain('发型[hair down×2]');
+    // 发色按颜色归一：'long black hair' 与 'black hair' 都要归到 black hair，否则重复被拆成两个 key 漏报
+    expect(summary).toContain('black hair×2');
+    expect(summary).toContain('long hair×2');
+    expect(summary).toContain('hair down×2');
+    expect(summary).toContain('brown eyes×2');
     expect(summary).toContain('earrings×2');
     expect(summary).toContain('forehead mark×2');
     expect(summary).not.toContain('black hair×3');
@@ -172,5 +179,44 @@ describe('导演通道：外貌/服装禁写与比例防畸变', () => {
     expect(sync).toContain('body 只写 2～3 个精准核心词');
     expect(sync).toContain('不要默认加 "tall female" 与 "long legs"');
     expect(sync).toContain('已高频占用的特征');
+  });
+});
+
+describe('双通道上下文承接', () => {
+  it('状态表与导演的 user 消息都带上上一楼原文（否则只看本楼，穿脱与体位接不上）', async () => {
+    const context = {
+      chat: [
+        { name: '用户', is_user: true, is_system: false, mes: '开场。' },
+        { name: '温岚', is_user: false, is_system: false, mes: '上一楼：她解开衬衫扣子，坐到他腿上。' },
+        { name: '用户', is_user: true, is_system: false, mes: '本楼提问。' },
+        { name: '温岚', is_user: false, is_system: false, mes: '本楼正文。' },
+      ],
+      chatMetadata: {},
+      name1: '用户',
+      name2: '温岚',
+      getCurrentChatId: () => 'chat-1',
+      getRequestHeaders: () => ({}),
+      saveMetadataDebounced: () => {},
+      saveChat: async () => {},
+    } as unknown as STContext;
+    const messages = await buildStateSyncMessages({
+      context,
+      targetFloor: 3,
+      options: { contextMessages: 4 } as unknown as AutoTagSettings,
+      preparedTarget: { promptText: '本楼正文。', segments: [] } as unknown as PreparedTargetText,
+      memoryText: '',
+      libraryBlock: '',
+      outfitSnapshot: '',
+      nlOn: true,
+      minImages: 1,
+      maxImages: 2,
+      world: defaultWorldAnchor(),
+    });
+    const user = String(messages[messages.length - 1].content);
+    expect(user).toContain('上一楼及之前的上下文');
+    expect(user).toContain('她解开衬衫扣子');
+    expect(user).toContain('本楼正文');
+    // 上一楼在前、目标正文在后：模型是从上往下读的
+    expect(user.indexOf('她解开衬衫扣子')).toBeLessThan(user.indexOf('目标正文'));
   });
 });
