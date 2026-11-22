@@ -1,4 +1,4 @@
-import { requestCompletion, requestViaMainApi } from '@/api/client';
+import { requestCompletion, requestViaMainApi, type ChatMsg } from '@/api/client';
 import { readBookMemory } from '@/autoTag/bookMemory';
 import {
   applyPositionedCharRefs,
@@ -6,7 +6,7 @@ import {
   resolveCharAnchors,
   type PositionedCharOp,
 } from '@/autoTag/charAnchors';
-import { assembleImagePrompts, countHeadcounts } from '@/autoTag/assemblePrompt';
+import { assembleImageCharacters } from '@/autoTag/assemblePrompt';
 import { prepareTargetText, type TargetSegment } from '@/autoTag/clean';
 import { naiStoryProfiles } from '@/autoTag/naiStory';
 import { beginGeneration, clearGeneration, consumeGeneration } from '@/autoTag/generationGate';
@@ -37,7 +37,6 @@ import {
 import {
   injectImageTags,
   parseComicPlan,
-  parseDirectorPlan,
   parseImagePlan,
   parseStateSyncPlan,
   type CharChange,
@@ -230,8 +229,35 @@ function bakeComicAppearance(layout: ComicLayout, entries: CharTagEntry[], unkno
  * 任何一条通道失败都整体抛错，交给调用方回落到原来的单请求路径：
  * 双通道是为了更好，不是为了把原本能跑通的楼层变成失败。
  */
+function summarizeLastFloorImage(chat: STMessage[], targetFloor: number): string {
+  for (let i = targetFloor - 1; i >= 0; i--) {
+    const mes = chat[i]?.mes ?? '';
+    const matches = [...mes.matchAll(/<bbi_image>[\s\S]*?<\/bbi_image>/gi)];
+    if (!matches.length) continue;
+    const parsed = parseImageTagContent(matches[matches.length - 1][0]);
+    const names = parsed.characters.map(c => c.name).join('、') || '未知';
+    return `入画角色：${names}｜Base：${parsed.tag}`;
+  }
+  return '';
+}
+
+async function dispatchLlm(
+  messages: ChatMsg[],
+  channel: ApiChannel | null,
+  opts: { signal: AbortSignal; source: string },
+): Promise<string> {
+  return channel ? requestCompletion(channel, messages, opts) : requestViaMainApi(messages, opts);
+}
+
+/**
+ * 单模型双并发：
+ * - 任务 A(状态表)只填五层服装 + 建档，不选画面；
+ * - 任务 B(导演)直接交完整 Base.tag/nl 与每个角色的 tag/nl；
+ * - 外貌与服装由本地编译器硬拼，导演写的 tag 接在后面，顺序固定。
+ * 任何一路拿不出可解析的结果就抛错，由调用方回落到单请求路径。
+ */
 async function runDualChannel(params: {
-  channel: ApiChannel;
+  channel: ApiChannel | null;
   floor: number;
   input: Omit<DualChannelInput, 'outfitSnapshot'>;
   segments: TargetSegment[];
@@ -243,96 +269,69 @@ async function runDualChannel(params: {
   size: 'portrait' | 'landscape';
   signal: AbortSignal;
 }): Promise<{ plan: ImagePlan; outfitOps: StoredOutfitOp[] }> {
-  const outfitBefore = outfitStatesBeforeFloor(params.floor);
-  const outfitSnapshot = buildOutfitSnapshotText(outfitBefore);
-  const input: DualChannelInput = { ...params.input, outfitSnapshot };
-  const [syncMessages, directorMessages] = await Promise.all([
+  const outfitsBefore = outfitStatesBeforeFloor(params.floor);
+  const outfitSnapshotText = buildOutfitSnapshotText(outfitsBefore);
+  const lastImageSummary = summarizeLastFloorImage(getContext()?.chat ?? [], params.floor);
+  const input: DualChannelInput = { ...params.input, outfitSnapshot: outfitSnapshotText };
+
+  const [stateMsgs, directorMsgs] = await Promise.all([
     buildStateSyncMessages(input),
-    buildDirectorMessages(input),
+    buildDirectorMessages(input, lastImageSummary),
   ]);
 
-  const holders: { sync: ReturnType<typeof parseStateSyncPlan> | null; director: null | ReturnType<typeof parseDirectorPlan> } = {
-    sync: null,
-    director: null,
-  };
-  const syncSource = `服装状态表(第 ${params.floor} 楼)`;
-  const directorSource = `镜头导演(第 ${params.floor} 楼)`;
-
-  await Promise.all([
-    requestCompletion(params.channel, syncMessages, {
-      signal: params.signal,
-      source: syncSource,
-      validate: raw => {
-        const parsed = parseStateSyncPlan(raw, params.segments, {
-          knownMaleProfiles: params.maleNames,
-        });
-        // 一条操作都没有不是错误：绝大多数楼层本来就不换衣服。
-        holders.sync = parsed;
-      },
-    }),
-    requestCompletion(params.channel, directorMessages, {
-      signal: params.signal,
-      source: directorSource,
-      validate: raw => {
-        const parsed = parseDirectorPlan(raw, params.segments, input.maxImages);
-        holders.director = parsed;
-      },
-    }),
-  ]);
-
-  if (!holders.sync || !holders.director) throw new Error('双通道有一路没有给出可解析的结果');
-  const sync = holders.sync;
-  const director = holders.director;
-  // 建档与永久变化由状态表通道顺带报告,先把它落成位置操作,后面按位置取档案。
-  const ops = params.opsResolver(sync.changes);
-
-  const images: ImageInsertion[] = [];
-  for (const shot of director.shots) {
-    const outfit = outfitAtPosition(outfitBefore, sync.ops, shot.sourceLine);
-    const entriesHere = entriesAtPosition(
-      params.entries,
-      ops,
-      shot.sourceLine,
-      params.lockedNames,
-    );
-    const assembled = assembleImagePrompts({
-      entries: entriesHere,
-      outfit,
-      director: shot.characters,
-      scale: shot.scale,
-    });
-    const characters = assembled
-      .filter(character => character.tag.trim())
-      .map(character => ({
-        name: character.name,
-        tag: character.tag,
-        nl: character.nl,
-        ...(character.uc ? { uc: character.uc } : {}),
-        ...(character.omitFeatures.length ? { omitFeatures: character.omitFeatures } : {}),
-      }));
-    if (!characters.length) continue;
-    // 人数按性别累加,不是去重:两个女角必须写成 2girls,写成 1girl 会让 NAI 少画一个人、
-    // 或者把两个人糊成一个人。
-    const headcount = countHeadcounts(assembled.map(character => character.tag));
-    const baseTag = [...headcount, shot.place, shot.scale].filter(Boolean).join(', ');
-    images.push({
-      position: shot.position,
-      sourceLine: shot.sourceLine,
-      tag: baseTag || shot.scale || 'scene',
-      nl: '',
-      negative: '',
-      characters,
-      size: params.size,
-    });
+  const stateOpts = { signal: params.signal, source: `服装状态表(第 ${params.floor} 楼)` };
+  const directorOpts = { signal: params.signal, source: `镜头导演(第 ${params.floor} 楼)` };
+  let stateRaw: string;
+  let directorRaw: string;
+  if (params.channel) {
+    [stateRaw, directorRaw] = await Promise.all([
+      dispatchLlm(stateMsgs, params.channel, stateOpts),
+      dispatchLlm(directorMsgs, params.channel, directorOpts),
+    ]);
+  } else {
+    // 走酒馆主 API 时顺序发:同一条会话并发两发会互相顶掉排队位置。
+    stateRaw = await dispatchLlm(stateMsgs, null, stateOpts);
+    directorRaw = await dispatchLlm(directorMsgs, null, directorOpts);
   }
 
-  diagnostic('dual:compiled', {
-    shots: director.shots.length,
-    images: images.length,
-    outfitOps: sync.ops.length,
-    changes: sync.changes.length,
+  const statePlan = parseStateSyncPlan(stateRaw, params.segments, {
+    knownMaleProfiles: params.maleNames,
   });
-  return { plan: { images, changes: sync.changes }, outfitOps: sync.ops };
+  const directorPlan = parseImagePlan(
+    directorRaw,
+    params.segments,
+    input.minImages,
+    input.maxImages,
+    { femaleScenesOnly: true, knownMaleProfiles: params.maleNames },
+  );
+
+  // 建档与永久变化由状态表通道顺带报告,先落成位置操作,后面按位置取档案——
+  // 这样「星绘书里还没这个人」的首次出场也能在本楼就用上刚建的外貌。
+  const positionedOps = params.opsResolver(statePlan.changes);
+  const storedOutfitOps: StoredOutfitOp[] = statePlan.outfitOps.map(item => ({
+    sourceLine: item.sourceLine,
+    op: item.op,
+  }));
+
+  const assembledImages = directorPlan.images.map(img => {
+    const entriesAtPos = entriesAtPosition(
+      params.entries,
+      positionedOps,
+      img.sourceLine,
+      params.lockedNames,
+    );
+    const outfitsAtPos = outfitAtPosition(outfitsBefore, storedOutfitOps, img.sourceLine);
+    return assembleImageCharacters(img, entriesAtPos, outfitsAtPos);
+  });
+
+  const plan: ImagePlan = { images: assembledImages, changes: statePlan.changes };
+  diagnostic('dual:compiled', {
+    shots: directorPlan.images.length,
+    images: assembledImages.length,
+    outfitOps: storedOutfitOps.length,
+    changes: statePlan.changes.length,
+  });
+  return { plan, outfitOps: storedOutfitOps };
 }
 
 async function runForFloor(floor: number, opts: RunOptions = {}): Promise<void> {
@@ -505,11 +504,11 @@ async function runForFloor(floor: number, opts: RunOptions = {}): Promise<void> 
     let lastError = '';
     /** 本楼五层服装增量;单请求路径下恒为空,由写回落盘时一并保存。 */
     let outfitOps: StoredOutfitOp[] = [];
-    const dualEligible = !profile.comic && !slot && profile.naiCharPrompts && Boolean(channel);
-    if (dualEligible && channel) {
+    const dualEligible = !profile.comic && !slot && profile.naiCharPrompts;
+    if (dualEligible) {
       try {
         const dual = await runDualChannel({
-          channel,
+          channel: channel ?? null,
           floor,
           input: {
             context,
@@ -518,6 +517,7 @@ async function runForFloor(floor: number, opts: RunOptions = {}): Promise<void> 
             preparedTarget,
             memoryText: memory ? memory.text : '角色参考：星绘书本次未提供。',
             libraryBlock: anchors.text ?? '',
+            nlOn: profile.nl,
             minImages: promptOptions.minImages,
             maxImages: promptOptions.maxImages,
           },
