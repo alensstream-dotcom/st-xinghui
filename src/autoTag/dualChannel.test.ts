@@ -35,86 +35,99 @@ function nai(overrides: Partial<NaiRunConfig> = {}): NaiRunConfig {
   };
 }
 
-describe('状态表通道的解析', () => {
-  it('读懂 set_outfit 与 update_layer,并记下各自生效的物理行', () => {
+describe('状态表通道的解析(结楼指纹 v2)', () => {
+  it('读出每楼结束时的穿搭快照:穿着/已脱/状态', () => {
     const plan = parseStateSyncPlan(
       JSON.stringify({
         changes: [],
-        outfitOps: [
-          {
-            op: 'set_outfit',
-            name: '温岚',
-            position: 'P1',
-            sceneHint: 'school morning',
-            layers: {
-              outer: { tag: 'white shirt', status: 'worn' },
-              bottom: { tag: 'blue pleated skirt', status: 'worn' },
-            },
-          },
-          { op: 'update_layer', name: '温岚', position: 'P2', layer: 'bottom', status: 'removed' },
+        finalOutfits: [
+          { name: '温岚', wearing: 'white shirt, jeans', removed: ['bra'], stateNote: 'shirt lifted above chest' },
+          { name: '顾子衿', wearing: '' },
         ],
       }),
       segments,
+      {},
     );
-    expect(plan.outfitOps).toHaveLength(2);
-    expect(plan.outfitOps[0].sourceLine).toBe(0);
-    expect(plan.outfitOps[1].sourceLine).toBe(2);
-    expect(plan.outfitOps[1].op).toMatchObject({ op: 'update_layer', layer: 'bottom', status: 'removed' });
+    expect(plan.finalOutfits).toHaveLength(2);
+    expect(plan.finalOutfits[0]).toEqual({
+      name: '温岚',
+      wearing: 'white shirt, jeans',
+      removed: ['bra'],
+      stateNote: 'shirt lifted above chest',
+    });
+    expect(plan.finalOutfits[1]).toEqual({ name: '顾子衿', wearing: '' });
   });
 
-  it('一条坏 op 只丢自己,不影响同批其它 op', () => {
+  it('坏条目只丢自己:缺名跳过,removed 归一成小写去重,wearing 压成一行', () => {
     const plan = parseStateSyncPlan(
       JSON.stringify({
-        outfitOps: [
-          { op: 'set_outfit', name: '温岚', position: 'P1', layers: { outer: { tag: 'shirt', status: 'worn' } } },
-          { op: 'update_layer', name: '温岚', layer: 'hat', status: 'removed' },
-          { op: 'update_layer', name: '', layer: 'bottom', status: 'removed' },
-          { op: 'update_layer', name: '温岚', layer: 'bra', status: 'floating' },
+        changes: [],
+        finalOutfits: [
+          { name: '  ', wearing: 'ghost dress' },
+          { name: '温岚', wearing: 'white shirt,\n  jeans', removed: ['Bra', 'BRA', ' panties '] },
+          { name: '顾子衿', wearing: 42, removed: 'bra' },
         ],
       }),
       segments,
+      {},
     );
-    expect(plan.outfitOps).toHaveLength(1);
-    expect(plan.outfitOps[0].op.op).toBe('set_outfit');
+    expect(plan.finalOutfits).toHaveLength(2);
+    expect(plan.finalOutfits[0]).toEqual({
+      name: '温岚',
+      wearing: 'white shirt, jeans',
+      removed: ['bra', 'panties'],
+    });
+    expect(plan.finalOutfits[1]).toEqual({ name: '顾子衿', wearing: '' });
   });
 
-  it('位置对不回正文的操作一律丢弃(宁可不写,也不许挪到别的行)', () => {
+  it('没有女角或没有变化时输出空数组,而不是报错', () => {
+    expect(parseStateSyncPlan('{"changes":[],"finalOutfits":[]}', segments, {}).finalOutfits).toEqual([]);
+    expect(parseStateSyncPlan('{"v":1}', segments, {}).finalOutfits).toEqual([]);
+    expect(parseStateSyncPlan('不是 JSON', segments, {})).toEqual({ changes: [], finalOutfits: [] });
+  });
+
+  it('兼容 outfits 键名(模型偶尔漏写 final)', () => {
+    const plan = parseStateSyncPlan(
+      '{"changes":[],"outfits":[{"name":"温岚","wearing":"white shirt"}]}',
+      segments,
+      {},
+    );
+    expect(plan.finalOutfits).toEqual([{ name: '温岚', wearing: 'white shirt' }]);
+  });
+
+  it('建档 changes 与快照可以同时出现,互不吞掉', () => {
     const plan = parseStateSyncPlan(
       JSON.stringify({
-        outfitOps: [
-          { op: 'set_outfit', name: '温岚', position: 'P99', layers: { outer: { tag: 'towel', status: 'worn' } } },
-          { op: 'update_layer', name: '温岚', position: 'P99', layer: 'bra', status: 'removed' },
+        changes: [
+          { name: '温岚', field: 'new', fields: { sex: '1girl', hair: 'black hair, long hair', eyes: 'brown eyes' }, position: 'P1', reason: '首次登场' },
         ],
+        finalOutfits: [{ name: '温岚', wearing: 'white shirt' }],
       }),
       segments,
+      {},
     );
-    expect(plan.outfitOps).toHaveLength(0);
-  });
-
-  it('没有任何服装变化时返回空 outfitOps,而不是报错', () => {
-    expect(parseStateSyncPlan('{"changes":[],"outfitOps":[]}', segments).outfitOps).toEqual([]);
-    expect(parseStateSyncPlan('{"v":1}', segments).outfitOps).toEqual([]);
-    expect(parseStateSyncPlan('不是 JSON', segments)).toEqual({ changes: [], outfitOps: [] });
+    expect(plan.changes).toHaveLength(1);
+    expect(plan.finalOutfits).toHaveLength(1);
   });
 });
 
 describe('状态表通道的世界观识别', () => {
   it('首楼带 worldPreset 时原样透出,没带时字段不出现', () => {
     const withPreset = parseStateSyncPlan(
-      '{"worldPreset":"chinese_ancient","changes":[],"outfitOps":[]}',
+      '{"worldPreset":"chinese_ancient","changes":[],"finalOutfits":[]}',
       segments,
       {},
     );
     expect(withPreset.worldPreset).toBe('chinese_ancient');
     expect(withPreset.changes).toEqual([]);
-    expect(withPreset.outfitOps).toEqual([]);
+    expect(withPreset.finalOutfits).toEqual([]);
 
-    const without = parseStateSyncPlan('{"changes":[],"outfitOps":[]}', segments, {});
+    const without = parseStateSyncPlan('{"changes":[],"finalOutfits":[]}', segments, {});
     expect('worldPreset' in without).toBe(false);
   });
 
   it('后面的楼层不再重复输出,也不会把已有值清成空串', () => {
-    const blank = parseStateSyncPlan('{"worldPreset":"   ","changes":[],"outfitOps":[]}', segments, {});
+    const blank = parseStateSyncPlan('{"worldPreset":"   ","changes":[],"finalOutfits":[]}', segments, {});
     expect('worldPreset' in blank).toBe(false);
   });
 });
@@ -207,5 +220,44 @@ describe('角色级 uc 的全链路透传', () => {
     const captions = params.v4_negative_prompt.caption.char_captions;
     expect(captions[0].char_caption).toBe('bra, underwear');
     expect(captions[1].char_caption).toBe('');
+  });
+});
+describe('导演输出 JSON 的容错(不改判据,只换容器)', () => {
+  it('shots 键名也能读成图片数组', () => {
+    const plan = parseImagePlan(
+      '{"shots":[{"position":"P2","tag":"bedroom, full body","nl":"She stands.","characters":[{"name":"温岚","outfit":"white shirt","tag":"blush","nl":"她站着。"}]}]}',
+      segments,
+      1,
+      3,
+    );
+    expect(plan.images).toHaveLength(1);
+    expect(plan.images[0].position).toBe('P2');
+    expect(plan.images[0].characters[0].outfit).toBe('white shirt');
+  });
+
+  it('只给单张图对象时包成一张,不再整份丢弃', () => {
+    const plan = parseImagePlan(
+      '{"position":"P1","tag":"bedroom, upper body","nl":"She sits."}',
+      segments,
+      1,
+      3,
+    );
+    expect(plan.images).toHaveLength(1);
+    expect(plan.images[0].tag).toBe('bedroom, upper body');
+  });
+
+  it('前面多一层空对象仍能找到 images', () => {
+    const plan = parseImagePlan(
+      '{"meta":{"model":"x"},"images":[{"position":"P1","tag":"bedroom, upper body","nl":"She sits."}]}',
+      segments,
+      1,
+      3,
+    );
+    expect(plan.images).toHaveLength(1);
+  });
+
+  it('真的没有图片数组才抛错,让上层的重试去救', () => {
+    expect(() => parseImagePlan('{"foo":1}', segments, 1, 3)).toThrow(/缺少 images/);
+    expect(() => parseImagePlan('不是 JSON', segments, 1, 3)).toThrow();
   });
 });

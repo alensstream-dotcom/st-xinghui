@@ -43,6 +43,7 @@ import {
   type CharChange,
   type ImageInsertion,
   type ImagePlan,
+  type StateSyncPlan,
 } from '@/autoTag/protocol';
 import { bakeAppearance, comicAppearance, type ComicLayout } from '@/backends/mossLayout';
 import {
@@ -66,11 +67,10 @@ import { applyDetectedWorldPreset, readWorldAnchor } from '@/state/worldAnchor';
 import {
   BBI_OUTFIT_EXTRA_KEY,
   buildOutfitSnapshotText,
+  outfitStatesBeforeFloor,
   readOutfitFloorDelta,
   makeOutfitFloorDelta,
-  outfitAtPosition,
-  outfitStatesBeforeFloor,
-  type StoredOutfitOp,
+  type CharOutfitSnapshot,
 } from '@/state/outfitState';
 
 const processed = new Set<string>();
@@ -272,7 +272,7 @@ async function runDualChannel(params: {
   signal: AbortSignal;
   /** 每个通道各自的重试次数(复用设置里的 retryCount)。 */
   retries: number;
-}): Promise<{ plan: ImagePlan; outfitOps: StoredOutfitOp[] }> {
+}): Promise<{ plan: ImagePlan; finalOutfits: CharOutfitSnapshot[] }> {
   const outfitsBefore = outfitStatesBeforeFloor(params.floor);
   const outfitSnapshotText = buildOutfitSnapshotText(outfitsBefore);
   const lastImageSummary = summarizeLastFloorImage(getContext()?.chat ?? [], params.floor);
@@ -289,45 +289,56 @@ async function runDualChannel(params: {
 
   const stateOpts = { signal: params.signal, source: `服装状态表(第 ${params.floor} 楼)` };
   const directorOpts = { signal: params.signal, source: `镜头导演(第 ${params.floor} 楼)` };
-  // 分通道独立重试:只重试失败的那一条,已成功的结果原样保留。
-  // 以前两路共用一个 try,导演偶发超时会把已经填好的服装表一起丢掉,整楼白跑。
-  const runChannel = (messages: ChatMsg[], opts: { signal: AbortSignal; source: string }): Promise<string> =>
-    runChannelWithRetries(next => dispatchLlm(messages, params.channel, next), {
-      retries: params.retries,
-      signal: opts.signal,
-      source: opts.source,
-    });
 
-  let stateRaw = '';
-  let directorRaw: string;
+  /**
+   * 解析放在重试回调里面。
+   *
+   * 以前是「先拿到字符串、出了循环再 parse」:模型吐了个缺 images 的 JSON 时,
+   * 重试次数一次没用就整楼失败。现在解析失败也算这一路失败,会自动重发;
+   * 只有重试耗尽才谈降级。
+   */
+  const runStateChannel = (): Promise<StateSyncPlan> =>
+    runChannelWithRetries(async next => {
+      const raw = await dispatchLlm(stateMsgs, params.channel, next);
+      return parseStateSyncPlan(raw, params.segments, { knownMaleProfiles: params.maleNames });
+    }, { retries: params.retries, signal: params.signal, source: stateOpts.source });
+
+  const runDirectorChannel = (): Promise<ImagePlan> =>
+    runChannelWithRetries(async next => {
+      const raw = await dispatchLlm(directorMsgs, params.channel, next);
+      return parseImagePlan(raw, params.segments, input.minImages, input.maxImages, {
+        femaleScenesOnly: true,
+        knownMaleProfiles: params.maleNames,
+      });
+    }, { retries: params.retries, signal: params.signal, source: directorOpts.source });
+
+  let statePlan: StateSyncPlan = { changes: [], finalOutfits: [] };
+  let directorPlan: ImagePlan;
   if (params.channel) {
-    const [stateResult, directorResult] = await Promise.allSettled([
-      runChannel(stateMsgs, stateOpts),
-      runChannel(directorMsgs, directorOpts),
-    ]);
-    if (stateResult.status === 'fulfilled') stateRaw = stateResult.value;
+    const [stateResult, directorResult] = await Promise.allSettled([runStateChannel(), runDirectorChannel()]);
+    if (stateResult.status === 'fulfilled') statePlan = stateResult.value;
     else {
-      // 服装表只影响「这一格穿什么」,不该让整楼生图作废:退化为空增量,
+      // 服装表只决定「这一格穿什么」,不该让整楼生图作废:退化为空增量,
       // 但绝不能清空本楼已有的 BBI_OUTFIT_EXTRA_KEY(那是历史回放的基础)。
       console.warn(`[星绘] 第 ${params.floor} 楼服装状态表通道失败,按空增量继续`, stateResult.reason);
       toastr.warning('服装状态表这一楼没取到，本次只按已有状态出图（不会清空本楼记录）', '星绘');
     }
-    if (directorResult.status === 'fulfilled') directorRaw = directorResult.value;
-    else throw new Error(`镜头导演通道失败：${(directorResult.reason instanceof Error ? directorResult.reason.message : String(directorResult.reason))}`);
+    if (directorResult.status !== 'fulfilled') {
+      const reason = directorResult.reason;
+      throw new Error(`镜头导演通道失败：${reason instanceof Error ? reason.message : String(reason)}`);
+    }
+    directorPlan = directorResult.value;
   } else {
     // 走酒馆主 API 时顺序发:同一条会话并发两发会互相顶掉排队位置。
     try {
-      stateRaw = await runChannel(stateMsgs, stateOpts);
+      statePlan = await runStateChannel();
     } catch (error) {
       console.warn(`[星绘] 第 ${params.floor} 楼服装状态表通道失败,按空增量继续`, error);
       toastr.warning('服装状态表这一楼没取到，本次只按已有状态出图（不会清空本楼记录）', '星绘');
     }
-    directorRaw = await runChannel(directorMsgs, directorOpts);
+    directorPlan = await runDirectorChannel();
   }
 
-  const statePlan = parseStateSyncPlan(stateRaw, params.segments, {
-    knownMaleProfiles: params.maleNames,
-  });
   // 首楼识别:用户手动锁过就不覆盖(applyDetectedWorldPreset 内部判断)。
   // 注意必须把结果接住:本楼拼装要用「刚识别出来的」世界观,不然首楼还是按旧预设
   // 拼素服与负面,得等到下一楼才生效。
@@ -339,41 +350,25 @@ async function runDualChannel(params: {
     }
     world = applied;
   }
-  const directorPlan = parseImagePlan(
-    directorRaw,
-    params.segments,
-    input.minImages,
-    input.maxImages,
-    { femaleScenesOnly: true, knownMaleProfiles: params.maleNames },
-  );
 
   // 建档与永久变化由状态表通道顺带报告,先落成位置操作,后面按位置取档案——
   // 这样「星绘书里还没这个人」的首次出场也能在本楼就用上刚建的外貌。
   const positionedOps = params.opsResolver(statePlan.changes);
-  const storedOutfitOps: StoredOutfitOp[] = statePlan.outfitOps.map(item => ({
-    sourceLine: item.sourceLine,
-    op: item.op,
-  }));
 
   const assembledImages = directorPlan.images.map(img => {
-    const entriesAtPos = entriesAtPosition(
-      params.entries,
-      positionedOps,
-      img.sourceLine,
-      params.lockedNames,
-    );
-    const outfitsAtPos = outfitAtPosition(outfitsBefore, storedOutfitOps, img.sourceLine);
-    return assembleImageCharacters(img, entriesAtPos, outfitsAtPos, world);
+    const entriesAtPos = entriesAtPosition(params.entries, positionedOps, img.sourceLine, params.lockedNames);
+    // 服装不再按位置切分:导演在这一格已经给出 outfit/removed,编译器直接用当帧值。
+    return assembleImageCharacters(img, entriesAtPos, world);
   });
 
   const plan: ImagePlan = { images: assembledImages, changes: statePlan.changes };
   diagnostic('dual:compiled', {
     shots: directorPlan.images.length,
     images: assembledImages.length,
-    outfitOps: storedOutfitOps.length,
+    outfits: statePlan.finalOutfits.length,
     changes: statePlan.changes.length,
   });
-  return { plan, outfitOps: storedOutfitOps };
+  return { plan, finalOutfits: statePlan.finalOutfits };
 }
 
 async function runForFloor(floor: number, opts: RunOptions = {}): Promise<void> {
@@ -552,7 +547,7 @@ async function runForFloor(floor: number, opts: RunOptions = {}): Promise<void> 
     let plan: ImagePlan | null = null;
     let lastError = '';
     /** 本楼五层服装增量;单通道路径下恒为空,由写回落盘时一并保存。 */
-    let outfitOps: StoredOutfitOp[] = [];
+    let finalOutfits: CharOutfitSnapshot[] = [];
     if (dualEligible) {
       {
         const dual = await runDualChannel({
@@ -585,7 +580,7 @@ async function runForFloor(floor: number, opts: RunOptions = {}): Promise<void> 
           retries: Math.max(0, Math.floor(Number(settings.autoTag.retryCount) || 0)),
         });
         plan = dual.plan;
-        outfitOps = dual.outfitOps;
+        finalOutfits = dual.finalOutfits;
       }
       if (controller.signal.aborted) {
         processed.delete(identity);
@@ -767,7 +762,7 @@ async function runForFloor(floor: number, opts: RunOptions = {}): Promise<void> 
     // 后面几十楼都按「已经脱了」画。只清属于当前 swipe 的那份,另一个 swipe 的记录留着。
     const staleOutfitDelta =
       previousOutfitDelta && previousOutfitDelta.swipe === (swipeId ?? 0) ? previousOutfitDelta : null;
-    if (!plan.images.length && !floorOps.length && !previousDelta && !outfitOps.length && !staleOutfitDelta) {
+    if (!plan.images.length && !floorOps.length && !previousDelta && !finalOutfits.length && !staleOutfitDelta) {
       if (opts.manual) toastr.info('模型认为本楼没有值得插图的画面', '星绘');
       else console.debug(`[星绘] 第 ${floor} 楼无需插图`);
       return;
@@ -828,8 +823,8 @@ async function runForFloor(floor: number, opts: RunOptions = {}): Promise<void> 
               key: BBI_CHAR_EXTRA_KEY,
               value: makeCharTagFloorDelta(floorOps, swipeId ?? 0),
             },
-            ...(outfitOps.length
-              ? [{ key: BBI_OUTFIT_EXTRA_KEY, value: makeOutfitFloorDelta(outfitOps, swipeId ?? 0) }]
+            ...(finalOutfits.length
+              ? [{ key: BBI_OUTFIT_EXTRA_KEY, value: makeOutfitFloorDelta(finalOutfits, swipeId ?? 0) }]
               : staleOutfitDelta
                 ? [{ key: BBI_OUTFIT_EXTRA_KEY, value: undefined }]
                 : []),

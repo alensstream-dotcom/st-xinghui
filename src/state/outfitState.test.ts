@@ -1,143 +1,125 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
+
+const getContextMock = vi.hoisted(() => vi.fn());
+
+vi.mock('@/st/context', () => ({ getContext: getContextMock }));
 
 import {
   BBI_OUTFIT_EXTRA_KEY,
-  applyOutfitOps,
   buildOutfitSnapshotText,
-  deriveOutfitStates,
-  emptyOutfitLayers,
+  deriveOutfitSnapshots,
   makeOutfitFloorDelta,
-  outfitAtPosition,
-  type OutfitFloorDelta,
-  type RawOutfitOp,
-  type StoredOutfitOp,
-} from '@/state/outfitState';
+  outfitStatesBeforeFloor,
+  readOutfitFloorDelta,
+  type CharOutfitSnapshot,
+} from './outfitState';
 import type { STMessage } from '@/st/context';
 
-function floorMessage(op: RawOutfitOp, sourceLine: number, swipe = 0, storedSwipe = swipe): STMessage {
-  const delta: OutfitFloorDelta = {
-    v: 1,
-    swipe: storedSwipe,
-    ops: [{ sourceLine, op }],
-  };
+function message(extra: Record<string, unknown>, swipe = 0, swipes = 1): STMessage {
   return {
-    name: 'Char',
+    name: 'AI',
     is_user: false,
     is_system: false,
-    mes: '正文',
+    mes: '',
+    swipes: Array.from({ length: swipes }, () => ''),
     swipe_id: swipe,
-    extra: { [BBI_OUTFIT_EXTRA_KEY]: delta },
+    extra,
   };
 }
 
-const schoolUniform: RawOutfitOp = {
-  op: 'set_outfit',
-  name: '温岚',
-  sceneHint: 'school morning',
-  layers: {
-    outer: { tag: 'white shirt', status: 'worn' },
-    bra: { tag: 'pink bra', status: 'worn' },
-    bottom: { tag: 'blue pleated skirt', status: 'worn' },
-    panties: { tag: 'white panties', status: 'worn' },
-    hosiery: { tag: 'kneehighs', status: 'worn' },
-  },
-};
+function withDelta(snapshots: CharOutfitSnapshot[], swipe = 0, swipes = 1): STMessage {
+  const delta = makeOutfitFloorDelta(snapshots, swipe);
+  return message({ [BBI_OUTFIT_EXTRA_KEY]: delta }, swipe, swipes);
+}
 
-describe('五层服装状态机', () => {
-  it('逐楼回放:先穿校服,再被拉下胸罩,胸罩是 disheveled 其余不变', () => {
-    const chat = [
-      floorMessage(schoolUniform, 1),
-      floorMessage(
-        { op: 'update_layer', name: '温岚', layer: 'bra', status: 'disheveled', stateTag: 'pulled down' },
-        3,
-      ),
-    ];
-    const state = deriveOutfitStates(chat).get('温岚');
-    expect(state?.layers.bra.status).toBe('disheveled');
-    expect(state?.layers.bra.stateTag).toBe('pulled down');
-    // 没被点到的层必须原样留在身上,否则「只脱一件」会变成全裸
-    expect(state?.layers.bottom.status).toBe('worn');
-    expect(state?.layers.outer.tag).toBe('white shirt');
+describe('结楼穿搭指纹读写', () => {
+  it('写入后能原样读回,去掉重复类目并补上缺省字段', () => {
+    const floor = withDelta([
+      { name: '温岚', wearing: 'white shirt, jeans', removed: ['bra', 'BRA', ' panties '] },
+      { name: '苏小雨', wearing: '' },
+    ] as CharOutfitSnapshot[]);
+    const delta = readOutfitFloorDelta(floor);
+    expect(delta?.v).toBe(2);
+    expect(delta?.snapshots[0]).toEqual({
+      name: '温岚',
+      wearing: 'white shirt, jeans',
+      removed: ['bra', 'panties'],
+    });
+    expect(delta?.snapshots[1]).toEqual({ name: '苏小雨', wearing: '' });
   });
 
-  it('swipe 不同就整楼跳过:切回另一条分支不会被另一条分支的「已脱」污染', () => {
-    const chat = [
-      floorMessage(schoolUniform, 1, 0),
-      // 这一楼的正文是 swipe 0,但增量标记来自 swipe 1(用户切走过又切回来)
-      floorMessage(
-        { op: 'update_layer', name: '温岚', layer: 'bottom', status: 'removed' },
-        2,
-        0,
-        1,
-      ),
-    ];
-    const state = deriveOutfitStates(chat).get('温岚');
-    // 第 1 楼当前是 swipe 0,它的增量标记的是 swipe 1 → 不生效
-    expect(state?.layers.bottom.status).toBe('worn');
+  it('旧版 v1 的五层记录安全忽略,绝不崩也不会被当成全裸', () => {
+    const legacy = message({ [BBI_OUTFIT_EXTRA_KEY]: { v: 1, swipe: 0, ops: [{ sourceLine: 1, op: { kind: 'update_layer' } }] } });
+    expect(readOutfitFloorDelta(legacy)).toBeNull();
+    expect(readOutfitFloorDelta(message({}))).toBeNull();
+    expect(readOutfitFloorDelta(undefined)).toBeNull();
   });
 
-  it('换装是整体替换:set_outfit 之后上一身的内裤不会留在身上', () => {
-    const before = applyOutfitOps(new Map(), [schoolUniform]);
-    const after = applyOutfitOps(before, [
-      {
-        op: 'set_outfit',
-        name: '温岚',
-        sceneHint: 'bath',
-        layers: {
-          outer: { tag: 'towel', status: 'worn' },
-          hosiery: { tag: 'slippers', status: 'worn' },
-        },
-      },
-    ]);
-    const layers = after.get('温岚')?.layers;
-    expect(layers?.outer.tag).toBe('towel');
-    expect(layers?.panties.status).toBe('removed');
-    expect(layers?.panties.tag).toBe('');
-  });
-
-  it('同一楼多个 P 节点按行号切片:前半楼穿着,后半楼才被脱掉', () => {
-    const base = applyOutfitOps(new Map(), [schoolUniform]);
-    const floorOps: StoredOutfitOp[] = [
-      {
-        sourceLine: 40,
-        op: { op: 'update_layer', name: '温岚', layer: 'outer', status: 'disheveled', stateTag: 'unbuttoned' },
-      },
-      {
-        sourceLine: 80,
-        op: { op: 'update_layer', name: '温岚', layer: 'bottom', status: 'removed' },
-      },
-    ];
-    const early = outfitAtPosition(base, floorOps, 35).get('温岚');
-    const middle = outfitAtPosition(base, floorOps, 60).get('温岚');
-    const late = outfitAtPosition(base, floorOps, 90).get('温岚');
-    expect(early?.layers.outer.status).toBe('worn');
-    expect(middle?.layers.outer.stateTag).toBe('unbuttoned');
-    expect(middle?.layers.bottom.status).toBe('worn');
-    expect(late?.layers.bottom.status).toBe('removed');
-  });
-
-  it('快照文本把三态写清楚,读的人不用猜', () => {
-    const state = applyOutfitOps(new Map(), [
-      schoolUniform,
-      { op: 'update_layer', name: '温岚', layer: 'bra', status: 'disheveled', stateTag: 'pulled down' },
-      { op: 'update_layer', name: '温岚', layer: 'panties', status: 'removed' },
-    ]);
-    const text = buildOutfitSnapshotText(state);
-    expect(text).toContain('bra=pink bra:disheveled(pulled down)');
-    expect(text).toContain('panties=white panties:removed(已脱)');
-    expect(text).toContain('outer=white shirt:worn(穿着)');
-  });
-
-  it('空状态时说清楚「本楼首次出场请 set_outfit」,而不是留一个空行', () => {
-    expect(buildOutfitSnapshotText(new Map())).toContain('set_outfit');
-    expect(emptyOutfitLayers().bra.status).toBe('removed');
-  });
-
-  it('落盘格式能原样读回', () => {
-    const delta = makeOutfitFloorDelta([{ sourceLine: 12, op: schoolUniform }], 2);
-    expect(delta).toBeDefined();
-    const message = { name: 'Char', is_user: false, is_system: false, mes: '', swipe_id: 2, extra: { [BBI_OUTFIT_EXTRA_KEY]: delta } } as STMessage;
-    expect(deriveOutfitStates([message]).get('温岚')?.layers.outer.tag).toBe('white shirt');
+  it('没有任何快照时写出 undefined,让落盘侧删掉旧键', () => {
     expect(makeOutfitFloorDelta([], 0)).toBeUndefined();
+    expect(makeOutfitFloorDelta([{ name: '  ', wearing: 'x' }], 0)).toBeUndefined();
+  });
+});
+
+describe('逐楼回放与 swipe 隔离', () => {
+  it('同一角色后楼覆盖前楼,不同角色各自保留', () => {
+    const chat = [
+      withDelta([{ name: '温岚', wearing: 'white shirt, jeans' }]),
+      withDelta([
+        { name: '温岚', wearing: 'white shirt, jeans', removed: ['bra'] },
+        { name: '顾子衿', wearing: 'white silk taoist robe' },
+      ]),
+    ];
+    const state = deriveOutfitSnapshots(chat);
+    expect(state.get('温岚')).toEqual({ name: '温岚', wearing: 'white shirt, jeans', removed: ['bra'] });
+    expect(state.get('顾子衿')?.wearing).toBe('white silk taoist robe');
+  });
+
+  it('另一条 swipe 的记录整楼跳过,不许把别人的「已脱」混进来', () => {
+    // 第 1 楼当前停在 swipe 0，但身上挂的是 swipe 1 那次的「已脱上衣」——必须整楼跳过。
+    const chat = [
+      withDelta([{ name: '温岚', wearing: 'white shirt' }], 0, 2),
+      message({ [BBI_OUTFIT_EXTRA_KEY]: makeOutfitFloorDelta([{ name: '温岚', wearing: '', removed: ['top'] }], 1) }, 0, 2),
+    ];
+    const state = deriveOutfitSnapshots(chat);
+    expect(state.get('温岚')).toEqual({ name: '温岚', wearing: 'white shirt' });
+  });
+
+  it('回放到指定楼层为止,不含该楼自身', () => {
+    const chat = [
+      withDelta([{ name: '温岚', wearing: 'floor0' }]),
+      withDelta([{ name: '温岚', wearing: 'floor1' }]),
+    ];
+    expect(deriveOutfitSnapshots(chat, 1).get('温岚')?.wearing).toBe('floor0');
+    expect(deriveOutfitSnapshots(chat, 2).get('温岚')?.wearing).toBe('floor1');
+  });
+
+  it('读聊天上下文并只回放到目标楼之前', () => {
+    getContextMock.mockReturnValue({
+      chat: [
+        withDelta([{ name: '温岚', wearing: 'white shirt' }]),
+        withDelta([{ name: '温岚', wearing: 'naked-ish' }]),
+      ],
+    });
+    expect(outfitStatesBeforeFloor(1).get('温岚')?.wearing).toBe('white shirt');
+    getContextMock.mockReturnValue(null);
+    expect(outfitStatesBeforeFloor(1).size).toBe(0);
+  });
+});
+
+describe('喂给提示词的指纹文本', () => {
+  it('按三人称列出穿着/已脱/状态三段', () => {
+    const text = buildOutfitSnapshotText(
+      new Map<string, CharOutfitSnapshot>([
+        ['顾子衿', { name: '顾子衿', wearing: 'white silk taoist robe, ankle-length', removed: ['bra'], stateNote: 'robe open front' }],
+        ['温岚', { name: '温岚', wearing: '' }],
+      ]),
+    );
+    expect(text).toContain('- 顾子衿：穿着[white silk taoist robe, ankle-length]｜已脱[bra]｜状态[robe open front]');
+    expect(text).toContain('- 温岚：穿着[全裸]');
+  });
+
+  it('没有任何记录时给一句可执行的兜底说明,而不是空串', () => {
+    expect(buildOutfitSnapshotText(new Map())).toContain('上一楼无服装记录');
   });
 });

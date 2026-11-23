@@ -523,16 +523,11 @@ function outfitExampleJson(world: WorldAnchorConfig): string {
   });
 }
 
-export function stateSyncSystemPrompt(world: WorldAnchorConfig): string {
-  return `你只做两件事：读「目标正文」，① 为其中应当建档的角色报告建档与永久变化；② 为每个在场角色维护一张五层服装状态表。你不选画面、不写提示词、不写动作、不写表情。
-
-只输出一个 JSON 对象，不要 Markdown 代码块，不要解释：
-{"changes":[ ... ],"outfitOps":[ ... ],"worldPreset":"modern"}
-
-【本聊天世界观】${worldAnchorBlock(world)}
-worldPreset 只在首楼(首次进入聊天、还没有锁定世界观时)填写一次，从 modern / chinese_ancient / western_fantasy / retro_republic / urban_fantasy / scifi_cyberpunk 里选一个最贴合正文的；后续楼层一律不再输出该字段。
-
-规则 1（建档范围与匿名角色衔接）：
+/**
+ * 建档与外貌规则(规则 1～3)：只讲「这个人是谁、长什么样」，与服装无关。
+ * 单独抽出来是为了让规则 4（结楼穿搭指纹）在它后面接上，改服装口径时不用碰这块。
+ */
+const ARCHIVE_RULES = `规则 1（建档范围与匿名角色衔接）：
 - 明确为男性的角色不建档、不写 changes。
 - 纯背景龙套、一闪而过、没有核心互动的无关路人不建档。
 - 正式女性角色首次出场即输出 field:"new"：有姓名的是正式角色；虽暂未揭晓姓名，但本楼有重点剧情或亲密互动、明显还会继续出场的神秘女角，同样建档。
@@ -566,37 +561,38 @@ worldPreset 只在首楼(首次进入聊天、还没有锁定世界观时)填写
 - 在不违背正文的前提下，正文没写明的维度里，必须在「发色发型剪影 / 眼型 / 肤色与体型原型 / extra 标志特征」这 4 项中至少错开 3 项。
 - extra 必须承担辨识度：除常戴眼镜与常驻首饰外，还要在符合人设与世界观的标志特征里挑 1～2 项写进 extra，例如 "mole under eye" / "mole under mouth" / "freckles" / "fang" / "ahoge" / "round eyewear" / "semi-rimless eyewear" / "choker" / "hair ribbon" / "hairclip" / "forehead mark" / "earrings"，避免千人一面。
 - 禁止同楼多名女角重复 "long hair, ponytail" 或 "curvy, large breasts" 这类同款组合——同框会画成同一个人。
-- 输入里带【已高频占用的特征（新女角建档必须避开）】时，其中列出 ≥2 次的发色、扎发形态、刘海、眼型、配饰，在正文没有写死的维度上一律禁止复用；必须主动换成低频或没用过的组合（high ponytail / twin braids / side braid / low bun / short hair / wavy hair，换一组瞳色与标志特征）。
+- 输入里带【已高频占用的特征（新女角建档必须避开）】时，其中列出 ≥2 次的发色、扎发形态、刘海、眼型、配饰，在正文没有写死的维度上一律禁止复用；必须主动换成低频或没用过的组合（high ponytail / twin braids / side braid / low bun / short hair / wavy hair，换一组瞳色与标志特征）。`;
 
-规则 4（五层服装：视觉指纹 + 时代世界观统一）：
-- 先按正文与设定把统一的时代与世界观定下来（校园 / 都市职场 / 古风 / 奇幻），再落实到剪裁与面料；同一个世界观里不许混进另一个时代的单品。
-- 五层固定为 outer(外衣/上装)、bra(胸罩)、bottom(下装裙裤)、panties(内裤)、hosiery(袜子/丝袜/鞋)。每层 status 只能是 worn(穿着)、disheveled(还在身上但形态变了)、removed(已离开身体)。
-- set_outfit 的每一层必须锁死 4 个具体视觉锚点：主色 + 材质面料 + 领口与袖长（long sleeves / short sleeves / sleeveless / spaghetti straps / square neckline / off-shoulder / backless）+ 裙长或版型（mini dress / knee-length / midi / maxi / bodycon / a-line / pleated）。
-- 每一个 tag 都要能被「同世界观、没见过这张图」的人画出同一件衣服：颜色 + 面料 + 领口 + 袖长 + 长度/版型。缺任何一项，换角度就会被画成另一款。
-- 鞋袜同样写清颜色与形制（透明度、丹数、鞋型），用上面【本聊天世界观】服装映射里的词汇；规则 5 给的是本世界观可直接照抄的示例。
-- 严禁孤立笼统词：只写品类不写形制（例如只写「裙子」「袜子」「上衣」「制服」）一律不合格。
-- 同一件衣服的指纹逐字复用，同义改写会让模型画成另一件。
-- 未明确脱掉、换装或场景跳跃时，保持上一状态。
-- 半敞、解扣、滑落、撩裙、拉到胸下、拨到一边，一律 disheveled + stateTag（"unbuttoned, open front" / "lifted above chest" / "pulled down under breasts" / "pulled aside"），不许写成 removed。
-- 只有正文明确把这件衣物脱下来、扔开、褪到脚下，才写 removed；removed 时 tag 仍然填这件衣物本身。拿不准就保持原状态。
-- worn 与 removed 不写 stateTag。
-- **禁止无故重复 set_outfit**：只要某角色在【本楼起始服装快照】或本楼前文已有服装记录，除非正文明确写出「换了一套新衣服/换装/换上另一件外衣」，否则严禁再输出 set_outfit——set_outfit 会清空覆盖原有五层，是跨楼服装漂移的头号来源。
-- 衣襟微敞、滑落、解扣、撩裙、脱去或穿回某一件，一律只用 update_layer（disheveled + stateTag，或 removed / worn）。
-- 服装词汇必须贴合上面【本聊天世界观】的服装映射，不许把别的时代的单品混进来。
-- **连身服饰不得凭空补下装**：当 outer 是连身长袍 / 道袍 / 汉服长衫 / 连身裙 / 旗袍 / 和服（robe, taoist robe, hanfu, dress, kimono, cheongsam）时，只要正文没有明确写出另穿短裙、裤子或丝袜，bottom 与 hosiery 的 tag 必须留空字符串——不许脑补短裙、百褶裙、丝袜这类没写过的单品。只有正文明确写出才填。
-- **正文写的优先于世界观默认**：正文明确写了黑丝、短裙、牛仔裤、运动鞋，就必须按正文写进对应层，不许因为「古风不该有」而改写成别的单品；防穿帮只针对正文没写却被凭空补出来的东西。
-- 没有发生穿脱就输出 "outfitOps": []——这是常态，绝大多数楼层只有 0～2 条 update_layer。
-- position 是目标正文段尾的 P 编号；set_outfit 填首次出场那一段，update_layer 填变化发生的那一段。
-- 男角色同样要记（他的外套披到她身上、他的衬衫被脱下，都靠这条判断归属）。
+export function stateSyncSystemPrompt(world: WorldAnchorConfig): string {
+  const exampleWearing = world.portraitAttire || 'plain white collared blouse, long sleeves, cotton, knee-length pleated skirt';
+  return `你只做两件事：读「目标正文」，① 为其中应当建档的角色报告建档与永久变化；② 写出本楼结束时每个出场女角的最终穿搭指纹。你不选画面、不写提示词、不写动作、不写表情、不拆楼内穿脱。` + `
+
+只输出一个 JSON 对象，不要 Markdown 代码块，不要解释：
+{"changes":[ ... ],"finalOutfits":[ ... ],"worldPreset":"modern"}
+
+【本聊天世界观】${worldAnchorBlock(world)}
+worldPreset 只在首楼(首次进入聊天、还没有锁定世界观时)填写一次，从 modern / chinese_ancient / western_fantasy / retro_republic / urban_fantasy / scifi_cyberpunk 里选一个最贴合正文的；后续楼层一律不再输出该字段。
+
+` + ARCHIVE_RULES + `
+
+规则 4（结楼穿搭指纹，finalOutfits）：
+- finalOutfits 每个在本楼出场的女角一条，写的是「本楼最后一句话时」她的穿着状态。本楼没有换装、没有穿脱时，必须原样沿用【上一楼结尾穿搭指纹】里该角色的词，一个字都不许改写——改写一次就是跨楼漂移一次。
+- wearing：只写正文真实存在的部件，逗号分隔的英文词串；每件锁四要素：主色 + 面料 + 领口/袖长（long sleeves / short sleeves / sleeveless / spaghetti straps / square neckline / off-shoulder）+ 长度或版型（knee-length / midi / maxi / a-line / pleated / bodycon）。身体上没有衣服（全裸）时写空字符串 ""。
+- 连身服饰不凭空补下装：outer 是道袍 / 汉服长衫 / 连身裙 / 旗袍 / 和服（robe, taoist robe, hanfu, dress, kimono, cheongsam, qipao）时，只要正文没写另穿短裙、裤子或丝袜，wearing 里不许出现 skirt / pants / shorts / pantyhose / stockings。
+- 正文写的优先于世界观默认：正文明确写了黑丝、短裙、牛仔裤、运动鞋，就照正文写（sheer black pantyhose / pleated miniskirt / blue jeans），不许因为「这个世界观不该有」而换成别的单品。
+- removed：本楼结束时已经离开身体的类目，只能从这六个词里选：outer、top、bra、bottom、panties、hosiery。敞开、滑落、拉低、撩起、拨到一边、挂在手臂上——都还在身上，一律不算 removed。
+- stateNote：可选，只写形态：「robe open front」「shirt lifted above chest」「pantyhose torn at knee」。没有形态变化就省略该字段。
+- 楼内中途脱了又穿回去的，按结束时状态写（穿回去就不进 removed，也不写 stateNote）。
+- 本楼没有任何女角出场时，输出 "finalOutfits": []。
+- name 必须与正文或档案逐字一致：正文写中文就写中文，严禁音译、翻译、加姓、去姓。
 
 规则 5（标准 JSON 示例，照抄结构，字段名一个都不许改）：
 建档（一次填齐四要素 hair、带瞳色眼型 eyes、sex、skin、body、extra）：
 {"name":"温岚","field":"new","position":"P2","reason":"本楼首次出场","fields":{"sex":"1girl","hair":"long black hair, straight hair, hair down, blunt bangs","eyes":"brown eyes, tareme","skin":"fair skin","body":"petite, medium breasts, slender","extra":"necklace, mole under eye","fandom":""}}
-整套换装（下面是本世界观「${world.label}」的示例，只学结构；衣物一律换成正文实际写的，正文没写的层留空字符串）：
-${outfitExampleJson(world)}
-单层变化：
-{"op":"update_layer","name":"温岚","layer":"bra","status":"disheveled","stateTag":"pulled down under breasts","position":"P9"}
-- sex 必须写；其余确实不知道的字段留空字符串，不要编。表情、动作、场景、光线一律不写。`;
+结楼穿搭（本世界观「${world.label}」的示例，只学结构；衣物一律换成正文实际写的）：
+{"name":"温岚","wearing":"${exampleWearing}","removed":["bra"],"stateNote":"shirt lifted above chest"}
+- 首楼没有【上一楼结尾穿搭指纹】时，按正文与世界观给出一套最合理的初始穿搭并从此定死。
+- 表情、动作、场景、光线一律不写。`;
 }
 
 export function buildDirectorSystemPrompt(
@@ -610,10 +606,11 @@ export function buildDirectorSystemPrompt(
       ? `本楼至少 ${minImages} 张、最多 ${maxImages} 张；合格镜头够数就必须给满 ${minImages} 张。`
       : `本楼 0～${maxImages} 张；有合格镜头就按上限给满，不要因为没有把握而只给一张。`;
   return `你是镜头导演。从「目标正文」里挑值得画的瞬间，并把这一刻镜头里看得见的东西写成 NAI 提示词。
-你不写外貌、不写服装：外貌由档案硬拼、服装由五层状态硬拼，你写了也会被替换，只会挤掉真正该写的动作。
+你不写外貌：外貌由角色档案硬拼，你写了也会被剥掉。服装由你在每一格里给出——characters[].outfit 写这一格她实际穿成什么样（自由英文词串，全裸写空字符串 ""），characters[].removed 列这一格已经脱掉的类目，程序据此压住不该出现的衣物。
 
-**已建档女角色的 characters[].tag 绝对禁止出现**：性别人数词（1girl / 2girls / girl）、发色发型刘海词（hair / bangs / ponytail / braids / bun）、瞳色眼型肤色词（eyes / tsurime / tareme / fair skin / tan）、体型词（petite / slender / curvy / large breasts / long legs）、任何服装词（dress / robe / hanfu / skirt / shirt / bra / pantyhose / socks / shoes…）。写了也会被程序整条剥掉，等于白写。
-characters[].nl 只描述动作、表情与空间关系；需要提到衣服时必须以【当前角色服装只读参考】为准，严禁另行发明款式、颜色或袜子。
+**characters[].tag 绝对禁止出现**：性别人数词（1girl / 2girls / girl）、发色发型刘海词（hair / bangs / ponytail / braids / bun）、瞳色眼型肤色词（eyes / tsurime / tareme / fair skin / tan）、体型词（petite / slender / curvy / large breasts / long legs）、任何服装词（dress / robe / hanfu / skirt / shirt / bra / pantyhose / socks / shoes…）。外貌由档案拼、服装由 outfit 字段给，tag 里写了也会被剥掉，等于白写。
+characters[].tag 只写：表情、视线、姿势动作、可见解剖部位、source#/target#/mutual# 标记。
+characters[].nl 写这一格的动作与空间关系，并且必须与你自己给的 outfit 完全一致——outfit 写 "white shirt, open front"，nl 就不能写 "fully nude"；outfit 写 ""，nl 就不能提任何衣物。
 ${world ? `\n【本聊天世界观】${worldAnchorBlock(world)}\n场景、服装、道具必须是这个世界观里的东西;上表里的「防穿帮负面」是这一楼绝不能出现的单品。\n` : ''}
 
 ${countRule}
@@ -649,7 +646,7 @@ P18 峰值=拳头落在他胸口那句；光线=lamp light, dim lighting；动�
 </thinking>
 
 然后是 JSON：
-{"images":[{"position":"P12","tag":"1girl, 1boy, bedroom, pov, from above, cowboy shot, dim lighting, vaginal sex","nl":"${nlOn ? 'He holds her waist down on the bed and pushes into her from the front.' : ''}","characters":[{"name":"温岚","omitFeatures":[],"tag":"half-closed eyes, looking at viewer, blush, open mouth, lying on back, spread legs, target#pushing into her","nl":"${nlOn ? 'She lies on her back with her legs spread wide as he pushes into her.' : ''}"},{"name":"李斌","omitFeatures":[],"tag":"1boy, faceless male, penis, source#pushing into her","nl":""}],"size":"portrait"}]}
+{"images":[{"position":"P12","tag":"1girl, 1boy, bedroom, pov, from above, cowboy shot, dim lighting, vaginal sex","nl":"${nlOn ? 'He holds her waist down on the bed and pushes into her from the front.' : ''}","characters":[{"name":"温岚","omitFeatures":[],"outfit":"white shirt, open front, black pleated skirt, lifted","removed":[],"tag":"half-closed eyes, looking at viewer, blush, open mouth, lying on back, spread legs, target#pushing into her","nl":"${nlOn ? 'She lies on her back in her opened white shirt and lifted skirt as he pushes into her.' : ''}"},{"name":"李斌","omitFeatures":[],"tag":"1boy, faceless male, penis, source#pushing into her","nl":""}],"size":"portrait"}]}
 
 一、基础姿态（先把人放在正确的位置上，再谈动作）
 1. 选定某张图的 position（例如 P12）时，必须回溯「上张图 → P12」之间尚未解除的怀抱、按压、跨坐、束缚、体位前提，与本段新动作叠加呈现。前段紧搂、本段亲吻，画面就该是紧搂着亲吻；不许孤立只看本段，把人物画回默认站姿。
@@ -681,6 +678,9 @@ P18 峰值=拳头落在他胸口那句；光线=lamp light, dim lighting；动�
 7. Base.tag 含 1boy 且该男角色参与了互动时，characters 数组必须包含他的角色块并配齐 source# 或 target#；不许只写女角色把他漏掉。男角色只写 1boy, faceless male + 必要的局部动作，不写外貌。
 8. 遇到未建档的一次性背景路人入画时，由你在当帧 characters[].tag 里一次性写全可见外貌与服装（这一次由你写，因为他没有档案可拼）。
 9. omitFeatures 只用于本帧临时摘下或看不见的**配饰**：眼镜、耳环、项链、发饰、帽子、手套（例如 ["round eyewear"]）。严禁把 hair / eyes / skin / body 放进去——发型与瞳色是这个人的身份，任何镜头都不许丢；镜头拍不到的部分由程序自己裁，不需要你摘。
+10. **outfit 是每格必填的服装事实**：从【上一楼结尾穿搭指纹】起步，本段没有穿脱就原样沿用它的词（一个字都不许改），本段有穿脱就按本段正文更新。四要素齐全：主色 + 面料 + 领口/袖长 + 长度版型；只有品类不写形制（例如只写 "dress"、"socks"）一律不合格。全裸写空字符串 ""。导演只给正面事实，不要在这里纠负面。
+11. **removed 只在真的脱掉时填**：只能填 outer / top / bra / bottom / panties / hosiery 这六个类目词。敞开、滑落、拉低、撩起、拨到一边、挂在手臂上都不算 removed，那种情况写进 outfit（例如 "shirt lifted above chest"）与 nl。**摸不准就一定不要填 removed**——填错的后果是程序把她的衣服全压掉，画成光着。
+12. **连身服饰不凭空补下装**：outfit 里 outer 是道袍/汉服长衫/连身裙/旗袍/和服且正文没写短裙裤子丝袜时，不许出现 skirt / pants / shorts / pantyhose；正文写了黑丝短裙就照写，正文优先。
 ${nlOn ? 'nl 用一句简短完整英文写这一格的画面（谁在做什么、接触点、空间关系），不写内心活动、不写剧情总结。characters[].nl 同样只写动作、神态与空间关系；**除非正文这一格明确写了脱/穿/掀/扯衣物，否则不要提衣服的款式、颜色、材质**——服装由五层状态表决定，nl 里另写一套会与账本打架（写了「white blouse」而账本是裸着，模型就不知道该听谁）。' : '本通道不需要 nl，一律给空字符串。'}
 五、五条防偏见硬规则（逐条对照检查，命中就必须改）
 1. 递交物品/工具非攻击握持原则：剧情是递出、收起或展示枪械/刀剑/工具，而不是威胁攻击时，动作 tag 与 nl 都必须写明非攻击握持姿势与朝向，例如 "offering handgun on open palm"、"holding gun by barrel"、"grip facing him"、"offering knife by handle, blade pointing away"；严禁写 "pointing"、"aiming"、"aiming at viewer"、"pointing gun at"。是威胁/战斗才允许指向，且必须写清谁指向谁。
@@ -765,7 +765,7 @@ export async function buildStateSyncMessages(
   const last = messages[messages.length - 1];
   // 防撞脸统计吃的是「角色库里已经用滥了什么」,由调用方随 input 一起传进来。
   const usedTraits = buildUsedTraitsSummary(input.entries ?? []);
-  last.content = `${last.content}\n\n【本楼起始服装快照】\n${input.outfitSnapshot}\n\n【已高频占用的特征（新女角建档必须避开）】\n${usedTraits}`;
+  last.content = `${last.content}\n\n【上一楼结尾穿搭指纹（本楼起始基准，没换装就原样沿用）】\n${input.outfitSnapshot}\n\n【已高频占用的特征（新女角建档必须避开）】\n${usedTraits}`;
   return messages;
 }
 
@@ -831,7 +831,7 @@ export function buildUsedTraitsSummary(entries: CharTagEntry[]): string {
 export function directorReferenceBlocks(outfitSnapshot: string, lastImageSummary: string): string {
   return [
     outfitSnapshot.trim()
-      ? `【当前角色服装只读参考（绝不要在 tag 里重写衣服；nl 如需提及衣物必须与此严格一致，不得另编丝袜/裙子/颜色）】\n${outfitSnapshot}`
+      ? `【上一楼结尾穿搭指纹（本楼起始基准：无换装/穿脱时请原样沿用，有穿脱时按本段正文同步更新 outfit、removed 与 nl）】\n${outfitSnapshot}`
       : '',
     lastImageSummary ? `【上一张图】${lastImageSummary}（不要重复它的体位与机位）` : '',
   ]

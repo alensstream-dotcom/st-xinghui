@@ -71,24 +71,27 @@ describe('世界观示例不能倒灌现代单品', () => {
     lockedByUser: true,
   };
 
-  it('chinese_ancient 的状态表提示词里不出现丝袜与百褶短裙示例', () => {
+  it('chinese_ancient 的穿搭示例不出现现代单品（示例只用汉服）', () => {
     const text = stateSyncSystemPrompt(ancient);
-    expect(text).not.toContain('pantyhose');
-    expect(text).not.toContain('pleated miniskirt');
-    expect(text).not.toContain('pleated skirt');
-    expect(text).toContain('taoist robe');
+    // 只看「结楼穿搭示例」那一行 JSON：规则正文允许「正文写了黑丝就照写」，那不是示例倒灌。
+    const exampleLine = text.split('\n').find(line => line.includes('"wearing"')) ?? '';
+    expect(exampleLine).toContain('traditional hanfu');
+    expect(exampleLine).not.toContain('pantyhose');
+    expect(exampleLine).not.toContain('skirt');
+    expect(text).toContain('plain white traditional hanfu');
   });
 
-  it('modern 的状态表提示词仍然给出现代示例（保持原有可用性）', () => {
+  it('modern 的穿搭示例用的是现代素服', () => {
     const text = stateSyncSystemPrompt({ ...defaultWorldAnchor(), presetId: 'modern', lockedByUser: true });
-    expect(text).toContain('20 denier sheer black pantyhose');
+    const exampleLine = text.split('\n').find(line => line.includes('"wearing"')) ?? '';
+    expect(exampleLine).toContain('collared blouse');
   });
 
   it('状态表规则明确：连身长袍不得凭空补下装，正文写的优先于世界观', () => {
     const text = stateSyncSystemPrompt(ancient);
-    expect(text).toContain('连身服饰不得凭空补下装');
+    expect(text).toContain('连身服饰不凭空补下装');
     expect(text).toContain('正文写的优先于世界观默认');
-    expect(text).toContain('bottom 与 hosiery 的 tag 必须留空字符串');
+    expect(text).toContain('wearing 里不许出现 skirt / pants / shorts / pantyhose / stockings');
   });
 });
 
@@ -148,8 +151,8 @@ describe('防撞脸：高频占用统计', () => {
 describe('导演只读参考块', () => {
   it('把服装快照以只读块附进去，并声明不许重写衣服', () => {
     const block = directorReferenceBlocks('温岚｜outer: white silk taoist robe, worn', '入画角色：温岚｜Base：1girl, bedroom');
-    expect(block).toContain('【当前角色服装只读参考');
-    expect(block).toContain('绝不要在 tag 里重写衣服');
+    expect(block).toContain('【上一楼结尾穿搭指纹');
+    expect(block).toContain('无换装/穿脱时请原样沿用');
     expect(block).toContain('white silk taoist robe');
     expect(block).toContain('【上一张图】');
   });
@@ -162,11 +165,14 @@ describe('导演只读参考块', () => {
 describe('导演通道：外貌/服装禁写与比例防畸变', () => {
   const text = buildDirectorSystemPrompt(true, 1, 3);
 
-  it('明写已建档女角色禁止写人数词/发色/瞳色/体型/服装', () => {
+  it('明写 characters[].tag 禁止出现人数词/发色/瞳色/体型/服装', () => {
     expect(text).toContain('绝对禁止出现');
     expect(text).toContain('性别人数词');
     expect(text).toContain('任何服装词');
-    expect(text).toContain('写了也会被程序整条剥掉');
+    expect(text).toContain('tag 里写了也会被剥掉');
+    // 服装不再是「禁写」，而是「写在 outfit 字段里」：口径换成了当帧事实，不能倒退回硬拼。
+    expect(text).toContain('characters[].outfit');
+    expect(text).toContain('characters[].removed');
   });
 
   it('高低差互动禁仰拍', () => {

@@ -34,10 +34,9 @@ import { getContext } from '@/st/context';
 import { applyMessageText } from '@/st/messageEdit';
 import {
   BBI_OUTFIT_EXTRA_KEY,
-  deriveOutfitStates,
+  deriveOutfitSnapshots,
   readOutfitFloorDelta,
-  type CharOutfitState,
-  type OutfitLayerKey,
+  type CharOutfitSnapshot,
 } from '@/state/outfitState';
 import {
   WORLD_PRESETS,
@@ -623,43 +622,29 @@ function confirmRollback() {
 }
 
 /** 五层服装状态:回放整段聊天得到的账本,只读展示 + 单角色清除。 */
-const OUTFIT_LAYER_ORDER: OutfitLayerKey[] = ['outer', 'bra', 'bottom', 'panties', 'hosiery'];
-const OUTFIT_LAYER_CN: Record<OutfitLayerKey, string> = {
+const editingOutfit = computed<CharOutfitSnapshot | null>(() => {
+  const name = editingName.value?.trim();
+  if (!name) return null;
+  const chat = getContext()?.chat ?? [];
+  return deriveOutfitSnapshots(chat, chat.length).get(name) ?? null;
+});
+
+const REMOVED_CN: Record<string, string> = {
   outer: '外衣',
+  top: '上衣',
   bra: '胸罩',
   bottom: '下装',
   panties: '内裤',
   hosiery: '袜/鞋',
 };
-const OUTFIT_STATUS_CN: Record<string, string> = {
-  worn: '穿着',
-  disheveled: '半敞/凌乱',
-  removed: '已脱',
-};
 
-const editingOutfit = computed<CharOutfitState | null>(() => {
-  const name = editingName.value?.trim();
-  if (!name) return null;
-  const chat = getContext()?.chat ?? [];
-  return deriveOutfitStates(chat, chat.length).get(name) ?? null;
-});
-
-const editingOutfitRows = computed(() =>
-  OUTFIT_LAYER_ORDER.map(layer => {
-    const state = editingOutfit.value?.layers[layer];
-    return {
-      layer,
-      label: OUTFIT_LAYER_CN[layer],
-      tag: state?.tag ?? '',
-      status: state?.status ?? 'worn',
-      statusLabel: OUTFIT_STATUS_CN[state?.status ?? 'worn'] ?? '穿着',
-    };
-  }),
+const editingRemovedLabel = computed(() =>
+  (editingOutfit.value?.removed ?? []).map(key => REMOVED_CN[key] ?? key).join('、'),
 );
 
 /**
- * 清掉这个角色在所有楼层里记的服装变更。
- * 排查「明明穿着却画成裸的」时最有用:账本是逐楼 op 回放出来的,删掉这些 op 就等于从没穿过/脱过。
+ * 清掉这个角色在所有楼层里记的结楼穿搭快照。
+ * 排查「明明穿着却画成裸的」时最有用:快照是逐楼回放出来的,删掉就等于从没记过。
  */
 async function resetEditingOutfit() {
   const name = editingName.value?.trim();
@@ -675,10 +660,10 @@ async function resetEditingOutfit() {
   for (let floor = 0; floor < chat.length; floor += 1) {
     const message = chat[floor];
     const delta = readOutfitFloorDelta(message);
-    if (!delta || !delta.ops.length) continue;
-    const kept = delta.ops.filter(op => op.op.name !== name);
-    if (kept.length === delta.ops.length) continue;
-    const value = kept.length ? { ...delta, ops: kept } : undefined;
+    if (!delta || !delta.snapshots.length) continue;
+    const kept = delta.snapshots.filter(snapshot => snapshot.name !== name);
+    if (kept.length === delta.snapshots.length) continue;
+    const value = kept.length ? { ...delta, snapshots: kept } : undefined;
     const result = await applyMessageText(
       floor,
       text => text,
@@ -690,7 +675,7 @@ async function resetEditingOutfit() {
     if (result === 'saved') touched += 1;
   }
   toastr[touched ? 'success' : 'info'](
-    touched ? `已清除 ${touched} 楼里「${name}」的服装记录` : `「${name}」没有服装记录`,
+    touched ? `已清除 ${touched} 楼里「${name}」的穿搭记录` : `「${name}」没有穿搭记录`,
     '星绘',
   );
 }
@@ -938,31 +923,38 @@ function sourceLabel(entry: CharTagEntry): string {
           </div>
         </div>
 
-        <!-- ===== 五层服装状态:账本回放结果,只读查看 + 单角色清除 ===== -->
+        <!-- ===== 结楼穿搭快照:逐楼回放结果,只读查看 + 单角色清除 ===== -->
         <details v-if="editingName" class="bbi-outfit-audit">
           <summary>
-            当前服装状态(账本回放)
+            当前穿搭(逐楼回放)
             <span class="bbi-outfit-audit-sub">
-              {{ editingOutfit ? '有新状态' : '暂无记录' }}
+              {{ editingOutfit ? '有记录' : '暂无记录' }}
             </span>
           </summary>
           <template v-if="editingOutfit">
-            <ul class="bbi-outfit-list">
-              <li v-for="row in editingOutfitRows" :key="row.layer">
-                <span class="bbi-outfit-layer">{{ row.label }}</span>
-                <span class="bbi-outfit-status" :class="`is-${row.status}`">{{ row.statusLabel }}</span>
-                <span class="bbi-outfit-tag">{{ row.tag || '—' }}</span>
-              </li>
-            </ul>
+            <div class="bbi-outfit-snapshot">
+              <div class="bbi-outfit-row">
+                <span class="bbi-outfit-layer">穿着</span>
+                <span class="bbi-outfit-tag">{{ editingOutfit.wearing || '(全裸)' }}</span>
+              </div>
+              <div class="bbi-outfit-row">
+                <span class="bbi-outfit-layer">已脱</span>
+                <span class="bbi-outfit-tag">{{ editingRemovedLabel || '—' }}</span>
+              </div>
+              <div class="bbi-outfit-row">
+                <span class="bbi-outfit-layer">状态</span>
+                <span class="bbi-outfit-tag">{{ editingOutfit.stateNote || '—' }}</span>
+              </div>
+            </div>
             <p class="bbi-field-hint">
-              这些状态是逐楼回放出来的:画错多半是某楼把「掀开/解扣」记成了「脱下」,可在这里清除后重新生成本楼 tag。
+              这是逐楼回放出来的「每楼结束时」的穿搭。画错多半是某楼把敞开/撩起记成了脱掉,可在这里清除后重新生成本楼 tag。
             </p>
             <button class="bbi-btn bbi-btn-sm bbi-btn-danger" type="button" @click="resetEditingOutfit">
-              清除「{{ editingName }}」的服装记录
+              清除「{{ editingName }}」的穿搭记录
             </button>
           </template>
           <p v-else class="bbi-field-hint">
-            这个角色还没有服装记录(没出过图,或所在楼层没有服装变更)。
+            这个角色还没有穿搭记录(没出过图,或所在楼层没有服装变更)。
           </p>
         </details>
 
@@ -1774,6 +1766,24 @@ function sourceLabel(entry: CharTagEntry): string {
   font-weight: 400;
   color: var(--bbi-muted);
 }
+.bbi-outfit-snapshot {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+
+.bbi-outfit-row {
+  display: flex;
+  gap: 10px;
+  align-items: baseline;
+  font-size: 12px;
+}
+
+.bbi-outfit-snapshot + .bbi-field-hint {
+  margin: 6px 0 10px;
+}
+
 .bbi-outfit-list {
   margin: 8px 0 6px;
   padding: 0;

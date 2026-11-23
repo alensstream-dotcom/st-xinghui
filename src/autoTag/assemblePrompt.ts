@@ -1,14 +1,18 @@
 import type { ImageCharacterPrompt, ImageInsertion } from '@/autoTag/protocol';
 import type { CharTagEntry } from '@/state/charTags';
-import type { CharOutfitState } from '@/state/outfitState';
 import type { WorldAnchorConfig } from '@/state/worldAnchor';
 
 /**
- * 本地确定性编译器（计划书步骤 5）。
+ * 本地确定性编译器（服装架构 v2）。
  *
- * 分工是死的：档案管「这个人长什么样」，五层状态管「此刻穿成什么样」，
- * 导演通道只交「这一格她在做什么」。外貌与服装一进模型就有漂的可能，
- * 所以这两样一律由这里硬拼，模型给的 ch.tag 只按顺序接在后面。
+ * 分工是死的，而且各有唯一出处：
+ * - 角色库档案：这个人长什么样（发色/发型/瞳色/肤色/体型/配饰），任何一帧都不变；
+ * - 导演通道当帧给的 `outfit`：这一格她实际穿成什么样（自由英文词串，全裸给空串）；
+ * - 导演通道当帧给的 `removed`：这一格明确脱掉的类目，编译成角色级负面（uc）；
+ * - 导演通道的 `tag`：只允许是动作/姿势/表情/视线/source#-target#-mutual# 标记。
+ *
+ * 这里不再维护五层状态机、不再推断「谁盖住了谁」：上一楼的穿搭指纹由任务 A 交回
+ * `finalOutfits`，导演在它基础上写本帧，缺省沿用。编译器只做三件事——拼、剥、压干扰。
  */
 
 function splitTags(raw: string): string[] {
@@ -38,7 +42,21 @@ const DIRECTOR_MARKER = /^(?:source|target|mutual)#/i;
 const HAS_CJK = /[\u4e00-\u9fff\u3040-\u30ff]/;
 
 function dropLocalizedMarkers(tags: string[]): string[] {
-  return tags.filter(tag => !DIRECTOR_MARKER.test(tag) || !HAS_CJK.test(tag));
+  const out: string[] = [];
+  for (const tag of tags) {
+    if (!HAS_CJK.test(tag)) {
+      out.push(tag);
+      continue;
+    }
+    // 中文往往和标记黏在同一个 tag 里（"source#李斌抚摸 target#licking nipple"）。
+    // 整条丢掉会把后面那条合法的英文标记一起吞掉，所以先按标记边界切开，只扔带中文的那一段。
+    for (const chunk of tag.split(/\s+(?=(?:source|target|mutual)#)/i)) {
+      const piece = chunk.trim();
+      if (!piece || HAS_CJK.test(piece)) continue;
+      out.push(piece);
+    }
+  }
+  return out;
 }
 
 /** 只在全身/腿长镜头里才有意义的纯下身词：上半身构图写进去会让 NAI 硬塞一双腿。 */
@@ -46,6 +64,9 @@ const LEG_ONLY = /\b(?:long legs?|short legs?|slender legs?|thick thighs?|bare l
 /** 鞋子类词：半身构图拍不到脚，留着会被画成蜷脚塞进画面。 */
 const SHOE_WORD = /\b(?:flats?|heels?|high heels?|shoes?|boots?|sneakers?|sandals?|loafers?|pumps?|mary janes?|slippers?)\b/i;
 const SHOES_HIDDEN_SHOT = /\b(?:cowboy shot|medium shot|upper body|close-up|face focus)\b/i;
+/** 下半身单品：纯上半身/面部特写里不该出现（否则会硬塞裙摆与丝袜进画面）。 */
+const LOWER_ONLY =
+  /\b(?:skirt|skirts|miniskirt|microskirt|pleated skirt|skater skirt|pants|jeans|shorts|trousers|pantyhose|stockings|thighhighs|socks|barefoot|feet|footwear|shoes|boots|heels|sneakers|loafers)\b/i;
 
 function normalizeSexTag(raw: string): string {
   const s = raw.trim().toLowerCase();
@@ -74,17 +95,6 @@ function isUpperOnlyShot(baseTag: string): boolean {
     );
   return hasUpperCue && !hasLowerOrFullCue;
 }
-
-export function isOnePieceOuter(outerTag: string): boolean {
-  return /\b(dress|gown|kimono|yukata|hanfu|robe|taoist robe|cloak|tunic|trench coat|cheongsam|qipao|nightgown|bodysuit|leotard|swimsuit|onesie)\b/i.test(
-    outerTag,
-  );
-}
-
-/** 连身长款词:长袍/长裙类外衣把下身整个罩住,没有「掀开」就不该让短裙词抢画面。 */
-const LONG_HEM = /\b(?:ankle-length|full-length|floor-length|long|maxi)\b/i;
-/** 短裙类词:只有换装或掀开时才允许与长袍同框。 */
-export const SHORT_SKIRT = /\b(?:miniskirt|microskirt|short skirt|pleated skirt|skater skirt)\b/i;
 
 /**
  * omitFeatures 的匹配器:按逗号分词后做「整词/词边界」比对,绝不做子串包含。
@@ -149,105 +159,6 @@ function buildFixedAppearanceTags(
   return dedupeTags(tags);
 }
 
-interface CompiledOutfit {
-  positive: string[];
-  negative: string[];
-}
-
-/** 五层状态 → 这一格的服装提示词（计划书步骤 5 的 compileOutfitForFrame）。 */
-function compileOutfitForFrame(
-  outfit: CharOutfitState | undefined,
-  upperOnly: boolean,
-): CompiledOutfit {
-  const positive: string[] = [];
-  const negative: string[] = [];
-  if (!outfit) return { positive, negative };
-  const layers = outfit.layers;
-
-  const outer = layers.outer;
-  const bra = layers.bra;
-  const bottom = layers.bottom;
-  const panties = layers.panties;
-  const hosiery = layers.hosiery;
-
-  if (outer) {
-    if (outer.status === 'worn' && outer.tag) positive.push(outer.tag);
-    if (outer.status === 'disheveled' && outer.tag) {
-      positive.push(outer.tag);
-      if (outer.stateTag) positive.push(outer.stateTag);
-    }
-  }
-
-  // 外衣判定为 removed 就是上半身没有外衣:无论内衣状态如何,都要把「上衣类」压进角色负面,
-  // 否则 NAI 会按世界观默认衣装自己补一件衬衣/汉服上衣,出现「脱了又穿回去」的漂移。
-  if (outer?.status === 'removed') {
-    negative.push('shirt', 'blouse', 'dress', 'coat', 'robe', 'hanfu');
-  }
-
-  if (bra) {
-    if (bra.status === 'worn' && outer?.status !== 'worn' && bra.tag) positive.push(bra.tag);
-    if (bra.status === 'disheveled' && bra.tag) {
-      positive.push(bra.tag);
-      if (bra.stateTag) positive.push(bra.stateTag);
-    }
-    if (bra.status === 'removed' && outer?.status !== 'worn') {
-      negative.push('bra', 'underwear', 'bikini top');
-      if (outer?.status === 'removed') {
-        positive.push('topless', 'bare breasts', 'nipples');
-        negative.push('shirt', 'blouse', 'dress');
-      } else {
-        positive.push('bare breasts', 'nipples');
-      }
-    }
-  }
-
-  if (!upperOnly) {
-    const effectiveBottomStatus = !bottom?.tag && isOnePieceOuter(outer?.tag ?? '')
-      ? outer?.status
-      : bottom?.status;
-    // 下装脱了就是脱了:无论内裤还穿没穿,都要把裙/裤压进负面。
-    // 以前只有「内裤也脱了」才压,于是「裤子脱了、内裤还在」时模型会自己补一条裙子回来。
-    if (effectiveBottomStatus === 'removed') {
-      positive.push('bottomless');
-      negative.push('skirt', 'pants', 'shorts');
-    }
-    if (bottom) {
-      if (bottom.status === 'worn' && bottom.tag) positive.push(bottom.tag);
-      if (bottom.status === 'disheveled' && bottom.tag) {
-        positive.push(bottom.tag);
-        if (bottom.stateTag) positive.push(bottom.stateTag);
-      }
-    }
-
-    if (panties) {
-      if (panties.status === 'worn' && effectiveBottomStatus !== 'worn' && panties.tag) {
-        positive.push(panties.tag);
-      }
-      if (panties.status === 'disheveled' && panties.tag) {
-        positive.push(panties.tag);
-        if (panties.stateTag) positive.push(panties.stateTag);
-      }
-      if (panties.status === 'removed' && effectiveBottomStatus !== 'worn') {
-        negative.push('panties', 'underwear');
-        if (effectiveBottomStatus === 'removed') {
-          positive.push('bottomless');
-          negative.push('skirt', 'pants', 'shorts');
-        }
-      }
-    }
-
-    if (hosiery) {
-      if (hosiery.status === 'worn' && hosiery.tag) positive.push(hosiery.tag);
-      if (hosiery.status === 'disheveled' && hosiery.tag) {
-        positive.push(hosiery.tag);
-        if (hosiery.stateTag) positive.push(hosiery.stateTag);
-      }
-    }
-  }
-
-  return { positive: dedupeTags(positive), negative: dedupeTags(negative) };
-}
-
 /** 同一个人自己的防漂移负面：发型/体型最容易在长楼里被画回默认值。 */
 function buildSelfAntiDriftNegative(entry: CharTagEntry | undefined): string[] {
   if (!entry) return [];
@@ -274,24 +185,19 @@ function extractDistinctiveFeatures(entry: CharTagEntry | undefined): string[] {
 }
 
 /**
- * 导演通道只能写「这一格正在发生什么」，不能写「这个人长什么样、穿什么」。
- * 一旦这个女角已经在角色库里（外貌有档案）、或已有五层服装状态，导演再写发色/瞳色/体型/性别人数词/衣物，
- * 就是在和权威数据抢方向盘——古风楼被塞进 pleated skirt、银发角色被写成 blonde，都是这么来的。
- * 所以这里在合流之前先硬清洗一遍：只留动作、表情、视线、姿势与 source#/target#/mutual# 标记。
+ * 导演通道只能写「这一格正在发生什么」，不能写「这个人长什么样」。
+ * 已经建档的女角再写发色/瞳色/体型/性别人数词，就是在和档案抢方向盘——
+ * 银发角色被写成 blonde、古风人物被塞进现代身体词，都是这么来的。
+ * 服装不在这里剥：本帧穿什么归导演的 outfit 与 removed，编译器另有处理。
  */
 const SEX_WORD_TAG = /^(?:1girl|2girls|3girls|multiple girls|1boy|2boys|3boys|multiple boys|girl|boy|solo)$/i;
 const HAIR_TAG = /\b(hair|bangs|ponytail|twintails|braid|braids|braided|bun|bob|updo|ahoge)\b/i;
 const EYE_SKIN_TAG = /\b(eyes|tsurime|tareme|jitome|sanpaku|pale skin|fair skin|dark skin|tan)\b/i;
 const STATIC_BODY_TAG = /\b(tall female|petite|slender|curvy|voluptuous|flat chest|small breasts|medium breasts|large breasts|huge breasts|wide hips|long legs)\b/i;
-const GARMENT_TAG = /\b(dress|robe|hanfu|kimono|cheongsam|skirt|pants|jeans|shorts|shirt|blouse|coat|jacket|blazer|sweater|uniform|bra|panties|underwear|dudou|pantyhose|stockings|thighhighs|socks|shoes|heels|boots|sneakers)\b/i;
-/** 这些词说明这一格正在发生接触（手在头发里、抓着衣领），属于动作，不算外貌/服装声明。 */
+/** 这些词说明这一格正在发生接触（手在头发里、抓着衣领），属于动作，不算外貌声明。 */
 const ACTION_TOUCH_TAG = /\b(hand|hands|holding|touching|grabbing|pulling|lifting|unbuttoning|pressed|against|around|on her|on his)\b/i;
 
-export function stripLeakedAppearanceAndOutfit(
-  tags: string[],
-  hasLibraryEntry: boolean,
-  hasOutfitState: boolean,
-): string[] {
+export function stripLeakedAppearance(tags: string[], hasLibraryEntry: boolean): string[] {
   return tags.filter(tag => {
     const token = tag.trim();
     if (!token) return false;
@@ -302,29 +208,13 @@ export function stripLeakedAppearanceAndOutfit(
     if (hasLibraryEntry && HAIR_TAG.test(token)) return false;
     if (hasLibraryEntry && EYE_SKIN_TAG.test(token)) return false;
     if (hasLibraryEntry && STATIC_BODY_TAG.test(token)) return false;
-    if (hasOutfitState && GARMENT_TAG.test(token)) return false;
     return true;
   });
 }
 
-/**
- * 这一格「实际被遮住」的部位。状态表说了算:
- * - 上半身遮住 = 胸罩穿好,或外衣穿好且胸罩没被脱掉(外衣敞开时胸罩若还在也算遮住)
- * - 下半身遮住 = 下装/内裤穿好,或连身衣整体穿好
- * - 连身长袍穿好且没掀开时,短裙词一律不出现(否则百褶裙会盖掉道袍下摆)
- */
-interface CoverState {
-  upper: boolean;
-  lower: boolean;
-  suppressShortSkirt: boolean;
-}
-
-const CONFLICT_UPPER = /^(?:bare breasts|topless|exposed breasts|exposed chest|nipples?|bare chest|nude)$/i;
 const PROPORTION_GUARDRAILS = ['giantess', 'size difference', 'miniature'];
 const HEIGHT_GAP_SHOT = /\b(sitting|kneeling|kneel|crouching|lying|floor seat|on lap|seiza)\b/i;
 const STANDING_TAG = /\b(standing|walking|leaning forward)\b/i;
-
-const CONFLICT_LOWER = /^(?:bottomless|nude|naked|completely nude|fully nude|pussy|spread pussy|pussy juice)$/i;
 
 /**
  * 高低差构图(一人站、一人坐/跪/躺)的比例防畸变词。
@@ -336,38 +226,54 @@ export function proportionGuardrailsFor(text: string): string[] {
   return HEIGHT_GAP_SHOT.test(text) && STANDING_TAG.test(text) ? [...PROPORTION_GUARDRAILS] : [];
 }
 
-function describeCoverage(outfit: CharOutfitState | undefined): CoverState {
-  const layers = outfit?.layers;
-  if (!layers) return { upper: false, lower: false, suppressShortSkirt: false };
-  const outerWorn = layers.outer?.status === 'worn';
-  const onePiece = outerWorn && isOnePieceOuter(layers.outer?.tag ?? '');
-  // 上身穿没穿看「外衣穿着」或「胸罩穿着」——外衣穿着时上身就是被遮住的,
-  // 哪怕里面没穿胸罩。以前写成 `bra worn || (outer worn && bra !== removed)`,
-  // 外衣穿好、胸罩已脱时会判成 false,于是导演写的 topless 被放行,人就被画成光着上身。
-  const upper = outerWorn || layers.bra?.status === 'worn';
-  const lower = layers.bottom?.status === 'worn' || layers.panties?.status === 'worn' || onePiece;
-  const longHem = onePiece && LONG_HEM.test(layers.outer?.tag ?? '') && layers.outer?.status !== 'disheveled';
-  return { upper, lower, suppressShortSkirt: longHem };
-}
-
-/** 把与状态表冲突的露点词从导演给的 tag 里剔掉(只剔冲突词,不动动作/表情/标记)。 */
-function resolveCoverConflicts(tags: string[], cover: CoverState): string[] {
-  if (!cover.upper && !cover.lower) return tags;
-  return tags.filter(tag => {
-    const token = tag.trim();
-    if (cover.upper && CONFLICT_UPPER.test(token)) return false;
-    if (cover.lower && CONFLICT_LOWER.test(token)) return false;
-    return true;
-  });
-}
-
 /**
- * 把导演通道挑出的这一格，编译成最终要发给 NAI 的插入内容。
+ * 已脱类目 → 角色级负面。
  *
- * 顺序是固定的：固定外貌 → 五层服装 → 导演给的角色 tag（表情/视线/动作/source#/target#）。
- * 男角色跳过外貌与五层，只留导演给的 boy + 必要局部动作。
- * 返回的对象里不带 omitFeatures——那是组装期的一次性开关，序列化进正文只会变成脏 tag。
+ * 这是「脱了又穿回去」的总闸：导演说这一格她没穿上衣、胸罩也脱了，那本帧就必须
+ * 明确告诉 NAI 别画衬衫和胸罩。以前靠五层状态机互相覆盖判断谁遮住谁，一旦判定
+ * 写错就把人画回整套整齐着装；现在按「本帧已脱」直接压品类，判据少、翻车面小。
  */
+const REMOVED_RULES: Array<{ test: RegExp; words: string[]; lowerOnly?: boolean }> = [
+  {
+    test: /\b(?:outer|top|shirt|blouse|dress|robe|hanfu|coat|jacket|sweater|uniform|clothes)\b/,
+    words: ['shirt', 'blouse', 'dress', 'coat', 'robe', 'hanfu'],
+  },
+  {
+    test: /\b(?:bra|dudou|brassiere|bikini top)\b/,
+    words: ['bra', 'underwear', 'bikini top'],
+  },
+  {
+    test: /\b(?:bottom|skirt|pants|jeans|shorts|trousers)\b/,
+    words: ['skirt', 'pants', 'shorts'],
+    lowerOnly: true,
+  },
+  {
+    test: /\b(?:panties|underpants|knickers|underwear)\b/,
+    words: ['panties', 'underwear'],
+    lowerOnly: true,
+  },
+  {
+    test: /\b(?:hosiery|pantyhose|stockings|thighhighs|socks)\b/,
+    words: ['pantyhose', 'stockings', 'thighhighs', 'socks'],
+    lowerOnly: true,
+  },
+];
+
+export function buildRemovedNegatives(removed: string[], upperOnly: boolean): string[] {
+  const out: string[] = [];
+  for (const raw of removed) {
+    const key = raw.trim().toLowerCase();
+    if (!key) continue;
+    for (const rule of REMOVED_RULES) {
+      if (!rule.test.test(key)) continue;
+      // 上半身/面部特写拍不到下身，把裙裤丝袜写进负面反而会让 NAI 把腿挤进画面。
+      if (rule.lowerOnly && upperOnly) continue;
+      out.push(...rule.words);
+    }
+  }
+  return dedupeTags(out);
+}
+
 /**
  * 世界观防穿帮词:只屏蔽「正文没写却被凭空画出来」的单品。
  * 正文明确写了黑丝/短裙/牛仔裤,这个世界观就得让路——正文优先于世界观默认。
@@ -381,24 +287,33 @@ function guardrailNegatives(world: WorldAnchorConfig | undefined, positive: stri
   });
 }
 
+/**
+ * 把导演通道挑出的这一格，编译成最终要发给 NAI 的插入内容。
+ *
+ * 顺序是固定的：固定外貌 → 导演给的 outfit（按景别过滤）→ 导演给的动作/表情/视线/标记。
+ * uc = 导演 uc + 已脱类目负面 + 防漂移 + 世界观穿帮词 + 高低差比例词 + 同框他人特征。
+ * 男角色只留导演给的动作与局部位置，不接外貌、不接 outfit。
+ * 返回对象里不带 omitFeatures / outfit / removed——那都是一次性开关，序列化进正文只会变脏 tag。
+ */
 export function assembleImageCharacters(
   image: ImageInsertion,
   entriesAtPos: CharTagEntry[],
-  outfitsAtPos: Map<string, CharOutfitState>,
   world?: WorldAnchorConfig,
 ): ImageInsertion {
   const upperOnly = isUpperOnlyShot(image.tag);
+  const shoesHidden = SHOES_HIDDEN_SHOT.test(image.tag);
   const femaleIndexes: number[] = [];
   image.characters.forEach((character, index) => {
     const entry = entriesAtPos.find(item => item.name === character.name);
     if (!isMaleEntry(entry, character.tag)) femaleIndexes.push(index);
   });
 
-  // 站+坐/跪的高低差画面,NAI 特别容易把站着的画成巨人、坐着的缩成小人。
   const allTags = [image.tag, ...image.characters.map(item => item.tag)].join(', ');
-  const heightGapShot = HEIGHT_GAP_SHOT.test(allTags) && STANDING_TAG.test(allTags);
+  const heightGap = proportionGuardrailsFor(allTags).length > 0;
+
   const characters: ImageCharacterPrompt[] = image.characters.map((character, index) => {
     const entry = entriesAtPos.find(item => item.name === character.name);
+
     if (isMaleEntry(entry, character.tag)) {
       const maleTag = dropLocalizedMarkers(splitTags(character.tag)).join(', ');
       const male: ImageCharacterPrompt = { name: character.name, tag: maleTag, nl: character.nl };
@@ -407,48 +322,27 @@ export function assembleImageCharacters(
     }
 
     const fixedTags = buildFixedAppearanceTags(entry, character.omitFeatures);
-    const outfitState = outfitsAtPos.get(character.name);
-    const compiledOutfit = compileOutfitForFrame(outfitState, upperOnly);
-    // 状态表说「穿着」、导演说「裸着」时必须有一方认输:这里让状态表赢。
-    // 原因是状态表逐楼回放、有历史依据,导演这一格只看到本段文字,最容易写反。
-    const cover = describeCoverage(outfitState);
-    const fallbackOutfit =
-      !outfitsAtPos.get(character.name) && entry?.fields.outfit.trim()
-        ? splitTags(entry.fields.outfit)
-        : [];
-    // 景别裁切必须在合流之后做：外貌里的腿型词与 hosiery 里的鞋子词都可能来自任意一路。
-    // 服装层的 tag 本身可能带逗号（"sheer black pantyhose, black leather loafers"），
-    // 先拆成原子词再过滤，否则鞋子词会把整串丝袜一起带走。
     const hasLibraryEntry = Boolean(entry?.fields.hair.trim() || entry?.fields.eyes.trim());
-    const hasOutfitState = Boolean(outfitState);
-    const directorTags = resolveCoverConflicts(
-      stripLeakedAppearanceAndOutfit(dropLocalizedMarkers(splitTags(character.tag)), hasLibraryEntry, hasOutfitState),
-      cover,
-    );
-    const filtered = dedupeTags(
-      [
-        ...fixedTags,
-        ...compiledOutfit.positive,
-        ...fallbackOutfit,
-        ...directorTags,
-      ].flatMap(tag => splitTags(tag)),
-    )
+
+    // 本帧穿着完全来自导演给的指纹；景别拍不到的部件先剔掉，否则半身构图会被塞进裙摆丝袜。
+    const outfitTags = splitTags(character.outfit ?? '').filter(tag => !(upperOnly && LOWER_ONLY.test(tag)));
+    const directorTags = stripLeakedAppearance(dropLocalizedMarkers(splitTags(character.tag)), hasLibraryEntry);
+
+    const mergedPositive = dedupeTags([...fixedTags, ...outfitTags, ...directorTags])
       .filter(tag => !(upperOnly && LEG_ONLY.test(tag)))
-      .filter(tag => !(cover.suppressShortSkirt && SHORT_SKIRT.test(tag)));
-    const mergedPositive = SHOES_HIDDEN_SHOT.test(image.tag)
-      ? filtered.filter(tag => !SHOE_WORD.test(tag))
-      : filtered;
+      .filter(tag => !(upperOnly && LOWER_ONLY.test(tag)));
+    const visiblePositive = shoesHidden ? mergedPositive.filter(tag => !SHOE_WORD.test(tag)) : mergedPositive;
 
     const negativeParts = [
       ...splitTags(character.uc ?? ''),
-      ...compiledOutfit.negative,
+      ...buildRemovedNegatives(character.removed ?? [], upperOnly),
       ...buildSelfAntiDriftNegative(entry),
-      ...guardrailNegatives(world, mergedPositive),
-      ...(heightGapShot ? PROPORTION_GUARDRAILS : []),
+      ...guardrailNegatives(world, visiblePositive),
+      ...(heightGap ? PROPORTION_GUARDRAILS : []),
     ];
+
     if (femaleIndexes.length >= 2) {
-      // mergedPositive 在这个角色里是常量,循环外建一次即可(以前放在内层循环里反复建 Set)
-      const ownLower = new Set(mergedPositive.map(tag => tag.toLowerCase()));
+      const ownLower = new Set(visiblePositive.map(tag => tag.toLowerCase()));
       for (const otherIndex of femaleIndexes) {
         if (otherIndex === index) continue;
         const other = image.characters[otherIndex];
@@ -463,12 +357,12 @@ export function assembleImageCharacters(
     const mergedUc = dedupeTags(negativeParts).join(', ');
     const result: ImageCharacterPrompt = {
       name: character.name,
-      tag: mergedPositive.join(', '),
+      tag: visiblePositive.join(', '),
       nl: character.nl,
     };
     if (mergedUc) result.uc = mergedUc;
     return result;
   });
 
-  return { ...image, tag: dropLocalizedMarkers(splitTags(image.tag)).join(', '), characters };
+  return { ...image, characters };
 }

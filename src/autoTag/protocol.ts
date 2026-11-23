@@ -8,12 +8,7 @@ import {
   type CharTagField,
   type CharTagHistoryField,
 } from '@/state/charTags';
-import {
-  OUTFIT_LAYER_KEYS,
-  type OutfitLayerKey,
-  type OutfitLayerStatus,
-  type RawOutfitOp,
-} from '@/state/outfitState';
+import type { CharOutfitSnapshot } from '@/state/outfitState';
 
 export interface ImageCharacterPrompt {
   name: string;
@@ -32,6 +27,13 @@ export interface ImageCharacterPrompt {
    * 局部特写(只拍手、只拍下体)时用得上：脸不在画面里，写发色瞳色只会让模型硬塞一张脸。
    */
   omitFeatures?: string[];
+  /**
+   * 导演给出的「本帧该角色实际可见的穿着指纹」（结楼穿搭指纹体系）。
+   * 编译器把它排在固定外貌之后、动作表情之前，并按景别过滤鞋袜与下身。
+   */
+  outfit?: string;
+  /** 本帧已明确脱掉的衣物类目（["bra"] / ["outer","panties"]），由编译器转成角色 uc。 */
+  removed?: string[];
 }
 
 export interface ImageInsertion {
@@ -139,18 +141,40 @@ function jsonObjects(raw: string): string[] {
   return candidates;
 }
 
-function parseObject(raw: string): Record<string, unknown> {
+function parseObjectCandidates(raw: string): Record<string, unknown>[] {
+  const out: Record<string, unknown>[] = [];
   for (const candidate of jsonObjects(raw)) {
     try {
       const value: unknown = JSON.parse(candidate);
       if (value && typeof value === 'object' && !Array.isArray(value)) {
-        return value as Record<string, unknown>;
+        out.push(value as Record<string, unknown>);
       }
     } catch {
       // 尝试下一个候选 JSON 块。
     }
   }
-  throw new Error('AI 没有返回可解析的 JSON 对象');
+  return out;
+}
+
+function parseObject(raw: string): Record<string, unknown> {
+  const [first] = parseObjectCandidates(raw);
+  if (!first) throw new Error('AI 没有返回可解析的 JSON 对象');
+  return first;
+}
+
+/**
+ * 把候选对象归一成「带 images 数组」的计划对象。
+ *
+ * 模型偶尔先吐一个无关的 `{}`，或把数组叫 shots，或只写一张图的字段。以前取第一个
+ * 可解析对象就判缺 images 直接失败，等于把可救的输出丢掉。
+ */
+function imagePlanObject(candidate: Record<string, unknown>): Record<string, unknown> | null {
+  if (Array.isArray(candidate.images)) return candidate;
+  if (Array.isArray(candidate.shots)) return { ...candidate, images: candidate.shots };
+  if (typeof candidate.position === 'string' && typeof candidate.tag === 'string') {
+    return { ...candidate, images: [candidate] };
+  }
+  return null;
 }
 
 /** tag / nl / negative 内容里不允许出现的子标签字面量（口径见 st/imageTagRegex.ts）。 */
@@ -176,6 +200,8 @@ function sanitizeCharacters(value: unknown, imageIndex: number): ImageCharacterP
       const nl = sanitizeContent(item.nl, `characters[${index}].nl`, imageIndex);
       const uc = sanitizeOptionalContent(item.uc, `characters[${index}].uc`, imageIndex);
       const omitFeatures = sanitizeOmitFeatures(item.omitFeatures);
+      const outfit = sanitizeOptionalContent(item.outfit, `characters[${index}].outfit`, imageIndex);
+      const removed = sanitizeRemovedList(item.removed);
       if (name && tag) {
         characters.push({
           name,
@@ -183,6 +209,8 @@ function sanitizeCharacters(value: unknown, imageIndex: number): ImageCharacterP
           nl,
           ...(uc ? { uc } : {}),
           ...(omitFeatures.length ? { omitFeatures } : {}),
+          ...(outfit ? { outfit } : {}),
+          ...(removed.length ? { removed } : {}),
         });
       }
     } catch {
@@ -216,6 +244,20 @@ function sanitizeOmitFeatures(value: unknown): string[] {
   return out;
 }
 
+/** 已脱衣物类目：小写、去重、限长；不认识的词原样保留（编译器按词根判断）。 */
+function sanitizeRemovedList(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  const out: string[] = [];
+  for (const item of value) {
+    if (typeof item !== 'string') continue;
+    const key = item.trim().toLowerCase().replace(/\s+/g, ' ');
+    if (!key || key.length > 24 || out.includes(key)) continue;
+    out.push(key);
+    if (out.length >= 8) break;
+  }
+  return out;
+}
+
 function sanitizePosition(value: unknown, index: number): string {
   const position = typeof value === 'string' ? value.trim().toUpperCase() : '';
   if (!position) throw new Error(`images[${index}].position 不能为空`);
@@ -237,8 +279,12 @@ export function parseImagePlan(
   maxImages: number,
   rules: { femaleScenesOnly?: boolean; knownMaleProfiles?: ReadonlySet<string> } = {},
 ): ImagePlan {
-  const parsed = parseObject(raw);
-  if (!Array.isArray(parsed.images)) throw new Error('AI 返回的 JSON 缺少 images 数组');
+  const parsed =
+    parseObjectCandidates(raw)
+      .map(candidate => imagePlanObject(candidate))
+      .find((candidate): candidate is Record<string, unknown> => candidate !== null) ?? null;
+  if (!parsed) throw new Error('AI 返回的 JSON 缺少 images 数组');
+  const rawImages = Array.isArray(parsed.images) ? parsed.images : [];
   const normalizedMax = Math.max(1, Math.floor(Number(maxImages)) || 1);
   const normalizedMin = Math.min(
     normalizedMax,
@@ -247,8 +293,8 @@ export function parseImagePlan(
   const positions = new Map(segments.map(segment => [segment.id, segment.sourceLine]));
 
   const images: ImageInsertion[] = [];
-  for (let index = 0; index < parsed.images.length; index += 1) {
-    const item = parsed.images[index];
+  for (let index = 0; index < rawImages.length; index += 1) {
+    const item = rawImages[index];
     if (!item || typeof item !== 'object' || Array.isArray(item)) {
       throw new Error(`images[${index}] 必须是对象`);
     }
@@ -441,118 +487,51 @@ export function injectImageTags(source: string, images: ImageInsertion[]): strin
   return output;
 }
 
-/* 五层服装状态表的解析(计划书步骤 1)：任务 A 只负责把「这一刻穿成什么样」填成表格，
- * 落盘成每楼一份可回放的 op 列表；不在这里推断、不在这里补词。 */
-
-export interface PositionedOutfitOp {
-  op: RawOutfitOp;
-  position: string;
-  sourceLine: number;
-}
+/* 结楼穿搭指纹的解析(服装账本 v2)：任务 A 只记「本楼结束时各女角的最终穿搭」，
+ * 楼内 P1/P2/P15 的穿脱由导演通道在当帧给出，这里不再拆微操作、不再推断、不再补词。 */
 
 export interface StateSyncPlan {
   changes: CharChange[];
-  outfitOps: PositionedOutfitOp[];
+  finalOutfits: CharOutfitSnapshot[];
   /** 首楼 AI 识别的世界观预设;合法才带,用户锁定后由调用方决定是否采纳。 */
   worldPreset?: string;
 }
-
-const VALID_OUTFIT_LAYERS: ReadonlySet<string> = new Set<string>(OUTFIT_LAYER_KEYS);
-
-const VALID_OUTFIT_STATUSES: ReadonlySet<string> = new Set<OutfitLayerStatus>([
-  'worn',
-  'disheveled',
-  'removed',
-]);
 
 /** 表格里的文本字段：去空白、禁子标签、限长；非字符串一律当没写，不抛错。 */
 function outfitText(value: unknown): string {
   if (typeof value !== 'string') return '';
   const text = value.trim().replace(/\s+/g, ' ');
   if (!text || FORBIDDEN_SUBTAG.test(text)) return '';
-  return text.length > 160 ? text.slice(0, 160) : text;
+  return text.length > 300 ? text.slice(0, 300) : text;
 }
 
-function parseOutfitOps(rawOps: unknown, positions: Map<string, number>): PositionedOutfitOp[] {
-  if (!Array.isArray(rawOps)) return [];
-  const result: PositionedOutfitOp[] = [];
-  for (const item of rawOps) {
+function parseFinalOutfits(rawOutfits: unknown): CharOutfitSnapshot[] {
+  if (!Array.isArray(rawOutfits)) return [];
+  const result: CharOutfitSnapshot[] = [];
+  const seen = new Set<string>();
+  for (const item of rawOutfits) {
     if (!item || typeof item !== 'object' || Array.isArray(item)) continue;
     const obj = item as Record<string, unknown>;
     const name = outfitText(obj.name);
-    const position = typeof obj.position === 'string' ? obj.position.trim().toUpperCase() : '';
-    const sourceLine = positions.get(position);
-    if (!name || sourceLine === undefined) continue;
-
-    const kind = obj.op === 'set_outfit' || obj.op === 'update_layer' ? obj.op : null;
-    if (!kind) continue;
-
-    if (kind === 'set_outfit') {
-      const rawLayers = obj.layers;
-      if (!rawLayers || typeof rawLayers !== 'object' || Array.isArray(rawLayers)) continue;
-      const layerMap = rawLayers as Record<string, unknown>;
-      const layers: Partial<
-        Record<OutfitLayerKey, { tag: string; status: OutfitLayerStatus; stateTag?: string }>
-      > = {};
-      for (const key of OUTFIT_LAYER_KEYS) {
-        const rawLayer = layerMap[key];
-        if (!rawLayer || typeof rawLayer !== 'object' || Array.isArray(rawLayer)) continue;
-        const l = rawLayer as Record<string, unknown>;
-        const tag = outfitText(l.tag);
-        const status =
-          typeof l.status === 'string' && VALID_OUTFIT_STATUSES.has(l.status)
-            ? (l.status as OutfitLayerStatus)
-            : tag
-              ? 'worn'
-              : 'removed';
-        const stateTag = outfitText(l.stateTag);
-        layers[key] = stateTag ? { tag, status, stateTag } : { tag, status };
-      }
-      if (Object.keys(layers).length === 0) continue;
-      const sceneHint = outfitText(obj.sceneHint);
-      result.push({
-        position,
-        sourceLine,
-        op: {
-          op: 'set_outfit',
-          name,
-          ...(sceneHint ? { sceneHint } : {}),
-          layers,
-        },
-      });
-    } else {
-      const layer =
-        typeof obj.layer === 'string' && VALID_OUTFIT_LAYERS.has(obj.layer)
-          ? (obj.layer as OutfitLayerKey)
-          : null;
-      const status =
-        typeof obj.status === 'string' && VALID_OUTFIT_STATUSES.has(obj.status)
-          ? (obj.status as OutfitLayerStatus)
-          : null;
-      if (!layer || !status) continue;
-      const tag = outfitText(obj.tag);
-      const stateTag = outfitText(obj.stateTag);
-      result.push({
-        position,
-        sourceLine,
-        op: {
-          op: 'update_layer',
-          name,
-          layer,
-          status,
-          ...(tag ? { tag } : {}),
-          ...(stateTag ? { stateTag } : {}),
-        },
-      });
-    }
+    if (!name || seen.has(name)) continue;
+    seen.add(name);
+    const wearing = outfitText(obj.wearing);
+    const stateNote = outfitText(obj.stateNote);
+    const removed = sanitizeRemovedList(obj.removed);
+    result.push({
+      name,
+      wearing,
+      ...(removed.length ? { removed } : {}),
+      ...(stateNote ? { stateNote } : {}),
+    });
   }
-  return result.sort((a, b) => a.sourceLine - b.sourceLine);
+  return result;
 }
 
 /**
- * 解析任务 A(状态填表通道)返回的 JSON：{ "changes": [...], "outfitOps": [...] }。
- * 容错设计：即使单条变更或服装操作不合法也只丢弃该条，不阻塞主生图流程；
- * 整份解析不了就退化成「这一楼什么都没填」，让导演通道照常出图。
+ * 解析任务 A(状态填表通道)返回的 JSON：{ "changes": [...], "finalOutfits": [...], "worldPreset": "..." }。
+ * 容错设计：单条变更或单份穿搭不合法只丢该条，不阻塞主生图；整份解析不了就退化成
+ * 「这一楼什么都没填」，由导演通道照常出图。
  */
 export function parseStateSyncPlan(
   raw: string,
@@ -566,11 +545,11 @@ export function parseStateSyncPlan(
   try {
     parsed = parseObject(raw);
   } catch {
-    return { changes: [], outfitOps: [] };
+    return { changes: [], finalOutfits: [] };
   }
 
   const changes = parseChanges(parsed.changes, positions, rules.knownMaleProfiles);
-  const outfitOps = parseOutfitOps(parsed.outfitOps, positions);
+  const finalOutfits = parseFinalOutfits(parsed.finalOutfits ?? parsed.outfits);
   const worldPreset = typeof parsed.worldPreset === 'string' ? parsed.worldPreset.trim() : '';
-  return { changes, outfitOps, ...(worldPreset ? { worldPreset } : {}) };
+  return { changes, finalOutfits, ...(worldPreset ? { worldPreset } : {}) };
 }
