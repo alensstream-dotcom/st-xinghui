@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { assembleImageCharacters } from '@/autoTag/assemblePrompt';
-import { applyFrameWearState, guardSameDayReplace, seedWardrobes } from '@/autoTag/wardrobeSequence';
+import { applyDueWardrobes, applyFrameWearState, wardrobesAfterFloor } from '@/autoTag/wardrobeSequence';
 import type { ImageInsertion } from '@/autoTag/protocol';
 import {
   applyWardrobeUpdate,
@@ -46,8 +46,8 @@ describe('楼内穿脱时序', () => {
     const updates: WardrobeUpdate[] = [
       { name: '温岚', mode: 'patch', slots: { top: { ...BASE.top!, status: 'off' } } },
     ];
-    const seeded = seedWardrobes(before, updates);
-    expect(seeded.get('温岚')?.top?.status).toBe('on');
+    // 这份更新没有 position：从楼首起生效——楼尾才是脱，靠每帧 wearState 推进。
+    const wardrobes = new Map(before);
 
     const entries = [entry('温岚')];
     const compiled: string[] = [];
@@ -57,9 +57,9 @@ describe('楼内穿脱时序', () => {
       shot('P9', { top: { status: 'on' } }),
     ];
     for (const image of shots) {
-      const out = assembleImageCharacters(image, entries, seeded);
+      const out = assembleImageCharacters(image, entries, wardrobes);
       compiled.push(out.characters[0].tag);
-      for (const character of image.characters) applyFrameWearState(seeded, character);
+      for (const character of image.characters) applyFrameWearState(wardrobes, character);
     }
 
     // 第 1 张：上衣在，正面写 shirt，负面不许出现上衣品类。
@@ -73,27 +73,54 @@ describe('楼内穿脱时序', () => {
     expect(compiled[2]).toContain('white shirt');
   });
 
-  it('same_day 下非显式换装的 replace 被降级为 patch，new_day 放行', () => {
+  it('same_day 下模型发 replace 直接换装生效，不被暗中降级', () => {
     const before = new Map<string, CharacterWardrobe>([['温岚', BASE]]);
-    const replace: WardrobeUpdate[] = [
+    const updates: WardrobeUpdate[] = [
       { name: '温岚', mode: 'replace', slots: { top: { tag: 'red dress', status: 'on' } } },
     ];
-    const sameDay = guardSameDayReplace('same_day', replace, before);
-    expect(sameDay[0].mode).toBe('patch');
-    // patch 语义：未提及的槽位保留——裙子不会被这次“换装”冲掉。
-    const patched = seedWardrobes(before, sameDay);
-    expect(patched.get('温岚')?.bottom?.tag).toBe('pleated skirt, knee-length');
+    const after = wardrobesAfterFloor(before, updates);
+    // replace 语义：没提到的槽位被重置，裙子不会跟着红裙一起留着。
+    expect(after.get('温岚')?.top?.tag).toBe('red dress');
+    expect(after.get('温岚')?.bottom).toBeUndefined();
+  });
 
-    const explicit = guardSameDayReplace(
-      'same_day',
-      [{ ...replace[0], explicitChange: true }],
-      before,
-    );
-    expect(explicit[0].mode).toBe('replace');
+  it('同楼中途换装按 P 位置生效：换装前的图保持旧衣，换装后立刻穿新装', () => {
+    const before = new Map<string, CharacterWardrobe>([['温岚', BASE]]);
+    const updates: WardrobeUpdate[] = [
+      {
+        name: '温岚',
+        mode: 'replace',
+        sourceLine: 10,
+        position: 'P10',
+        slots: {
+          top: { tag: 'black maid dress, apron, white frills', status: 'on' },
+          legs: { tag: 'white thighhighs, leather garter straps', status: 'on' },
+          innerBottom: { tag: 'black panties', status: 'on' },
+        },
+      },
+    ];
+    const wardrobes = new Map<string, CharacterWardrobe>(before);
+    const entries = [entry('温岚')];
+    const shoot = (line: number): string => {
+      const image = { ...shot(`P${line}`, undefined), sourceLine: line };
+      const cursor = applyDueWardrobes(wardrobes, updates, 0, line);
+      expect(cursor).toBe(line >= 10 ? 1 : 0);
+      return assembleImageCharacters(image, entries, wardrobes).characters[0].tag;
+    };
 
-    const newDay = guardSameDayReplace('new_day', replace, before);
-    expect(newDay[0].mode).toBe('replace');
-    expect(seedWardrobes(before, newDay).get('温岚')?.bottom).toBeUndefined();
+    const early = shoot(2);
+    expect(early).toContain('white shirt');
+    expect(early).not.toContain('maid');
+
+    const late = shoot(12);
+    expect(late).toContain('maid');
+    expect(late).toContain('thighhighs');
+    expect(late).not.toContain('white shirt');
+
+    // 楼尾落盘的就是女仆装（下一楼继承它）。
+    const final = wardrobesAfterFloor(before, updates);
+    expect(final.get('温岚')?.top?.tag).toContain('maid');
+    expect(final.get('温岚')?.bottom).toBeUndefined();
   });
 
   it('上一楼没有装备记录时不替模型断言她裸着', () => {

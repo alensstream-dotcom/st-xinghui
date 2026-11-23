@@ -528,20 +528,40 @@ function planText(value: unknown, limit = 300): string {
   return text.length > limit ? text.slice(0, limit) : text;
 }
 
-function parseWardrobeUpdates(rawUpdates: unknown, maleNames?: ReadonlySet<string>): WardrobeUpdate[] {
+/**
+ * 装备变化解析。
+ *
+ * 允许同一角色在一楼里出现多次（P2 旧衣、P10 换女仆装）：位置不同就是两件事，
+ * 按位置分别去重；position 解析成 sourceLine 后升序排列，运行期按图逐段生效。
+ * 位置写坏且不是楼首语义的，宁可丢这一条也不猜——猜错会让她整楼穿错衣服。
+ */
+function parseWardrobeUpdates(
+  rawUpdates: unknown,
+  positions: Map<string, number>,
+  maleNames?: ReadonlySet<string>,
+): WardrobeUpdate[] {
   if (!Array.isArray(rawUpdates)) return [];
   const out: WardrobeUpdate[] = [];
   const seen = new Set<string>();
   for (const item of rawUpdates) {
     const update = normaliseWardrobeUpdate(item);
     if (!update) continue;
-    if (seen.has(update.name)) continue;
     if (maleNames && maleNames.has(update.name)) continue;
-    seen.add(update.name);
-    out.push(update);
+    let sourceLine = 0;
+    let position = '';
+    if (update.position) {
+      const parsed = parsePosition(update.position, positions);
+      if (!parsed) continue;
+      sourceLine = parsed.sourceLine;
+      position = parsed.position;
+    }
+    const key = `${update.name}\u0000${sourceLine}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push({ ...update, sourceLine, ...(position ? { position } : {}) });
     if (out.length >= 12) break;
   }
-  return out;
+  return out.sort((a, b) => (a.sourceLine ?? 0) - (b.sourceLine ?? 0));
 }
 
 /**
@@ -564,7 +584,11 @@ export function parseUnifiedPlan(
     images: plan.images,
     changes: plan.changes,
     timeJump,
-    wardrobeUpdates: parseWardrobeUpdates(parsed.wardrobeUpdates ?? parsed.outfits, rules.knownMaleProfiles),
+    wardrobeUpdates: parseWardrobeUpdates(
+      parsed.wardrobeUpdates ?? parsed.outfits,
+      new Map(segments.map(segment => [segment.id, segment.sourceLine])),
+      rules.knownMaleProfiles,
+    ),
     ...(worldPreset ? { worldPreset } : {}),
   };
 }

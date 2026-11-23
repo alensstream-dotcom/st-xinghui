@@ -73,7 +73,7 @@ import {
   type WardrobeUpdate,
 } from '@/state/outfitState';
 import { traitCandidateBlock } from '@/state/traitPool';
-import { applyFrameWearState, guardSameDayReplace, seedWardrobes } from '@/autoTag/wardrobeSequence';
+import { applyDueWardrobes, applyFrameWearState, wardrobesAfterFloor } from '@/autoTag/wardrobeSequence';
 
 const processed = new Set<string>();
 const running = new Map<string, AbortController>();
@@ -304,28 +304,28 @@ async function runUnifiedPass(params: {
   }
 
   const positionedOps = params.opsResolver(plan.changes);
-  const wardrobeUpdates = guardSameDayReplace(plan.timeJump, plan.wardrobeUpdates, wardrobesBefore);
-
-  // 本楼起始基准：上一楼结尾的装备表 + 本楼「新增的装备」。
-  //
-  // 这里只吸收新装备的 tag 与明确换装（replace），**不把楼尾的 half/off 状态提前套到
-  // 第 1 张图**——否则「第 3 张才脱光」会把第 1 张也画成裸的。穿脱时序完全交给下面的
-  // 逐帧递进：每张图的 wearState 叠加到上一张图上，前一张脱掉的层自动延续到下一张。
-  const wardrobes = seedWardrobes(wardrobesBefore, wardrobeUpdates);
+  // 换装按 position 逐图生效：带 position 的 update 只对 sourceLine 不早于它的图片生效，
+  // 省略 position 的从楼首起生效。这样「P10 进房间换女仆装」不会把 P2 那张旧衣裳的图
+  // 也套上女仆装，而 P12 之后立刻穿新装。
+  const wardrobeUpdates = plan.wardrobeUpdates;
+  const ordered = [...wardrobeUpdates].sort((a, b) => (a.sourceLine ?? 0) - (b.sourceLine ?? 0));
+  const wardrobes: Map<string, CharacterWardrobe> = new Map();
+  for (const [name, wardrobe] of wardrobesBefore) wardrobes.set(name, { ...wardrobe, name: wardrobe.name });
+  let cursor = 0;
 
   const assembledImages = plan.images.map(img => {
     const entriesAtPos = entriesAtPosition(params.entries, positionedOps, img.sourceLine, params.lockedNames);
+    cursor = applyDueWardrobes(wardrobes, ordered, cursor, img.sourceLine);
     const assembled = assembleImageCharacters(img, entriesAtPos, wardrobes, world);
     // 叠完这一帧的穿脱状态，供下一帧继承（直到后续图写出 status:"on" 穿回）。
     for (const character of img.characters) applyFrameWearState(wardrobes, character);
     return assembled;
   });
 
-  const finalWardrobes = new Map(wardrobesBefore);
-  for (const update of wardrobeUpdates) applyWardrobeUpdate(finalWardrobes, update);
+  const finalWardrobes = wardrobesAfterFloor(wardrobesBefore, wardrobeUpdates);
   diagnostic('unified:wardrobe', {
     timeJump: plan.timeJump,
-    seeded: [...wardrobes.values()].map(wardrobe => wardrobe.name),
+    updates: wardrobeUpdates.map(update => `${update.name}@${update.position ?? '楼首'}`),
     final: [...finalWardrobes.values()].map(wardrobe => wardrobe.name),
   });
 

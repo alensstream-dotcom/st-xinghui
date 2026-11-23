@@ -71,6 +71,41 @@ describe('parseUnifiedPlan（单通道一次输出）', () => {
     expect(parseUnifiedPlan(raw, SEGS, 0, 2).timeJump).toBe('same_day');
   });
 
+  it('同楼中途换装的 position 解析成行号，坏位置的那条直接丢弃', () => {
+    const raw = JSON.stringify({
+      timeJump: 'same_day',
+      changes: [],
+      wardrobeUpdates: [
+        {
+          name: '顾子衿',
+          mode: 'replace',
+          position: 'P2',
+          slots: { top: { tag: 'black maid dress, apron', status: 'on' } },
+        },
+        {
+          name: '顾子衿',
+          mode: 'patch',
+          position: 'P9',
+          slots: { top: { tag: 'black maid dress, apron', status: 'half', halfTag: 'apron lifted' } },
+        },
+      ],
+      images: [
+        {
+          position: 'P1',
+          tag: '1girl, bedroom, cowboy shot',
+          nl: '',
+          size: 'portrait',
+          characters: [{ name: '顾子衿', tag: 'blush', nl: '' }],
+        },
+      ],
+    });
+    const plan = parseUnifiedPlan(raw, SEGS, 1, 2);
+    // P9 不在正文可选位置里：这条被丢弃，只留下 P2 那条并按行号排序。
+    expect(plan.wardrobeUpdates).toHaveLength(1);
+    expect(plan.wardrobeUpdates[0].position).toBe('P2');
+    expect(plan.wardrobeUpdates[0].sourceLine).toBe(1);
+  });
+
   it('缺 images 时抛出可重试的错误', () => {
     expect(() => parseUnifiedPlan(JSON.stringify({ changes: [] }), SEGS, 0, 2)).toThrow(/缺少 images 数组/);
   });

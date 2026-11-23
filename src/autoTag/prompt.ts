@@ -469,7 +469,9 @@ const WARDROBE_RULES = `② 装备表与跨楼规则
 - half 必须配 halfTag 写形态（"unbuttoned, open front" / "shirt lifted above chest" / "skirt lift" / "panties pulled aside"）。
 - 连身服饰（道袍/汉服长衫/连身裙/旗袍/和服）没另穿下装时 bottom 留空，不凭空补短裙裤子丝袜；正文写了黑丝短裙照写，正文优先于世界观。
 - 古风内衣换等效词，禁 dudou/xieku/silk traditional underwear：肚兜→"red halterneck camisole, backless, tied at neck, chinese clothes"；中衣→"white inner robe, loose white kimono, open robe"；亵裤→"white silk shorts, loose shorts"；罗袜绣鞋→"white socks, traditional shoes"。
-- timeJump：same_day（换房间/室内到室外/短时过渡）**严禁 replace**，原样沿用，明确换装才 patch 并加 "explicitChange":true；new_day（隔天/睡醒次日/跨日/换装赴约）给出场女角 replace 一套世界观日常服，各槽位 on。
+- timeJump：same_day（换房间/室内到室外/短时过渡）时正文没换衣服就别发 replace，原样沿用或 patch 穿脱；正文明确换装或 new_day（隔天/睡醒次日/跨日/换装赴约）发 replace。**replace 一旦发出就按它执行**，不要求任何附加开关。
+- 换装位置：跨日或楼首换装省略 position，对本楼全部图片生效；**同楼中途换装（"进房间换上女仆装再出来"）必须写 position:"P10"**，只有这个位置之后的图片才穿新装，之前的图片仍是旧衣服。
+- 换装时正文提到的套装配饰（项圈 leather collar、吊袜带 garter straps、发带、手套）直接写进对应槽位 tag（颈部/上身配饰进 top.tag，腿部配饰进 legs.tag），不要另起字段。
 - 逐帧 wearState：每张图 characters[] 只覆盖这一格状态码，如 {"top":{"status":"half","halfTag":"open front"}}；同楼「全穿→半敞→全脱→穿回」全靠它表达，缺省槽位沿用装备表。`;
 
 /** 镜头规则（选帧 / 机位 / 表情 / 标记 / 防偏见）。 */

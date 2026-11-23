@@ -3,64 +3,34 @@ import {
   applyWardrobeUpdate,
   type CharacterWardrobe,
   type GarmentSlot,
-  type TimeJump,
   type WardrobeSlotKey,
   type WardrobeUpdate,
 } from '@/state/outfitState';
 
 /**
- * 楼内穿脱时序：一张图一张图地推进装备表。
+ * 楼内穿脱与换装时序：一张图一张图地推进装备表。
  *
- * 这里解决的是「楼尾污染楼首」——模型在本楼第 3 张才让她脱光，但如果直接把楼尾的
- * off/half 状态套到整楼，第 1 张也会被画成裸的。正确做法是：
- * 1. 起始基准 = 上一楼结尾装备表 + 本楼**新增的装备**（状态一律按穿着算）；
- * 2. 每张图只叠加它自己的 wearState，前一张脱掉的层自动延续到下一张；
- * 3. 楼尾最终状态由调用方重新应用一遍 wardrobeUpdates 得到，落盘给下一楼。
+ * 两条规则：
+ * 1. 换装按 position 生效——带 position 的 update 只对 sourceLine 不早于它的图片生效，
+ *    「P10 进房间换好女仆装」不会把 P2 那张旧衣裳的图也套上女仆装；省略 position 的
+ *    update 从楼首起对本楼全部图片生效（跨日、楼首换装）。
+ * 2. 同一张图里先应用到期的 update，再叠加该图自己的 wearState：前一张脱掉的层自动
+ *    延续到下一张，直到后续图写出 status:"on" 穿回。
  */
-export function guardSameDayReplace(
-  timeJump: TimeJump,
+export function applyDueWardrobes(
+  wardrobes: Map<string, CharacterWardrobe>,
   updates: WardrobeUpdate[],
-  before: Map<string, CharacterWardrobe>,
-): WardrobeUpdate[] {
-  if (timeJump !== 'same_day') return updates;
-  return updates.map(update => {
-    if (update.mode !== 'replace' || update.explicitChange === true) return update;
-    if (!before.has(update.name)) return update;
-    console.info(`[星绘] same_day 下的换装被降级为 patch（${update.name}）：正文没有明确换装`);
-    return { ...update, mode: 'patch' as const };
-  });
-}
-
-/** 本楼起始装备表：沿用上一楼，只吸收新出现的装备与明确换装。 */
-export function seedWardrobes(
-  before: Map<string, CharacterWardrobe>,
-  updates: WardrobeUpdate[],
-): Map<string, CharacterWardrobe> {
-  const wardrobes = new Map<string, CharacterWardrobe>();
-  for (const [name, wardrobe] of before) {
-    wardrobes.set(name, { ...wardrobe, name: wardrobe.name });
+  cursor: number,
+  sourceLine: number,
+): number {
+  let index = cursor;
+  while (index < updates.length) {
+    const update = updates[index];
+    if ((update.sourceLine ?? 0) > sourceLine) break;
+    applyWardrobeUpdate(wardrobes, { name: update.name, mode: update.mode, slots: update.slots });
+    index += 1;
   }
-  for (const update of updates) {
-    if (update.mode === 'replace') {
-      const slots: Partial<Record<WardrobeSlotKey, GarmentSlot>> = {};
-      for (const [key, slot] of Object.entries(update.slots)) {
-        if (slot) slots[key as WardrobeSlotKey] = { ...slot, status: 'on' };
-      }
-      applyWardrobeUpdate(wardrobes, { name: update.name, mode: 'replace', slots });
-      continue;
-    }
-    const current = wardrobes.get(update.name);
-    const fresh: Partial<Record<WardrobeSlotKey, GarmentSlot>> = {};
-    for (const [key, slot] of Object.entries(update.slots)) {
-      if (!slot) continue;
-      // 这一楼新出现的装备按「穿着」入表；已有的不动，状态交给逐帧。
-      if (!current?.[key as WardrobeSlotKey]) fresh[key as WardrobeSlotKey] = { ...slot, status: 'on' };
-    }
-    if (Object.keys(fresh).length) {
-      applyWardrobeUpdate(wardrobes, { name: update.name, mode: 'patch', slots: fresh });
-    }
-  }
-  return wardrobes;
+  return index;
 }
 
 /** 把一张图里某个角色的 wearState 叠加进装备表（tag 沿用账本，只改状态码）。 */
@@ -85,4 +55,17 @@ export function applyFrameWearState(
   }
   if (!Object.keys(slots).length) return;
   applyWardrobeUpdate(wardrobes, { name: character.name, mode: 'patch', slots });
+}
+
+/** 楼尾装备表：把本楼全部 update 依次应用一遍（落盘给下一楼的就是这份）。 */
+export function wardrobesAfterFloor(
+  before: Map<string, CharacterWardrobe>,
+  updates: WardrobeUpdate[],
+): Map<string, CharacterWardrobe> {
+  const wardrobes = new Map<string, CharacterWardrobe>();
+  for (const [name, wardrobe] of before) wardrobes.set(name, { ...wardrobe, name: wardrobe.name });
+  for (const update of updates) {
+    applyWardrobeUpdate(wardrobes, { name: update.name, mode: update.mode, slots: update.slots });
+  }
+  return wardrobes;
 }

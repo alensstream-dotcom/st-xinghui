@@ -55,8 +55,10 @@ export interface WardrobeUpdate {
   name: string;
   mode: 'replace' | 'patch';
   slots: Partial<Record<WardrobeSlotKey, GarmentSlot>>;
-  /** 正文里明确写了换装（隔天/new_day、明确「换上」）：same_day 下才允许 replace。 */
-  explicitChange?: boolean;
+  /** 这次换装从哪个 P 编号开始生效；省略表示从楼首生效。 */
+  position?: string;
+  /** position 解析出的正文行号（协议层填，运行期按它逐图生效）。 */
+  sourceLine?: number;
 }
 
 export interface WardrobeFloorDelta {
@@ -111,7 +113,8 @@ export function normaliseWardrobeUpdate(raw: unknown): WardrobeUpdate | null {
     if (slot) slots[key] = slot;
   }
   if (!Object.keys(slots).length) return null;
-  return { name, mode, slots, ...(record.explicitChange === true ? { explicitChange: true } : {}) };
+  const position = typeof record.position === 'string' ? record.position.trim().slice(0, 16) : '';
+  return { name, mode, slots, ...(position ? { position } : {}) };
 }
 
 /**

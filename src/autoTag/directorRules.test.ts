@@ -54,11 +54,14 @@ describe('单通道系统提示词', () => {
     expect(prompt).toContain('永不改写');
   });
 
-  it('同日严禁 replace、隔天主动 replace，显式换装可放行', () => {
+  it('同日可在正文明确换装时 replace、隔天主动 replace，且不再要求任何附加开关', () => {
     expect(prompt).toContain('same_day');
-    expect(prompt).toContain('严禁 replace');
-    expect(prompt).toContain('"explicitChange":true');
+    expect(prompt).toContain('正文明确换装');
     expect(prompt).toContain('new_day');
+    // 二级开关陷阱已删：模型只要发了 replace 就照做。
+    expect(prompt).not.toContain('explicitChange');
+    expect(prompt).toContain('同楼中途换装');
+    expect(prompt).toContain('position:"P10"');
   });
 
   it('导演禁写清单包含人数、发色、瞳色、体型与服装词', () => {
