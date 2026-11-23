@@ -69,9 +69,11 @@ import {
   makeWardrobeFloorDelta,
   readWardrobeFloorDelta,
   wardrobesBeforeFloor,
+  type CharacterWardrobe,
   type WardrobeUpdate,
 } from '@/state/outfitState';
 import { traitCandidateBlock } from '@/state/traitPool';
+import { applyFrameWearState, guardSameDayReplace, seedWardrobes } from '@/autoTag/wardrobeSequence';
 
 const processed = new Set<string>();
 const running = new Map<string, AbortController>();
@@ -273,12 +275,24 @@ async function runUnifiedPass(params: {
         tail: raw.slice(-150),
         error: error instanceof Error ? error.message : String(error),
       });
-      console.warn(
-        `[星绘] 第 ${params.floor} 楼出图计划解析失败（返回 ${raw.length} 字，末尾：「${raw.slice(-150)}」）`,
-      );
       throw error;
     }
-  }, { retries: params.retries, signal: params.signal, source });
+  }, {
+    retries: params.retries,
+    signal: params.signal,
+    source,
+    onRetry: (error, attempt) => {
+      const message = error instanceof Error ? error.message : String(error);
+      // 解析失败常常是「HTTP 200 但吐了个不合格的 JSON」：日志里必须点名这一点，
+      // 否则连着两条 200 看起来像成功，实际上什么也没写进去。
+      const parseFailed = /JSON|images|position|不在目标正文/.test(message);
+      console.warn(
+        parseFailed
+          ? `[星绘] 第 ${params.floor} 楼出图计划 JSON 解析失败（已重试：第 ${attempt} 次）——${message}`
+          : `[星绘] 第 ${params.floor} 楼请求失败（已重试：第 ${attempt} 次）——${message}`,
+      );
+    },
+  });
 
   let world = params.input.world;
   if (plan.worldPreset) {
@@ -290,24 +304,39 @@ async function runUnifiedPass(params: {
   }
 
   const positionedOps = params.opsResolver(plan.changes);
-  // 本楼图片按「本楼结束后」的装备表编译：模型在这一楼里已经说明了穿脱，
-  // 图片画的就是说明之后的样子；楼内逐帧差异由 characters[].wearState 覆盖。
-  const wardrobes = new Map(wardrobesBefore);
-  for (const update of plan.wardrobeUpdates) applyWardrobeUpdate(wardrobes, update);
+  const wardrobeUpdates = guardSameDayReplace(plan.timeJump, plan.wardrobeUpdates, wardrobesBefore);
+
+  // 本楼起始基准：上一楼结尾的装备表 + 本楼「新增的装备」。
+  //
+  // 这里只吸收新装备的 tag 与明确换装（replace），**不把楼尾的 half/off 状态提前套到
+  // 第 1 张图**——否则「第 3 张才脱光」会把第 1 张也画成裸的。穿脱时序完全交给下面的
+  // 逐帧递进：每张图的 wearState 叠加到上一张图上，前一张脱掉的层自动延续到下一张。
+  const wardrobes = seedWardrobes(wardrobesBefore, wardrobeUpdates);
 
   const assembledImages = plan.images.map(img => {
     const entriesAtPos = entriesAtPosition(params.entries, positionedOps, img.sourceLine, params.lockedNames);
-    return assembleImageCharacters(img, entriesAtPos, wardrobes, world);
+    const assembled = assembleImageCharacters(img, entriesAtPos, wardrobes, world);
+    // 叠完这一帧的穿脱状态，供下一帧继承（直到后续图写出 status:"on" 穿回）。
+    for (const character of img.characters) applyFrameWearState(wardrobes, character);
+    return assembled;
+  });
+
+  const finalWardrobes = new Map(wardrobesBefore);
+  for (const update of wardrobeUpdates) applyWardrobeUpdate(finalWardrobes, update);
+  diagnostic('unified:wardrobe', {
+    timeJump: plan.timeJump,
+    seeded: [...wardrobes.values()].map(wardrobe => wardrobe.name),
+    final: [...finalWardrobes.values()].map(wardrobe => wardrobe.name),
   });
 
   diagnostic('unified:compiled', {
     shots: plan.images.length,
     images: assembledImages.length,
-    wardrobeUpdates: plan.wardrobeUpdates.length,
+    wardrobeUpdates: wardrobeUpdates.length,
     changes: plan.changes.length,
     timeJump: plan.timeJump,
   });
-  return { plan: { images: assembledImages, changes: plan.changes }, wardrobeUpdates: plan.wardrobeUpdates, world };
+  return { plan: { images: assembledImages, changes: plan.changes }, wardrobeUpdates, world };
 }
 
 async function runForFloor(floor: number, opts: RunOptions = {}): Promise<void> {

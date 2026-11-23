@@ -55,6 +55,8 @@ export interface WardrobeUpdate {
   name: string;
   mode: 'replace' | 'patch';
   slots: Partial<Record<WardrobeSlotKey, GarmentSlot>>;
+  /** 正文里明确写了换装（隔天/new_day、明确「换上」）：same_day 下才允许 replace。 */
+  explicitChange?: boolean;
 }
 
 export interface WardrobeFloorDelta {
@@ -109,7 +111,7 @@ export function normaliseWardrobeUpdate(raw: unknown): WardrobeUpdate | null {
     if (slot) slots[key] = slot;
   }
   if (!Object.keys(slots).length) return null;
-  return { name, mode, slots };
+  return { name, mode, slots, ...(record.explicitChange === true ? { explicitChange: true } : {}) };
 }
 
 /**

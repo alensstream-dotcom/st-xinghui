@@ -220,4 +220,30 @@ describe('assembleImageCharacters', () => {
     );
     expect(result.characters[0].uc ?? '').toContain('silver twin braids');
   });
+
+  it('脱掉上衣但还穿着裙子时，负面里绝不含 clothes 这类核弹词', () => {
+    const out = compileWardrobeForFrame(
+      {
+        name: '温岚',
+        top: { tag: 'white shirt', status: 'off' },
+        bottom: { tag: 'pleated skirt, knee-length', status: 'on' },
+      },
+      undefined,
+      false,
+    );
+    expect(out.negatives).not.toContain('clothes');
+    // 裙子仍在正面：上衣的 off 不该把下装一起屏蔽掉。
+    expect(out.positive).toContain('pleated skirt, knee-length');
+    expect(out.negatives).toContain('shirt');
+  });
+
+  it('只穿内衣出场（top 为空、innerTop 有记录）时正常输出内衣', () => {
+    const out = compileWardrobeForFrame(
+      { name: '温岚', innerTop: { tag: 'red halterneck camisole, backless', status: 'on' } },
+      undefined,
+      false,
+    );
+    expect(out.positive).toContain('red halterneck camisole, backless');
+    expect(out.positive).not.toContain('bare breasts');
+  });
 });

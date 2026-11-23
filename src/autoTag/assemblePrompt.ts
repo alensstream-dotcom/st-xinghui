@@ -236,7 +236,9 @@ export function proportionGuardrailsFor(text: string): string[] {
  */
 /** 槽位全脱/不可见时压掉的同品类词。正面绝不写 `no bra` / `no panties`。 */
 const SLOT_NEGATIVES: Record<WardrobeSlotKey, string[]> = {
-  top: ['shirt', 'blouse', 'dress', 'coat', 'robe', 'hanfu'],
+  // 只压「上衣品类」这一组词。绝不能写 'clothes' 这类核弹词：脱掉上衣但还穿着裙子时，
+  // 它会把下装一起屏蔽掉，人被画成裸的。
+  top: ['shirt', 'blouse', 'jacket', 'coat', 'sweater', 'hoodie', 't-shirt', 'dress', 'robe', 'hanfu'],
   innerTop: ['bra', 'underwear', 'bikini top'],
   bottom: ['skirt', 'pants', 'shorts'],
   innerBottom: ['panties', 'underwear'],
@@ -312,9 +314,10 @@ export function compileWardrobeForFrame(
     negatives.push(...SLOT_NEGATIVES.top);
   }
 
-  // 只有「确实有外装记录且不在原位」时才判定露出：完全没有装备记录时不该替模型
-  // 断言她裸着（首次出场还没建表，那一格由正文与导演的 outfit 决定）。
-  if (top && top.status !== 'on') {
+  // 只有「确实有上装或内衣记录，且外装不在原位」时才判定露出：完全没有装备记录时
+  // 不该替模型断言她裸着（首次出场还没建表，那一格由正文与导演的 outfit 决定）。
+  // 与下身对称：只穿内衣/肚兜出场（top 为空、innerTop 有记录）也必须正常输出内衣。
+  if ((top || innerTop) && (!top || top.status !== 'on')) {
     if (innerTop?.status === 'on') {
       push(innerTop.tag);
     } else if (innerTop?.status === 'half') {
