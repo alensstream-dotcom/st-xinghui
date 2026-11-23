@@ -8,7 +8,14 @@ import {
   type CharTagField,
   type CharTagHistoryField,
 } from '@/state/charTags';
-import type { CharOutfitSnapshot } from '@/state/outfitState';
+import type {
+  GarmentSlot,
+  SlotWearStatus,
+  TimeJump,
+  WardrobeSlotKey,
+  WardrobeUpdate,
+} from '@/state/outfitState';
+import { normaliseWardrobeUpdate, WARDROBE_SLOT_KEYS } from '@/state/outfitState';
 
 export interface ImageCharacterPrompt {
   name: string;
@@ -28,12 +35,12 @@ export interface ImageCharacterPrompt {
    */
   omitFeatures?: string[];
   /**
-   * 导演给出的「本帧该角色实际可见的穿着指纹」（结楼穿搭指纹体系）。
-   * 编译器把它排在固定外貌之后、动作表情之前，并按景别过滤鞋袜与下身。
+   * 这一格该角色各槽位的瞬时穿脱状态（覆盖装备表）。
+   *
+   * 同一楼里第 1 张全穿、第 2 张半敞、第 3 张全脱、第 4 张再穿回，靠它逐帧表达；
+   * 缺省的槽位一律沿用装备表的状态。装备描述本身不在这里写——它来自账本，写多了会打架。
    */
-  outfit?: string;
-  /** 本帧已明确脱掉的衣物类目（["bra"] / ["outer","panties"]），由编译器转成角色 uc。 */
-  removed?: string[];
+  wearState?: Partial<Record<WardrobeSlotKey, { status: SlotWearStatus; halfTag?: string }>>;
 }
 
 export interface ImageInsertion {
@@ -200,8 +207,7 @@ function sanitizeCharacters(value: unknown, imageIndex: number): ImageCharacterP
       const nl = sanitizeContent(item.nl, `characters[${index}].nl`, imageIndex);
       const uc = sanitizeOptionalContent(item.uc, `characters[${index}].uc`, imageIndex);
       const omitFeatures = sanitizeOmitFeatures(item.omitFeatures);
-      const outfit = sanitizeOptionalContent(item.outfit, `characters[${index}].outfit`, imageIndex);
-      const removed = sanitizeRemovedList(item.removed);
+      const wearState = sanitizeWearState(item.wearState);
       if (name && tag) {
         characters.push({
           name,
@@ -209,8 +215,7 @@ function sanitizeCharacters(value: unknown, imageIndex: number): ImageCharacterP
           nl,
           ...(uc ? { uc } : {}),
           ...(omitFeatures.length ? { omitFeatures } : {}),
-          ...(outfit ? { outfit } : {}),
-          ...(removed.length ? { removed } : {}),
+          ...(Object.keys(wearState).length ? { wearState } : {}),
         });
       }
     } catch {
@@ -230,30 +235,43 @@ function sanitizeOptionalContent(value: unknown, field: string, imageIndex: numb
   }
 }
 
-const OMITTABLE_FEATURES = new Set(['hair', 'eyes', 'skin', 'body', 'extra']);
+/** 身份字段：任何镜头都不许用 omitFeatures 摘掉（摘了就是换了个人）。 */
+const PROTECTED_FEATURES = new Set(['hair', 'eyes', 'skin', 'body', 'sex', 'face']);
 
+/**
+ * omitFeatures 收的是「这一帧临时摘掉的配饰词」，例如 ["round eyewear"]。
+ * 只挡身份字段名，其余按自由词收：白名单式的字段名判断会让真实配饰词全部落空。
+ */
 function sanitizeOmitFeatures(value: unknown): string[] {
   if (!Array.isArray(value)) return [];
   const out: string[] = [];
   for (const item of value) {
     if (typeof item !== 'string') continue;
-    const key = item.trim().toLowerCase();
-    if (!OMITTABLE_FEATURES.has(key) || out.includes(key)) continue;
-    out.push(key);
+    const word = item.trim().replace(/\s+/g, ' ').slice(0, 40);
+    if (!word || PROTECTED_FEATURES.has(word.toLowerCase())) continue;
+    if (out.some(existing => existing.toLowerCase() === word.toLowerCase())) continue;
+    out.push(word);
+    if (out.length >= 8) break;
   }
   return out;
 }
 
-/** 已脱衣物类目：小写、去重、限长；不认识的词原样保留（编译器按词根判断）。 */
-function sanitizeRemovedList(value: unknown): string[] {
-  if (!Array.isArray(value)) return [];
-  const out: string[] = [];
-  for (const item of value) {
-    if (typeof item !== 'string') continue;
-    const key = item.trim().toLowerCase().replace(/\s+/g, ' ');
-    if (!key || key.length > 24 || out.includes(key)) continue;
-    out.push(key);
-    if (out.length >= 8) break;
+/** 逐帧穿脱状态：只认五个槽位与 on/half/off，坏值当没写（绝不因此丢整张图）。 */
+function sanitizeWearState(
+  value: unknown,
+): Partial<Record<WardrobeSlotKey, { status: SlotWearStatus; halfTag?: string }>> {
+  const out: Partial<Record<WardrobeSlotKey, { status: SlotWearStatus; halfTag?: string }>> = {};
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return out;
+  const record = value as Record<string, unknown>;
+  for (const key of WARDROBE_SLOT_KEYS) {
+    const raw = record[key];
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) continue;
+    const item = raw as Record<string, unknown>;
+    const status = item.status;
+    if (status !== 'on' && status !== 'half' && status !== 'off') continue;
+    const halfTag =
+      typeof item.halfTag === 'string' ? item.halfTag.trim().replace(/\s+/g, ' ').slice(0, 60) : '';
+    out[key] = { status, ...(status === 'half' && halfTag ? { halfTag } : {}) };
   }
   return out;
 }
@@ -272,6 +290,14 @@ function sanitizePosition(value: unknown, index: number): string {
  * changes 全程宽容:单条坏就丢弃,绝不连累 images——角色档案漏一条只是这个角色本轮
  * 没锚定,为它作废整次输出会连图一起没有,那是更坏的结果。
  */
+function pickPlanObject(raw: string): Record<string, unknown> | null {
+  return (
+    parseObjectCandidates(raw)
+      .map(candidate => imagePlanObject(candidate))
+      .find((candidate): candidate is Record<string, unknown> => candidate !== null) ?? null
+  );
+}
+
 export function parseImagePlan(
   raw: string,
   segments: TargetSegment[],
@@ -279,10 +305,7 @@ export function parseImagePlan(
   maxImages: number,
   rules: { femaleScenesOnly?: boolean; knownMaleProfiles?: ReadonlySet<string> } = {},
 ): ImagePlan {
-  const parsed =
-    parseObjectCandidates(raw)
-      .map(candidate => imagePlanObject(candidate))
-      .find((candidate): candidate is Record<string, unknown> => candidate !== null) ?? null;
+  const parsed = pickPlanObject(raw);
   if (!parsed) throw new Error('AI 返回的 JSON 缺少 images 数组');
   const rawImages = Array.isArray(parsed.images) ? parsed.images : [];
   const normalizedMax = Math.max(1, Math.floor(Number(maxImages)) || 1);
@@ -487,69 +510,61 @@ export function injectImageTags(source: string, images: ImageInsertion[]): strin
   return output;
 }
 
-/* 结楼穿搭指纹的解析(服装账本 v2)：任务 A 只记「本楼结束时各女角的最终穿搭」，
- * 楼内 P1/P2/P15 的穿脱由导演通道在当帧给出，这里不再拆微操作、不再推断、不再补词。 */
+/* 统一单通道计划的解析(服装账本 v3)：一次请求同时给出世界观、跨楼判定、建档、
+ * 装备变化与图片。装备描述与状态码分离，穿回只需 status:"on"，不必重写衣服。 */
 
-export interface StateSyncPlan {
-  changes: CharChange[];
-  finalOutfits: CharOutfitSnapshot[];
-  /** 首楼 AI 识别的世界观预设;合法才带,用户锁定后由调用方决定是否采纳。 */
+export interface UnifiedPlan extends ImagePlan {
+  /** 首楼 AI 识别的世界观预设；合法才带，用户锁定后由调用方决定是否采纳。 */
   worldPreset?: string;
+  /** 同日延续还是隔天换装：same_day 强令沿用上一楼装备表。 */
+  timeJump: TimeJump;
+  wardrobeUpdates: WardrobeUpdate[];
 }
 
-/** 表格里的文本字段：去空白、禁子标签、限长；非字符串一律当没写，不抛错。 */
-function outfitText(value: unknown): string {
+function planText(value: unknown, limit = 300): string {
   if (typeof value !== 'string') return '';
   const text = value.trim().replace(/\s+/g, ' ');
   if (!text || FORBIDDEN_SUBTAG.test(text)) return '';
-  return text.length > 300 ? text.slice(0, 300) : text;
+  return text.length > limit ? text.slice(0, limit) : text;
 }
 
-function parseFinalOutfits(rawOutfits: unknown): CharOutfitSnapshot[] {
-  if (!Array.isArray(rawOutfits)) return [];
-  const result: CharOutfitSnapshot[] = [];
+function parseWardrobeUpdates(rawUpdates: unknown, maleNames?: ReadonlySet<string>): WardrobeUpdate[] {
+  if (!Array.isArray(rawUpdates)) return [];
+  const out: WardrobeUpdate[] = [];
   const seen = new Set<string>();
-  for (const item of rawOutfits) {
-    if (!item || typeof item !== 'object' || Array.isArray(item)) continue;
-    const obj = item as Record<string, unknown>;
-    const name = outfitText(obj.name);
-    if (!name || seen.has(name)) continue;
-    seen.add(name);
-    const wearing = outfitText(obj.wearing);
-    const stateNote = outfitText(obj.stateNote);
-    const removed = sanitizeRemovedList(obj.removed);
-    result.push({
-      name,
-      wearing,
-      ...(removed.length ? { removed } : {}),
-      ...(stateNote ? { stateNote } : {}),
-    });
+  for (const item of rawUpdates) {
+    const update = normaliseWardrobeUpdate(item);
+    if (!update) continue;
+    if (seen.has(update.name)) continue;
+    if (maleNames && maleNames.has(update.name)) continue;
+    seen.add(update.name);
+    out.push(update);
+    if (out.length >= 12) break;
   }
-  return result;
+  return out;
 }
 
 /**
- * 解析任务 A(状态填表通道)返回的 JSON：{ "changes": [...], "finalOutfits": [...], "worldPreset": "..." }。
- * 容错设计：单条变更或单份穿搭不合法只丢该条，不阻塞主生图；整份解析不了就退化成
- * 「这一楼什么都没填」，由导演通道照常出图。
+ * 解析单通道统一 JSON。images 缺失/不可解析一律抛错，让上层的重试去救；
+ * 其余字段全部宽容：世界观非法就当没识别、timeJump 缺省 same_day、单条装备坏只丢该条。
  */
-export function parseStateSyncPlan(
+export function parseUnifiedPlan(
   raw: string,
   segments: TargetSegment[],
-  rules: { knownMaleProfiles?: ReadonlySet<string> } = {},
-): StateSyncPlan {
-  const positions = new Map<string, number>();
-  for (const seg of segments) positions.set(seg.id.toUpperCase(), seg.sourceLine);
-
-  let parsed: Record<string, unknown>;
-  try {
-    parsed = parseObject(raw);
-  } catch {
-    return { changes: [], finalOutfits: [] };
-  }
-
-  const changes = parseChanges(parsed.changes, positions, rules.knownMaleProfiles);
-  const finalOutfits = parseFinalOutfits(parsed.finalOutfits ?? parsed.outfits);
-  const worldPreset = typeof parsed.worldPreset === 'string' ? parsed.worldPreset.trim() : '';
-  return { changes, finalOutfits, ...(worldPreset ? { worldPreset } : {}) };
+  minImages: number,
+  maxImages: number,
+  rules: { femaleScenesOnly?: boolean; knownMaleProfiles?: ReadonlySet<string> } = {},
+): UnifiedPlan {
+  const parsed = pickPlanObject(raw);
+  if (!parsed) throw new Error('AI 返回的 JSON 缺少 images 数组');
+  const plan = parseImagePlan(JSON.stringify(parsed), segments, minImages, maxImages, rules);
+  const worldPreset = planText(parsed.worldPreset, 40);
+  const timeJump: TimeJump = parsed.timeJump === 'new_day' ? 'new_day' : 'same_day';
+  return {
+    images: plan.images,
+    changes: plan.changes,
+    timeJump,
+    wardrobeUpdates: parseWardrobeUpdates(parsed.wardrobeUpdates ?? parsed.outfits, rules.knownMaleProfiles),
+    ...(worldPreset ? { worldPreset } : {}),
+  };
 }

@@ -1,4 +1,5 @@
 import App from '@/App.vue';
+import { hydrateTraitPool } from '@/state/traitPool';
 import { bindAutoTagging } from '@/autoTag/runner';
 import { bindTagActionButtons } from '@/floor/actionButton';
 import { bindFloorHydration } from '@/floor/hydrate';
@@ -96,6 +97,7 @@ async function hydrateWhenReady(attempt = 0) {
   if ((window as unknown as { SillyTavern?: { getContext?: unknown } }).SillyTavern?.getContext) {
     try {
       await hydrateSettings();
+      hydrateTraitPool();
       // 全局库必须在 bindCharTagSync 之前初始化:首次重算就要把全局条目合进派生库
       initGlobalCharTags();
       bindCharTagSync();

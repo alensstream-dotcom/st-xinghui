@@ -14,9 +14,8 @@ import { beginGeneration, clearGeneration, consumeGeneration } from '@/autoTag/g
 import {
   autoTagProfile,
   buildAutoTagMessages,
-  buildDirectorMessages,
-  buildStateSyncMessages,
-  type DualChannelInput,
+  buildUnifiedMessages,
+  type UnifiedInput,
 } from '@/autoTag/prompt';
 import { rebaseImagePositions, type RebaseReport } from '@/autoTag/rebase';
 import { buildSlotTaskNote } from '@/autoTag/slotPlan';
@@ -39,11 +38,10 @@ import {
   injectImageTags,
   parseComicPlan,
   parseImagePlan,
-  parseStateSyncPlan,
+  parseUnifiedPlan,
   type CharChange,
   type ImageInsertion,
   type ImagePlan,
-  type StateSyncPlan,
 } from '@/autoTag/protocol';
 import { bakeAppearance, comicAppearance, type ComicLayout } from '@/backends/mossLayout';
 import {
@@ -63,15 +61,17 @@ import {
   stripImageTags,
 } from '@/st/imageTagRegex';
 import { getTagGenChannel, isCurrentChatExcluded, settings, type ApiChannel } from '@/state/settings';
-import { applyDetectedWorldPreset, readWorldAnchor } from '@/state/worldAnchor';
+import { applyDetectedWorldPreset, readWorldAnchor, type WorldAnchorConfig } from '@/state/worldAnchor';
 import {
   BBI_OUTFIT_EXTRA_KEY,
-  buildOutfitSnapshotText,
-  outfitStatesBeforeFloor,
-  readOutfitFloorDelta,
-  makeOutfitFloorDelta,
-  type CharOutfitSnapshot,
+  applyWardrobeUpdate,
+  buildWardrobeText,
+  makeWardrobeFloorDelta,
+  readWardrobeFloorDelta,
+  wardrobesBeforeFloor,
+  type WardrobeUpdate,
 } from '@/state/outfitState';
+import { traitCandidateBlock } from '@/state/traitPool';
 
 const processed = new Set<string>();
 const running = new Map<string, AbortController>();
@@ -221,28 +221,7 @@ function bakeComicAppearance(layout: ComicLayout, entries: CharTagEntry[], unkno
   }
 }
 
-/**
- * 单模型双并发：同一个渠道上并发两条轻量通道，再在本地把结果拼成可发送的提示词。
- *
- * 为什么要拆两条：一条通道要它「读完整楼、把五层服装状态填准」，另一条要它「当导演挑画面」，
- * 两件事对上下文的要求正好相反——填表要全量细节，导演要短、要敢选。挤在一次请求里，
- * 模型会先满足容易的那件（挑一格好写的画面），服装状态就被糊弄过去。
- *
- * 任何一条通道失败都整体抛错，交给调用方回落到原来的单请求路径：
- * 双通道是为了更好，不是为了把原本能跑通的楼层变成失败。
- */
-function summarizeLastFloorImage(chat: STMessage[], targetFloor: number): string {
-  for (let i = targetFloor - 1; i >= 0; i--) {
-    const mes = chat[i]?.mes ?? '';
-    const matches = [...mes.matchAll(/<bbi_image>[\s\S]*?<\/bbi_image>/gi)];
-    if (!matches.length) continue;
-    const parsed = parseImageTagContent(matches[matches.length - 1][0]);
-    const names = parsed.characters.map(c => c.name).join('、') || '未知';
-    return `入画角色：${names}｜Base：${parsed.tag}`;
-  }
-  return '';
-}
-
+/** 同一处请求入口：显式渠道走 requestCompletion，否则走酒馆主 API。 */
 async function dispatchLlm(
   messages: ChatMsg[],
   channel: ApiChannel | null,
@@ -252,123 +231,83 @@ async function dispatchLlm(
 }
 
 /**
- * 单模型双并发：
- * - 任务 A(状态表)只填五层服装 + 建档，不选画面；
- * - 任务 B(导演)直接交完整 Base.tag/nl 与每个角色的 tag/nl；
- * - 外貌与服装由本地编译器硬拼，导演写的 tag 接在后面，顺序固定。
- * 任何一路拿不出可解析的结果就抛错，由调用方回落到单请求路径。
+ * 单通道一次请求。
+ *
+ * 以前拆两条通道（状态表 + 导演）并发跑，代价是双倍 token、两套口径互相打架、
+ * 还常因为其中一条吐不出 JSON 而整楼失败。现在只发一次：模型读完整楼，一次交出
+ * 世界观、跨楼判定、建档、装备变化与图片；装备怎么画由本地编译器按账本 + 状态码算。
  */
-async function runDualChannel(params: {
+async function runUnifiedPass(params: {
   channel: ApiChannel | null;
   floor: number;
-  input: Omit<DualChannelInput, 'outfitSnapshot'>;
+  input: Omit<UnifiedInput, 'wardrobeText' | 'traitBlock'>;
   segments: TargetSegment[];
   entries: CharTagEntry[];
-  /** 用本次 changes 算出「几号位置起用哪份档案」的操作表。 */
   opsResolver: (changes: CharChange[]) => PositionedCharOp[];
   lockedNames: ReadonlySet<string>;
   maleNames?: ReadonlySet<string>;
-  size: 'portrait' | 'landscape';
   signal: AbortSignal;
-  /** 每个通道各自的重试次数(复用设置里的 retryCount)。 */
   retries: number;
-}): Promise<{ plan: ImagePlan; finalOutfits: CharOutfitSnapshot[] }> {
-  const outfitsBefore = outfitStatesBeforeFloor(params.floor);
-  const outfitSnapshotText = buildOutfitSnapshotText(outfitsBefore);
-  const lastImageSummary = summarizeLastFloorImage(getContext()?.chat ?? [], params.floor);
-  const input: DualChannelInput = {
+}): Promise<{ plan: ImagePlan; wardrobeUpdates: WardrobeUpdate[]; world: WorldAnchorConfig }> {
+  const wardrobesBefore = wardrobesBeforeFloor(params.floor);
+  const input: UnifiedInput = {
     ...params.input,
-    outfitSnapshot: outfitSnapshotText,
-    entries: params.entries,
+    wardrobeText: buildWardrobeText(wardrobesBefore),
+    traitBlock: traitCandidateBlock(params.input.world.presetId, params.entries),
   };
+  const messages = await buildUnifiedMessages(input);
+  const source = `出图计划(第 ${params.floor} 楼)`;
 
-  const [stateMsgs, directorMsgs] = await Promise.all([
-    buildStateSyncMessages(input),
-    buildDirectorMessages(input, lastImageSummary),
-  ]);
-
-  const stateOpts = { signal: params.signal, source: `服装状态表(第 ${params.floor} 楼)` };
-  const directorOpts = { signal: params.signal, source: `镜头导演(第 ${params.floor} 楼)` };
-
-  /**
-   * 解析放在重试回调里面。
-   *
-   * 以前是「先拿到字符串、出了循环再 parse」:模型吐了个缺 images 的 JSON 时,
-   * 重试次数一次没用就整楼失败。现在解析失败也算这一路失败,会自动重发;
-   * 只有重试耗尽才谈降级。
-   */
-  const runStateChannel = (): Promise<StateSyncPlan> =>
-    runChannelWithRetries(async next => {
-      const raw = await dispatchLlm(stateMsgs, params.channel, next);
-      return parseStateSyncPlan(raw, params.segments, { knownMaleProfiles: params.maleNames });
-    }, { retries: params.retries, signal: params.signal, source: stateOpts.source });
-
-  const runDirectorChannel = (): Promise<ImagePlan> =>
-    runChannelWithRetries(async next => {
-      const raw = await dispatchLlm(directorMsgs, params.channel, next);
-      return parseImagePlan(raw, params.segments, input.minImages, input.maxImages, {
+  const plan = await runChannelWithRetries(async next => {
+    const raw = await dispatchLlm(messages, params.channel, next);
+    try {
+      return parseUnifiedPlan(raw, params.segments, input.minImages, input.maxImages, {
         femaleScenesOnly: true,
         knownMaleProfiles: params.maleNames,
       });
-    }, { retries: params.retries, signal: params.signal, source: directorOpts.source });
-
-  let statePlan: StateSyncPlan = { changes: [], finalOutfits: [] };
-  let directorPlan: ImagePlan;
-  if (params.channel) {
-    const [stateResult, directorResult] = await Promise.allSettled([runStateChannel(), runDirectorChannel()]);
-    if (stateResult.status === 'fulfilled') statePlan = stateResult.value;
-    else {
-      // 服装表只决定「这一格穿什么」,不该让整楼生图作废:退化为空增量,
-      // 但绝不能清空本楼已有的 BBI_OUTFIT_EXTRA_KEY(那是历史回放的基础)。
-      console.warn(`[星绘] 第 ${params.floor} 楼服装状态表通道失败,按空增量继续`, stateResult.reason);
-      toastr.warning('服装状态表这一楼没取到，本次只按已有状态出图（不会清空本楼记录）', '星绘');
-    }
-    if (directorResult.status !== 'fulfilled') {
-      const reason = directorResult.reason;
-      throw new Error(`镜头导演通道失败：${reason instanceof Error ? reason.message : String(reason)}`);
-    }
-    directorPlan = directorResult.value;
-  } else {
-    // 走酒馆主 API 时顺序发:同一条会话并发两发会互相顶掉排队位置。
-    try {
-      statePlan = await runStateChannel();
     } catch (error) {
-      console.warn(`[星绘] 第 ${params.floor} 楼服装状态表通道失败,按空增量继续`, error);
-      toastr.warning('服装状态表这一楼没取到，本次只按已有状态出图（不会清空本楼记录）', '星绘');
+      // 解析失败最常见的原因是上游按 max_tokens 截断：把字符数与末尾 150 字打出来，
+      // 一眼就能分清「模型没遵守协议」和「输出被砍断」。
+      diagnostic('unified:parse-failed', {
+        chars: raw.length,
+        tail: raw.slice(-150),
+        error: error instanceof Error ? error.message : String(error),
+      });
+      console.warn(
+        `[星绘] 第 ${params.floor} 楼出图计划解析失败（返回 ${raw.length} 字，末尾：「${raw.slice(-150)}」）`,
+      );
+      throw error;
     }
-    directorPlan = await runDirectorChannel();
-  }
+  }, { retries: params.retries, signal: params.signal, source });
 
-  // 首楼识别:用户手动锁过就不覆盖(applyDetectedWorldPreset 内部判断)。
-  // 注意必须把结果接住:本楼拼装要用「刚识别出来的」世界观,不然首楼还是按旧预设
-  // 拼素服与负面,得等到下一楼才生效。
   let world = params.input.world;
-  if (statePlan.worldPreset) {
-    const applied = applyDetectedWorldPreset(statePlan.worldPreset);
+  if (plan.worldPreset) {
+    const applied = applyDetectedWorldPreset(plan.worldPreset);
     if (!applied.lockedByUser && applied.presetId !== params.input.world.presetId) {
       console.info(`[星绘] 已识别本聊天世界观：${applied.label}`);
     }
     world = applied;
   }
 
-  // 建档与永久变化由状态表通道顺带报告,先落成位置操作,后面按位置取档案——
-  // 这样「星绘书里还没这个人」的首次出场也能在本楼就用上刚建的外貌。
-  const positionedOps = params.opsResolver(statePlan.changes);
+  const positionedOps = params.opsResolver(plan.changes);
+  // 本楼图片按「本楼结束后」的装备表编译：模型在这一楼里已经说明了穿脱，
+  // 图片画的就是说明之后的样子；楼内逐帧差异由 characters[].wearState 覆盖。
+  const wardrobes = new Map(wardrobesBefore);
+  for (const update of plan.wardrobeUpdates) applyWardrobeUpdate(wardrobes, update);
 
-  const assembledImages = directorPlan.images.map(img => {
+  const assembledImages = plan.images.map(img => {
     const entriesAtPos = entriesAtPosition(params.entries, positionedOps, img.sourceLine, params.lockedNames);
-    // 服装不再按位置切分:导演在这一格已经给出 outfit/removed,编译器直接用当帧值。
-    return assembleImageCharacters(img, entriesAtPos, world);
+    return assembleImageCharacters(img, entriesAtPos, wardrobes, world);
   });
 
-  const plan: ImagePlan = { images: assembledImages, changes: statePlan.changes };
-  diagnostic('dual:compiled', {
-    shots: directorPlan.images.length,
+  diagnostic('unified:compiled', {
+    shots: plan.images.length,
     images: assembledImages.length,
-    outfits: statePlan.finalOutfits.length,
-    changes: statePlan.changes.length,
+    wardrobeUpdates: plan.wardrobeUpdates.length,
+    changes: plan.changes.length,
+    timeJump: plan.timeJump,
   });
-  return { plan, finalOutfits: statePlan.finalOutfits };
+  return { plan: { images: assembledImages, changes: plan.changes }, wardrobeUpdates: plan.wardrobeUpdates, world };
 }
 
 async function runForFloor(floor: number, opts: RunOptions = {}): Promise<void> {
@@ -507,7 +446,7 @@ async function runForFloor(floor: number, opts: RunOptions = {}): Promise<void> 
     const profile = autoTagProfile();
     const previousEntries = charTagsBeforeFloor(slot ? floor + 1 : floor);
     const previousDelta = readCharTagFloorDelta(message);
-    const previousOutfitDelta = readOutfitFloorDelta(message);
+    const previousOutfitDelta = readWardrobeFloorDelta(message);
     const storyProfiles = profile.naiCharPrompts
       ? naiStoryProfiles(previousEntries, previousDelta, swipeId ?? 0)
       : undefined;
@@ -526,13 +465,11 @@ async function runForFloor(floor: number, opts: RunOptions = {}): Promise<void> 
       : settings.autoTag;
     const channel = getTagGenChannel();
     const world = readWorldAnchor();
-    // V2:普通整楼生图一律走双通道,不再有「双通道失败就回落老单通道」这条路——
-    // 回落会让提示词忽厚忽薄、模型行为忽好忽坏,还掩盖真正的失败原因。
-    // 漫画仍走单通道(一页一个分镜,拆成两路反而乱);单槽重写只要一张,也走单通道。
-    const dualEligible = !profile.comic && !slot;
-    // 双通道下这一段完全不需要构造(白跑一次组装 = 白烧一次提示词预算)
+    // 单通道：普通整楼生图一次请求出全部计划；漫画（一页一分镜）与单槽重写仍走旧协议。
+    const unifiedEligible = !profile.comic && !slot;
+    // 单通道下这一段完全不需要构造（白跑一次组装 = 白烧一次提示词预算）
     let messages: ChatMsg[] = [];
-    if (!dualEligible) {
+    if (!unifiedEligible) {
       messages = await buildAutoTagMessages(
         context,
         floor,
@@ -546,42 +483,41 @@ async function runForFloor(floor: number, opts: RunOptions = {}): Promise<void> 
     }
     let plan: ImagePlan | null = null;
     let lastError = '';
-    /** 本楼五层服装增量;单通道路径下恒为空,由写回落盘时一并保存。 */
-    let finalOutfits: CharOutfitSnapshot[] = [];
-    if (dualEligible) {
-      {
-        const dual = await runDualChannel({
-          channel: channel ?? null,
-          floor,
-          input: {
-            context,
-            targetFloor: floor,
-            options: promptOptions,
-            preparedTarget,
-            memoryText: memory ? memory.text : '角色参考：星绘书本次未提供。',
-            libraryBlock: anchors.text ?? '',
-            nlOn: profile.nl,
-            minImages: promptOptions.minImages,
-            maxImages: promptOptions.maxImages,
-            world,
-          },
-          segments: preparedTarget.segments,
+    /** 本楼装备变化；非单通道路径下恒为空。 */
+    let wardrobeUpdates: WardrobeUpdate[] = [];
+    const retries = Math.max(0, Math.floor(Number(settings.autoTag.retryCount) || 0));
+    if (unifiedEligible) {
+      const unified = await runUnifiedPass({
+        channel: channel ?? null,
+        floor,
+        input: {
+          context,
+          targetFloor: floor,
+          options: promptOptions,
+          preparedTarget,
+          memoryText: memory ? memory.text : '角色参考：星绘书本次未提供。',
+          libraryBlock: anchors.text ?? '',
+          nlOn: profile.nl,
+          minImages: promptOptions.minImages,
+          maxImages: promptOptions.maxImages,
+          world,
           entries: anchors.entries,
-          opsResolver: changes => {
-            const resolved = planChangeOps({ images: [], changes });
-            return lockedNames.size
-              ? resolved.filter(item => !lockedNames.has(item.op.name))
-              : resolved;
-          },
-          lockedNames,
-          maleNames: storyProfiles?.maleNames,
-          size: profile.lockedSize ?? 'portrait',
-          signal: controller.signal,
-          retries: Math.max(0, Math.floor(Number(settings.autoTag.retryCount) || 0)),
-        });
-        plan = dual.plan;
-        finalOutfits = dual.finalOutfits;
-      }
+        },
+        segments: preparedTarget.segments,
+        entries: anchors.entries,
+        opsResolver: changes => {
+          const resolved = planChangeOps({ images: [], changes });
+          return lockedNames.size
+            ? resolved.filter(item => !lockedNames.has(item.op.name))
+            : resolved;
+        },
+        lockedNames,
+        maleNames: storyProfiles?.maleNames,
+        signal: controller.signal,
+        retries,
+      });
+      plan = unified.plan;
+      wardrobeUpdates = unified.wardrobeUpdates;
       if (controller.signal.aborted) {
         processed.delete(identity);
         return;
@@ -591,8 +527,7 @@ async function runForFloor(floor: number, opts: RunOptions = {}): Promise<void> 
     // 中止信号立即收手,不消耗重试。parseImagePlan 对坏输出抛错,「无画面」则是正常返回空数组。
     // 解析/校验放进 validate 回调:不过则请求历史如实记为失败(而非「HTTP 拿到文本」的绿色成功),
     // 错误原样抛回这里走重试——显示与行为同口径。
-    const retries = Math.max(0, Math.floor(Number(settings.autoTag.retryCount) || 0));
-    for (let attempt = 0; !dualEligible && attempt <= retries && !plan; attempt++) {
+    for (let attempt = 0; !unifiedEligible && attempt <= retries && !plan; attempt++) {
       if (controller.signal.aborted) {
         processed.delete(identity);
         return;
@@ -762,7 +697,7 @@ async function runForFloor(floor: number, opts: RunOptions = {}): Promise<void> 
     // 后面几十楼都按「已经脱了」画。只清属于当前 swipe 的那份,另一个 swipe 的记录留着。
     const staleOutfitDelta =
       previousOutfitDelta && previousOutfitDelta.swipe === (swipeId ?? 0) ? previousOutfitDelta : null;
-    if (!plan.images.length && !floorOps.length && !previousDelta && !finalOutfits.length && !staleOutfitDelta) {
+    if (!plan.images.length && !floorOps.length && !previousDelta && !wardrobeUpdates.length && !staleOutfitDelta) {
       if (opts.manual) toastr.info('模型认为本楼没有值得插图的画面', '星绘');
       else console.debug(`[星绘] 第 ${floor} 楼无需插图`);
       return;
@@ -823,8 +758,8 @@ async function runForFloor(floor: number, opts: RunOptions = {}): Promise<void> 
               key: BBI_CHAR_EXTRA_KEY,
               value: makeCharTagFloorDelta(floorOps, swipeId ?? 0),
             },
-            ...(finalOutfits.length
-              ? [{ key: BBI_OUTFIT_EXTRA_KEY, value: makeOutfitFloorDelta(finalOutfits, swipeId ?? 0) }]
+            ...(wardrobeUpdates.length
+              ? [{ key: BBI_OUTFIT_EXTRA_KEY, value: makeWardrobeFloorDelta(wardrobeUpdates, swipeId ?? 0) }]
               : staleOutfitDelta
                 ? [{ key: BBI_OUTFIT_EXTRA_KEY, value: undefined }]
                 : []),

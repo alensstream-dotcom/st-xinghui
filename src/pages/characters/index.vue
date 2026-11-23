@@ -34,10 +34,25 @@ import { getContext } from '@/st/context';
 import { applyMessageText } from '@/st/messageEdit';
 import {
   BBI_OUTFIT_EXTRA_KEY,
-  deriveOutfitSnapshots,
-  readOutfitFloorDelta,
-  type CharOutfitSnapshot,
+  WARDROBE_SLOT_KEYS,
+  WARDROBE_SLOT_LABELS,
+  deriveWardrobes,
+  readWardrobeFloorDelta,
+  type CharacterWardrobe,
+  type GarmentSlot,
+  type WardrobeSlotKey,
 } from '@/state/outfitState';
+import {
+  TRAIT_CATEGORIES,
+  addTraitItems,
+  formatTraitCandidates,
+  removeTraitItem,
+  resetTraitPool,
+  rollTraitCandidates,
+  toggleTraitItem,
+  traitPool,
+  type TraitCategoryKey,
+} from '@/state/traitPool';
 import {
   WORLD_PRESETS,
   WORLD_PRESET_IDS,
@@ -621,30 +636,30 @@ function confirmRollback() {
   }
 }
 
-/** 五层服装状态:回放整段聊天得到的账本,只读展示 + 单角色清除。 */
-const editingOutfit = computed<CharOutfitSnapshot | null>(() => {
+/** 装备表 v3:逐楼回放出来的当前穿搭(只读展示 + 单角色清除)。 */
+const editingWardrobe = computed<CharacterWardrobe | null>(() => {
   const name = editingName.value?.trim();
   if (!name) return null;
   const chat = getContext()?.chat ?? [];
-  return deriveOutfitSnapshots(chat, chat.length).get(name) ?? null;
+  return deriveWardrobes(chat, chat.length).get(name) ?? null;
 });
 
-const REMOVED_CN: Record<string, string> = {
-  outer: '外衣',
-  top: '上衣',
-  bra: '胸罩',
-  bottom: '下装',
-  panties: '内裤',
-  hosiery: '袜/鞋',
-};
+const STATUS_CN: Record<GarmentSlot['status'], string> = { on: '穿着', half: '半脱', off: '已脱' };
 
-const editingRemovedLabel = computed(() =>
-  (editingOutfit.value?.removed ?? []).map(key => REMOVED_CN[key] ?? key).join('、'),
+function slotLabel(key: WardrobeSlotKey, slot: GarmentSlot): string {
+  return `${WARDROBE_SLOT_LABELS[key]}[${slot.tag}|${STATUS_CN[slot.status]}${slot.status === 'half' && slot.halfTag ? `(${slot.halfTag})` : ''}]`;
+}
+
+const editingSlotRows = computed(() =>
+  WARDROBE_SLOT_KEYS.map(key => {
+    const slot = editingWardrobe.value?.[key];
+    return { key, label: WARDROBE_SLOT_LABELS[key], slot };
+  }),
 );
 
 /**
- * 清掉这个角色在所有楼层里记的结楼穿搭快照。
- * 排查「明明穿着却画成裸的」时最有用:快照是逐楼回放出来的,删掉就等于从没记过。
+ * 清掉这个角色在所有楼层里记的装备变化。
+ * 画错多半是某楼把「敞开/撩起」记成了「脱掉」,清掉重跑本楼 tag 即可。
  */
 async function resetEditingOutfit() {
   const name = editingName.value?.trim();
@@ -659,11 +674,11 @@ async function resetEditingOutfit() {
   let touched = 0;
   for (let floor = 0; floor < chat.length; floor += 1) {
     const message = chat[floor];
-    const delta = readOutfitFloorDelta(message);
-    if (!delta || !delta.snapshots.length) continue;
-    const kept = delta.snapshots.filter(snapshot => snapshot.name !== name);
-    if (kept.length === delta.snapshots.length) continue;
-    const value = kept.length ? { ...delta, snapshots: kept } : undefined;
+    const delta = readWardrobeFloorDelta(message);
+    if (!delta || !delta.updates.length) continue;
+    const kept = delta.updates.filter(update => update.name !== name);
+    if (kept.length === delta.updates.length) continue;
+    const value = kept.length ? { ...delta, updates: kept } : undefined;
     const result = await applyMessageText(
       floor,
       text => text,
@@ -675,9 +690,53 @@ async function resetEditingOutfit() {
     if (result === 'saved') touched += 1;
   }
   toastr[touched ? 'success' : 'info'](
-    touched ? `已清除 ${touched} 楼里「${name}」的穿搭记录` : `「${name}」没有穿搭记录`,
+    touched ? `已清除 ${touched} 楼里「${name}」的服装记录` : `「${name}」没有服装记录`,
     '星绘',
   );
+}
+
+/** 外貌随机池:分类标签 + 词条胶囊 + 一行批量添加 + 真随机预览。 */
+const traitOpen = ref(false);
+const traitCategory = ref<TraitCategoryKey>('hairColor');
+const traitAddLabel = ref('');
+const traitAddTags = ref('');
+const traitPreview = ref('');
+
+const traitCategoryItems = computed(() => traitPool[traitCategory.value] ?? []);
+const traitEnabledCount = computed(() =>
+  TRAIT_CATEGORIES.reduce(
+    (total, meta) => total + (traitPool[meta.key] ?? []).filter(item => item.enabled).length,
+    0,
+  ),
+);
+
+function toggleTrait(category: TraitCategoryKey, id: string) {
+  toggleTraitItem(category, id);
+}
+
+function dropTrait(category: TraitCategoryKey, id: string) {
+  removeTraitItem(category, id);
+}
+
+function submitTrait() {
+  const label = traitAddLabel.value.trim() || traitAddTags.value.trim();
+  const added = addTraitItems(traitCategory.value, label, traitAddTags.value);
+  if (!added) {
+    toastr.info('没加进去:标签必填,或这些词已经在池子里', '星绘');
+    return;
+  }
+  traitAddLabel.value = '';
+  traitAddTags.value = '';
+}
+
+function restoreTraitPool() {
+  resetTraitPool();
+  toastr.success('外貌随机池已恢复默认', '星绘');
+}
+
+function rollTraitPreview() {
+  const entries = [...globalCharTagLib.entries, ...chatEntries.value];
+  traitPreview.value = formatTraitCandidates(rollTraitCandidates(world.value.presetId, entries, 3));
 }
 
 function sourceLabel(entry: CharTagEntry): string {
@@ -729,6 +788,53 @@ function sourceLabel(entry: CharTagEntry): string {
         </label>
       </div>
     </div>
+
+    <!-- ===== 外貌随机池（真随机抽卡，防撞脸） ===== -->
+    <details class="bbi-trait-card" :open="traitOpen" @toggle="traitOpen = ($event.target as HTMLDetailsElement).open">
+      <summary>
+        外貌随机池
+        <span class="bbi-trait-sub">已启用 {{ traitEnabledCount }} 条</span>
+      </summary>
+      <p class="bbi-field-hint">
+        建档与重Roll 时,代码从这里真随机抽 3 组候选包喂给模型(正文写死的维度仍以正文为准),避免所有新角色都是黑长直大胸。
+      </p>
+      <div class="bbi-trait-tabs">
+        <button
+          v-for="meta in TRAIT_CATEGORIES"
+          :key="meta.key"
+          class="bbi-trait-tab"
+          type="button"
+          :class="{ 'is-active': traitCategory === meta.key }"
+          @click="traitCategory = meta.key"
+        >
+          {{ meta.label }}
+          <span class="bbi-trait-count">{{ (traitPool[meta.key] ?? []).filter(item => item.enabled).length }}</span>
+        </button>
+      </div>
+      <div class="bbi-trait-chips">
+        <button
+          v-for="item in traitCategoryItems"
+          :key="item.id"
+          class="bbi-trait-chip"
+          type="button"
+          :class="{ 'is-off': !item.enabled }"
+          :title="item.tag"
+          @click="toggleTrait(traitCategory, item.id)"
+        >
+          <span class="bbi-trait-label">{{ item.label }}</span>
+          <span class="bbi-trait-tag">{{ item.tag }}</span>
+          <span class="bbi-trait-x" role="button" title="删除这条" @click.stop="dropTrait(traitCategory, item.id)">×</span>
+        </button>
+      </div>
+      <div class="bbi-trait-add">
+        <input v-model="traitAddLabel" class="bbi-input" type="text" placeholder="中文标签,例:雾霾蓝" />
+        <input v-model="traitAddTags" class="bbi-input" type="text" placeholder="tag,多个用逗号分隔" />
+        <button class="bbi-btn bbi-btn-sm" type="button" @click="submitTrait">添加</button>
+        <button class="bbi-btn bbi-btn-sm bbi-btn-ghost" type="button" @click="restoreTraitPool">恢复默认</button>
+        <button class="bbi-btn bbi-btn-sm bbi-btn-ghost" type="button" @click="rollTraitPreview">随机预览 3 组</button>
+      </div>
+      <pre v-if="traitPreview" class="bbi-trait-preview">{{ traitPreview }}</pre>
+    </details>
 
     <!-- ===== 全局角色库 ===== -->
     <div class="bbi-char-section">
@@ -923,38 +1029,35 @@ function sourceLabel(entry: CharTagEntry): string {
           </div>
         </div>
 
-        <!-- ===== 结楼穿搭快照:逐楼回放结果,只读查看 + 单角色清除 ===== -->
+        <!-- ===== 当前穿搭(装备表 v3):只读查看 + 单角色清除 ===== -->
         <details v-if="editingName" class="bbi-outfit-audit">
           <summary>
-            当前穿搭(逐楼回放)
+            当前穿搭(装备表)
             <span class="bbi-outfit-audit-sub">
-              {{ editingOutfit ? '有记录' : '暂无记录' }}
+              {{ editingWardrobe ? '有记录' : '暂无记录' }}
             </span>
           </summary>
-          <template v-if="editingOutfit">
+          <template v-if="editingWardrobe">
             <div class="bbi-outfit-snapshot">
-              <div class="bbi-outfit-row">
-                <span class="bbi-outfit-layer">穿着</span>
-                <span class="bbi-outfit-tag">{{ editingOutfit.wearing || '(全裸)' }}</span>
-              </div>
-              <div class="bbi-outfit-row">
-                <span class="bbi-outfit-layer">已脱</span>
-                <span class="bbi-outfit-tag">{{ editingRemovedLabel || '—' }}</span>
-              </div>
-              <div class="bbi-outfit-row">
-                <span class="bbi-outfit-layer">状态</span>
-                <span class="bbi-outfit-tag">{{ editingOutfit.stateNote || '—' }}</span>
+              <div v-for="row in editingSlotRows" :key="row.key" class="bbi-outfit-row">
+                <span class="bbi-outfit-layer">{{ row.label }}</span>
+                <span v-if="row.slot" class="bbi-outfit-tag">
+                  {{ row.slot.tag }}
+                  <span class="bbi-outfit-status" :class="`is-${row.slot.status}`">{{ STATUS_CN[row.slot.status] }}</span>
+                  <span v-if="row.slot.halfTag" class="bbi-outfit-half">({{ row.slot.halfTag }})</span>
+                </span>
+                <span v-else class="bbi-outfit-tag">—</span>
               </div>
             </div>
             <p class="bbi-field-hint">
-              这是逐楼回放出来的「每楼结束时」的穿搭。画错多半是某楼把敞开/撩起记成了脱掉,可在这里清除后重新生成本楼 tag。
+              装备描述永不删除,状态只有「穿着 / 半脱 / 已脱」三档;穿回只把状态改回穿着,衣服原样复原。画错多半是某楼把敞开记成了脱掉,可在这里清除后重新生成本楼 tag。
             </p>
             <button class="bbi-btn bbi-btn-sm bbi-btn-danger" type="button" @click="resetEditingOutfit">
-              清除「{{ editingName }}」的穿搭记录
+              清除「{{ editingName }}」的服装记录
             </button>
           </template>
           <p v-else class="bbi-field-hint">
-            这个角色还没有穿搭记录(没出过图,或所在楼层没有服装变更)。
+            这个角色还没有服装记录(没出过图,或所在楼层没有服装变更)。
           </p>
         </details>
 
@@ -1942,5 +2045,65 @@ function sourceLabel(entry: CharTagEntry): string {
   .bbi-char-name {
     font-size: 14px;
   }
+}
+
+.bbi-outfit-status {
+  margin-left: 6px;
+  padding: 0 6px;
+  border-radius: 8px;
+  font-size: 11px;
+  background: rgba(120, 120, 140, 0.18);
+}
+.bbi-outfit-status.is-on { background: rgba(66, 153, 96, 0.22); }
+.bbi-outfit-status.is-half { background: rgba(214, 158, 46, 0.22); }
+.bbi-outfit-status.is-off { background: rgba(196, 74, 74, 0.22); }
+.bbi-outfit-half { margin-left: 4px; opacity: 0.75; font-size: 11px; }
+.bbi-trait-card {
+  margin: 12px 0 18px;
+  padding: 10px 12px;
+  border: 1px solid rgba(120, 120, 140, 0.22);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.02);
+}
+.bbi-trait-card > summary { cursor: pointer; font-weight: 600; }
+.bbi-trait-sub { margin-left: 8px; font-weight: 400; opacity: 0.7; font-size: 12px; }
+.bbi-trait-tabs { display: flex; flex-wrap: wrap; gap: 6px; margin: 10px 0 8px; }
+.bbi-trait-tab {
+  padding: 4px 9px;
+  border-radius: 999px;
+  border: 1px solid rgba(120, 120, 140, 0.28);
+  background: transparent;
+  color: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+.bbi-trait-tab.is-active { border-color: rgba(120, 150, 255, 0.7); background: rgba(120, 150, 255, 0.14); }
+.bbi-trait-count { margin-left: 4px; opacity: 0.65; }
+.bbi-trait-chips { display: flex; flex-wrap: wrap; gap: 6px; max-height: 220px; overflow: auto; }
+.bbi-trait-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 8px;
+  border-radius: 999px;
+  border: 1px solid rgba(120, 120, 140, 0.24);
+  background: rgba(255, 255, 255, 0.03);
+  color: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+.bbi-trait-chip.is-off { opacity: 0.42; text-decoration: line-through; }
+.bbi-trait-tag { opacity: 0.62; font-size: 11px; }
+.bbi-trait-x { opacity: 0.5; padding: 0 2px; }
+.bbi-trait-x:hover { opacity: 1; color: #d66; }
+.bbi-trait-add { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+.bbi-trait-add .bbi-input { flex: 1 1 160px; }
+.bbi-trait-preview {
+  white-space: pre-wrap;
+  font-size: 12px;
+  margin-top: 8px;
+  padding: 8px;
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.18);
 }
 </style>

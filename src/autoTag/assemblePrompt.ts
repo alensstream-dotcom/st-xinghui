@@ -1,5 +1,6 @@
 import type { ImageCharacterPrompt, ImageInsertion } from '@/autoTag/protocol';
 import type { CharTagEntry } from '@/state/charTags';
+import type { CharacterWardrobe, SlotWearStatus, WardrobeSlotKey } from '@/state/outfitState';
 import type { WorldAnchorConfig } from '@/state/worldAnchor';
 
 /**
@@ -233,45 +234,132 @@ export function proportionGuardrailsFor(text: string): string[] {
  * 明确告诉 NAI 别画衬衫和胸罩。以前靠五层状态机互相覆盖判断谁遮住谁，一旦判定
  * 写错就把人画回整套整齐着装；现在按「本帧已脱」直接压品类，判据少、翻车面小。
  */
-const REMOVED_RULES: Array<{ test: RegExp; words: string[]; lowerOnly?: boolean }> = [
-  {
-    test: /\b(?:outer|top|shirt|blouse|dress|robe|hanfu|coat|jacket|sweater|uniform|clothes)\b/,
-    words: ['shirt', 'blouse', 'dress', 'coat', 'robe', 'hanfu'],
-  },
-  {
-    test: /\b(?:bra|dudou|brassiere|bikini top)\b/,
-    words: ['bra', 'underwear', 'bikini top'],
-  },
-  {
-    test: /\b(?:bottom|skirt|pants|jeans|shorts|trousers)\b/,
-    words: ['skirt', 'pants', 'shorts'],
-    lowerOnly: true,
-  },
-  {
-    test: /\b(?:panties|underpants|knickers|underwear)\b/,
-    words: ['panties', 'underwear'],
-    lowerOnly: true,
-  },
-  {
-    test: /\b(?:hosiery|pantyhose|stockings|thighhighs|socks)\b/,
-    words: ['pantyhose', 'stockings', 'thighhighs', 'socks'],
-    lowerOnly: true,
-  },
-];
+/** 槽位全脱/不可见时压掉的同品类词。正面绝不写 `no bra` / `no panties`。 */
+const SLOT_NEGATIVES: Record<WardrobeSlotKey, string[]> = {
+  top: ['shirt', 'blouse', 'dress', 'coat', 'robe', 'hanfu'],
+  innerTop: ['bra', 'underwear', 'bikini top'],
+  bottom: ['skirt', 'pants', 'shorts'],
+  innerBottom: ['panties', 'underwear'],
+  legs: ['pantyhose', 'stockings', 'thighhighs', 'socks'],
+};
 
-export function buildRemovedNegatives(removed: string[], upperOnly: boolean): string[] {
-  const out: string[] = [];
-  for (const raw of removed) {
-    const key = raw.trim().toLowerCase();
-    if (!key) continue;
-    for (const rule of REMOVED_RULES) {
-      if (!rule.test.test(key)) continue;
-      // 上半身/面部特写拍不到下身，把裙裤丝袜写进负面反而会让 NAI 把腿挤进画面。
-      if (rule.lowerOnly && upperOnly) continue;
-      out.push(...rule.words);
+/** 连身长袍/连衣裙：没有单独下装记录时，下装状态跟着上装走。 */
+const ONEPIECE_GARMENT =
+  /\b(dress|gown|kimono|yukata|hanfu|robe|cheongsam|qipao|nightgown|bodysuit|leotard|swimsuit|onesie|jumpsuit)\b/i;
+
+export interface CompiledWardrobe {
+  positive: string[];
+  negatives: string[];
+}
+
+interface ResolvedSlot {
+  tag: string;
+  status: SlotWearStatus;
+  halfTag?: string;
+}
+
+/**
+ * 取某一帧某槽位的有效状态：装备表是基准，本帧 `wearState` 覆盖状态码。
+ * 状态码覆盖时一律沿用账本里的 `tag`——这正是「穿回不必重写衣服」的实现点。
+ */
+function resolveSlot(
+  wardrobe: CharacterWardrobe | undefined,
+  wearState: ImageCharacterPrompt['wearState'],
+  key: WardrobeSlotKey,
+): ResolvedSlot | null {
+  const base = wardrobe?.[key];
+  const override = wearState?.[key];
+  if (!base && !override) return null;
+  const status: SlotWearStatus = override?.status ?? base?.status ?? 'on';
+  const tag = (base?.tag ?? '').trim();
+  const halfTag = (override?.halfTag || base?.halfTag || '').trim();
+  if (!tag) return null;
+  return { tag, status, ...(halfTag ? { halfTag } : {}) };
+}
+
+/**
+ * 把装备表编译成这一帧的正向服饰词与角色级负面。
+ *
+ * 三条确定性规则（不含任何推断，输入只有「槽位 tag + 状态码」）：
+ * 1. 外装 `on` 时隐藏内衣——扣好的衬衫下面不该冒出 bra；
+ * 2. 外装 `half` 时自动释放内衣——敞开/撩起就看得见了；
+ * 3. 槽位 `off` 时压掉同品类词，而不是在正面写 `no bra` 这种反向声明。
+ */
+export function compileWardrobeForFrame(
+  wardrobe: CharacterWardrobe | undefined,
+  wearState: ImageCharacterPrompt['wearState'] = undefined,
+  upperOnly = false,
+): CompiledWardrobe {
+  const positive: string[] = [];
+  const negatives: string[] = [];
+  const push = (value: string | undefined) => {
+    if (value) positive.push(value);
+  };
+
+  const top = resolveSlot(wardrobe, wearState, 'top');
+  const innerTop = resolveSlot(wardrobe, wearState, 'innerTop');
+  const bottomRaw = resolveSlot(wardrobe, wearState, 'bottom');
+  const innerBottom = resolveSlot(wardrobe, wearState, 'innerBottom');
+  const legs = resolveSlot(wardrobe, wearState, 'legs');
+
+  // 上装
+  if (top?.status === 'on') {
+    push(top.tag);
+  } else if (top?.status === 'half') {
+    push(top.tag);
+    push(top.halfTag);
+  } else if (top?.status === 'off') {
+    negatives.push(...SLOT_NEGATIVES.top);
+  }
+
+  // 只有「确实有外装记录且不在原位」时才判定露出：完全没有装备记录时不该替模型
+  // 断言她裸着（首次出场还没建表，那一格由正文与导演的 outfit 决定）。
+  if (top && top.status !== 'on') {
+    if (innerTop?.status === 'on') {
+      push(innerTop.tag);
+    } else if (innerTop?.status === 'half') {
+      push(innerTop.tag);
+      push(innerTop.halfTag);
+    } else {
+      positive.push('bare breasts', 'nipples');
+      if (innerTop?.status === 'off') negatives.push(...SLOT_NEGATIVES.innerTop);
     }
   }
-  return dedupeTags(out);
+
+  if (upperOnly) return { positive: dedupeTags(positive), negatives: dedupeTags(negatives) };
+
+  // 下装（连身衣没有 bottom 记录时，状态跟着上装）
+  const bottom: ResolvedSlot | null =
+    bottomRaw ?? (top && ONEPIECE_GARMENT.test(top.tag) ? { tag: '', status: top.status } : null);
+  const bottomStatus = bottom?.status ?? null;
+  if (bottom?.tag && bottomStatus === 'on') {
+    push(bottom.tag);
+  } else if (bottom?.tag && bottomStatus === 'half') {
+    push(bottom.tag);
+    push(bottom.halfTag);
+  } else if (bottomStatus === 'off') {
+    negatives.push(...SLOT_NEGATIVES.bottom);
+  }
+
+  if ((bottom || innerBottom) && bottomStatus !== 'on') {
+    if (innerBottom?.status === 'on') {
+      push(innerBottom.tag);
+    } else if (innerBottom?.status === 'half') {
+      push(innerBottom.tag);
+      push(innerBottom.halfTag);
+    } else {
+      if (bottomStatus === 'off') positive.push('bottomless');
+      if (innerBottom?.status === 'off') negatives.push(...SLOT_NEGATIVES.innerBottom);
+    }
+  }
+
+  if (legs?.status === 'on') push(legs.tag);
+  else if (legs?.status === 'half') {
+    push(legs.tag);
+    push(legs.halfTag);
+  } else if (legs?.status === 'off') negatives.push(...SLOT_NEGATIVES.legs);
+
+  return { positive: dedupeTags(positive), negatives: dedupeTags(negatives) };
 }
 
 /**
@@ -288,16 +376,16 @@ function guardrailNegatives(world: WorldAnchorConfig | undefined, positive: stri
 }
 
 /**
- * 把导演通道挑出的这一格，编译成最终要发给 NAI 的插入内容。
+ * 把导演挑出的这一格编译成最终发给 NAI 的角色块。
  *
- * 顺序是固定的：固定外貌 → 导演给的 outfit（按景别过滤）→ 导演给的动作/表情/视线/标记。
- * uc = 导演 uc + 已脱类目负面 + 防漂移 + 世界观穿帮词 + 高低差比例词 + 同框他人特征。
- * 男角色只留导演给的动作与局部位置，不接外貌、不接 outfit。
- * 返回对象里不带 omitFeatures / outfit / removed——那都是一次性开关，序列化进正文只会变脏 tag。
+ * 顺序固定：固定外貌 → 本帧装备（按景别过滤）→ 导演的动作/表情/视线/标记。
+ * uc = 导演 uc + 装备负面 + 防漂移 + 世界观穿帮词 + 高低差比例词 + 同框他人特征。
+ * 男角色只留导演给的动作与局部位置，不接外貌、不接装备。
  */
 export function assembleImageCharacters(
   image: ImageInsertion,
   entriesAtPos: CharTagEntry[],
+  wardrobes: Map<string, CharacterWardrobe> = new Map(),
   world?: WorldAnchorConfig,
 ): ImageInsertion {
   const upperOnly = isUpperOnlyShot(image.tag);
@@ -323,9 +411,8 @@ export function assembleImageCharacters(
 
     const fixedTags = buildFixedAppearanceTags(entry, character.omitFeatures);
     const hasLibraryEntry = Boolean(entry?.fields.hair.trim() || entry?.fields.eyes.trim());
-
-    // 本帧穿着完全来自导演给的指纹；景别拍不到的部件先剔掉，否则半身构图会被塞进裙摆丝袜。
-    const outfitTags = splitTags(character.outfit ?? '').filter(tag => !(upperOnly && LOWER_ONLY.test(tag)));
+    const compiled = compileWardrobeForFrame(wardrobes.get(character.name), character.wearState, upperOnly);
+    const outfitTags = compiled.positive.filter(tag => !(upperOnly && LOWER_ONLY.test(tag)));
     const directorTags = stripLeakedAppearance(dropLocalizedMarkers(splitTags(character.tag)), hasLibraryEntry);
 
     const mergedPositive = dedupeTags([...fixedTags, ...outfitTags, ...directorTags])
@@ -335,7 +422,7 @@ export function assembleImageCharacters(
 
     const negativeParts = [
       ...splitTags(character.uc ?? ''),
-      ...buildRemovedNegatives(character.removed ?? [], upperOnly),
+      ...compiled.negatives,
       ...buildSelfAntiDriftNegative(entry),
       ...guardrailNegatives(world, visiblePositive),
       ...(heightGap ? PROPORTION_GUARDRAILS : []),

@@ -1,228 +1,105 @@
 import { describe, expect, it } from 'vitest';
 
-import {
-  buildDirectorSystemPrompt,
-  buildStateSyncMessages,
-  buildUsedTraitsSummary,
-  directorReferenceBlocks,
-  stateSyncSystemPrompt,
-} from '@/autoTag/prompt';
-import type { PreparedTargetText } from '@/autoTag/clean';
-import type { STContext } from '@/st/context';
-import type { AutoTagSettings } from '@/state/settings';
-import { WORLD_PRESETS, defaultWorldAnchor } from '@/state/worldAnchor';
-import { emptyCharFields, type CharTagEntry } from '@/state/charTags';
+import { buildUsedTraitsSummary, unifiedSystemPrompt } from './prompt';
+import { defaultWorldAnchor } from '@/state/worldAnchor';
+import type { CharTagEntry } from '@/state/charTags';
 
-/**
- * 五条防偏见硬规则是「出图违和」的历史修复总结：情绪戏画成呆看镜头、递枪被画成枪口对人、
- * 主被动写反、男方接触点留空、白天画成霓虹夜。文字型提示词没法断言语义，只锁关键判据。
- */
-describe('导演通道硬规则', () => {
-  const text = buildDirectorSystemPrompt(true, 1, 3);
+const world = defaultWorldAnchor();
+const prompt = unifiedSystemPrompt(world, true, 1, 3);
 
-  it('强情绪必须落地物理表现，禁止看镜头摆拍', () => {
-    expect(text).toContain('burying face in chest');
-    expect(text).toContain('trembling');
-    expect(text).toContain('反「看镜头摆拍」');
-    expect(text).toContain('严禁写 "looking at viewer"');
+describe('单通道系统提示词', () => {
+  it('一份 JSON 出全部：世界观、跨楼判定、建档、装备变化、图片', () => {
+    expect(prompt).toContain('{"worldPreset":"modern","timeJump":"same_day","changes":[...],"wardrobeUpdates":[...]');
+    expect(prompt).toContain('规则 4（装备表 wardrobeUpdates）');
+    expect(prompt).toContain('规则 5（timeJump 跨楼判定）');
+    expect(prompt).toContain('规则 8（选帧');
   });
 
-  it('递交物品要写安全握持', () => {
-    expect(text).toContain('offering handgun on open palm');
-    expect(text).toContain('holding gun by barrel');
-    expect(text).toContain('严禁写 "pointing"');
+  it('禁止 <thinking>，要求直接输出 JSON', () => {
+    expect(prompt).toContain('不要写 <thinking>');
+    expect(prompt).not.toContain('<thinking> 示例');
   });
 
-  it('source#/target# 只放短动作词，不许长句/人名/中文', () => {
-    expect(text).toContain('谁施动写 source');
-    expect(text).toContain('1～3 词简短英文标准动词');
-    expect(text).toContain('严禁塞长句、人名或中文');
+  it('世界观块注入，且点名这个世界观的防穿帮单品', () => {
+    expect(prompt).toContain('【本聊天世界观】');
+    expect(prompt).toContain(world.label);
   });
 
-  it('男角色块必须补齐手部位置与 nl', () => {
-    expect(text).toContain('hand on her hip');
-    expect(text).toContain('与女方动作完全闭合');
-    expect(text).toContain('source#holding her wrists');
+  it('选帧保留 S/A/B/C 分级与一姿势一图红线', () => {
+    expect(prompt).toContain('S 级');
+    expect(prompt).toContain('峰值帧');
+    expect(prompt).toContain('一姿势一图');
   });
 
-  it('光线与景别必须对齐正文，不许白天画成霓虹夜', () => {
-    expect(text).toContain('光线、时间与景别严格对齐正文');
-    expect(text).toContain('严禁把白天画成霓虹夜景');
+  it('装备表三条确定性规则写清楚（穿回只回 on / half 必配 halfTag / 连身不补下装）', () => {
+    expect(prompt).toContain('patch 里给 status:"on" 且省略 tag，就等于「穿回原来那件」');
+    expect(prompt).toContain('half 必须配 halfTag');
+    expect(prompt).toContain('连身服饰');
+    expect(prompt).toContain('肚兜→"red halterneck camisole');
   });
 
-  it('注入世界观时带上角色边界与防穿帮负面', () => {
-    const world = { ...WORLD_PRESETS.chinese_ancient, lockedByUser: true };
-    const withWorld = buildDirectorSystemPrompt(true, 1, 3, world);
-    expect(withWorld).toContain('【本聊天世界观】');
-    expect(withWorld).toContain('中式古风');
-    expect(withWorld).toContain('jeans, sneakers');
-    expect(withWorld).toContain('绝不能出现的单品');
+  it('同日严禁 replace、隔天主动 replace', () => {
+    expect(prompt).toContain('"same_day"');
+    expect(prompt).toContain('严禁发 mode:"replace"');
+    expect(prompt).toContain('"new_day"');
   });
 
-  it('不注入世界观时不留空的占位段', () => {
-    expect(text).not.toContain('【本聊天世界观】');
-  });
-});
-describe('世界观示例不能倒灌现代单品', () => {
-  const ancient = {
-    ...defaultWorldAnchor(),
-    ...WORLD_PRESETS.chinese_ancient,
-    presetId: 'chinese_ancient' as const,
-    lockedByUser: true,
-  };
-
-  it('chinese_ancient 的穿搭示例不出现现代单品（示例只用汉服）', () => {
-    const text = stateSyncSystemPrompt(ancient);
-    // 只看「结楼穿搭示例」那一行 JSON：规则正文允许「正文写了黑丝就照写」，那不是示例倒灌。
-    const exampleLine = text.split('\n').find(line => line.includes('"wearing"')) ?? '';
-    expect(exampleLine).toContain('traditional hanfu');
-    expect(exampleLine).not.toContain('pantyhose');
-    expect(exampleLine).not.toContain('skirt');
-    expect(text).toContain('plain white traditional hanfu');
+  it('导演禁写清单包含人数、发色、瞳色、体型与服装词', () => {
+    expect(prompt).toContain('characters[].tag 绝对禁止出现');
+    expect(prompt).toContain('1girl / girl');
+    expect(prompt).toContain('hair / bangs / ponytail');
+    expect(prompt).toContain('eyes / tsurime / tareme');
   });
 
-  it('modern 的穿搭示例用的是现代素服', () => {
-    const text = stateSyncSystemPrompt({ ...defaultWorldAnchor(), presetId: 'modern', lockedByUser: true });
-    const exampleLine = text.split('\n').find(line => line.includes('"wearing"')) ?? '';
-    expect(exampleLine).toContain('collared blouse');
+  it('标记规则：主宾写对、只接 1～3 词英文动作、成对绑定', () => {
+    expect(prompt).toContain('source#<英文动作>');
+    expect(prompt).toContain('1～3 词英文动作词');
   });
 
-  it('状态表规则明确：连身长袍不得凭空补下装，正文写的优先于世界观', () => {
-    const text = stateSyncSystemPrompt(ancient);
-    expect(text).toContain('连身服饰不凭空补下装');
-    expect(text).toContain('正文写的优先于世界观默认');
-    expect(text).toContain('wearing 里不许出现 skirt / pants / shorts / pantyhose / stockings');
+  it('五条防偏见规则齐全（握持 / 情绪物理化 / 双方闭合 / 标记 / 光线景别）', () => {
+    expect(prompt).toContain('递交物品非攻击握持');
+    expect(prompt).toContain('强情绪物理化');
+    expect(prompt).toContain('双人互动双方闭合');
+    expect(prompt).toContain('高低差互动');
+  });
+
+  it('景别与机位规则保留（pov 与第三人称互斥、轮换）', () => {
+    expect(prompt).toContain('pov 优先');
+    expect(prompt).toContain('连续两张或跨楼同体位必须轮换机位与景别');
+  });
+
+  it('omitFeatures 只管配饰，禁摘身份字段', () => {
+    expect(prompt).toContain('omitFeatures 只用于本帧临时摘下或看不见的**配饰**');
+    expect(prompt).toContain('严禁把 hair / eyes / skin / body 放进去');
+  });
+
+  it('nl 与装备一致，不另写衣物款式', () => {
+    expect(prompt).toContain('除非正文这一格明确写了穿脱动作，否则不要另写衣服款式与颜色');
   });
 });
 
-describe('导演通道：omitFeatures 与 pov 口径', () => {
-  const text = buildDirectorSystemPrompt(true, 1, 3);
+describe('buildUsedTraitsSummary', () => {
+  function entry(name: string, hair: string, eyes: string, extra = ''): CharTagEntry {
+    return {
+      name,
+      fields: { sex: '1girl', hair, eyes, skin: 'fair skin', body: 'petite', extra, outfit: '', fandom: '' },
+      raw: '',
+    } as CharTagEntry;
+  }
 
-  it('omitFeatures 只许摘配饰，严禁摘 hair/eyes/skin/body', () => {
-    expect(text).toContain('只用于本帧临时摘下或看不见的**配饰**');
-    expect(text).toContain('严禁把 hair / eyes / skin / body 放进去');
-    expect(text).not.toContain('只拍下半身就写 ["hair","eyes","skin","body"]');
-  });
-
-  it('pov 与男主入镜互斥', () => {
-    expect(text).toContain('pov 与男主入镜互斥');
-    expect(text).toContain('严禁写 pov');
-  });
-
-  it('S 级把挑逗/支配与显式动作并列', () => {
-    expect(text).toContain('高张力暧昧挑逗与支配 / 服从、强肢体拉扯');
-    expect(text).toContain('这两类不许互相让位');
-  });
-
-  it('一姿势一图红线与节拍均衡', () => {
-    expect(text).toContain('一姿势一图红线');
-    expect(text).toContain('节拍均衡');
-  });
-});
-
-function charEntry(name: string, fields: Partial<Record<string, string>>): CharTagEntry {
-  return { name, fields: { ...emptyCharFields(), ...fields }, raw: '', nl: '', source: 'manual', desc: '', history: [] };
-}
-
-describe('防撞脸：高频占用统计', () => {
-  it('统计出 ≥2 次的发色 / 发型 / 配饰，并忽略男性条目', () => {
+  it('≥2 次的发色/发型/瞳色/配饰列为高频占用', () => {
     const summary = buildUsedTraitsSummary([
-      charEntry('甲', { sex: '1girl', hair: 'long black hair, hair down, blunt bangs', eyes: 'brown eyes, tareme', extra: 'forehead mark, earrings' }),
-      charEntry('乙', { sex: '1girl', hair: 'long black hair, hair down, parted bangs', eyes: 'brown eyes, tsurime', extra: 'forehead mark, choker' }),
-      charEntry('丙', { sex: '1girl', hair: 'silver hair, twin braids', eyes: 'blue eyes, tareme', extra: 'earrings' }),
-      charEntry('男主', { sex: '1boy', hair: 'black hair, short hair', eyes: 'brown eyes', extra: 'glasses' }),
+      entry('甲', 'long black hair, straight hair, hair down', 'brown eyes, tareme', 'silver hairpin'),
+      entry('乙', 'long black hair, twintails', 'brown eyes, tsurime', 'silver hairpin'),
     ]);
-    // 发色按颜色归一：'long black hair' 与 'black hair' 都要归到 black hair，否则重复被拆成两个 key 漏报
-    expect(summary).toContain('black hair×2');
-    expect(summary).toContain('long hair×2');
-    expect(summary).toContain('hair down×2');
-    expect(summary).toContain('brown eyes×2');
-    expect(summary).toContain('earrings×2');
-    expect(summary).toContain('forehead mark×2');
-    expect(summary).not.toContain('black hair×3');
+    expect(summary).toContain('black hair(2)');
+    expect(summary).toContain('long hair(2)');
+    expect(summary).toContain('brown eyes(2)');
+    expect(summary).toContain('silver hairpin(2)');
   });
 
-  it('没有重复时不瞎编，给出明确的空状态', () => {
-    const summary = buildUsedTraitsSummary([charEntry('甲', { sex: '1girl', hair: 'long black hair', eyes: 'brown eyes, tareme', extra: 'mole under eye' })]);
-    expect(summary).toContain('暂无高频占用');
-  });
-});
-
-describe('导演只读参考块', () => {
-  it('把服装快照以只读块附进去，并声明不许重写衣服', () => {
-    const block = directorReferenceBlocks('温岚｜outer: white silk taoist robe, worn', '入画角色：温岚｜Base：1girl, bedroom');
-    expect(block).toContain('【上一楼结尾穿搭指纹');
-    expect(block).toContain('无换装/穿脱时请原样沿用');
-    expect(block).toContain('white silk taoist robe');
-    expect(block).toContain('【上一张图】');
-  });
-
-  it('没有快照也没有上一张图时返回空串（不产生空标题）', () => {
-    expect(directorReferenceBlocks('  ', '')).toBe('');
-  });
-});
-
-describe('导演通道：外貌/服装禁写与比例防畸变', () => {
-  const text = buildDirectorSystemPrompt(true, 1, 3);
-
-  it('明写 characters[].tag 禁止出现人数词/发色/瞳色/体型/服装', () => {
-    expect(text).toContain('绝对禁止出现');
-    expect(text).toContain('性别人数词');
-    expect(text).toContain('任何服装词');
-    expect(text).toContain('tag 里写了也会被剥掉');
-    // 服装不再是「禁写」，而是「写在 outfit 字段里」：口径换成了当帧事实，不能倒退回硬拼。
-    expect(text).toContain('characters[].outfit');
-    expect(text).toContain('characters[].removed');
-  });
-
-  it('高低差互动禁仰拍', () => {
-    expect(text).toContain('高低差禁仰拍');
-    expect(text).toContain('严禁用 from below / low angle 仰拍');
-  });
-
-  it('状态表提示词要求 body 只写 2～3 个精准核心词', () => {
-    const sync = stateSyncSystemPrompt({ ...defaultWorldAnchor(), presetId: 'modern', lockedByUser: true });
-    expect(sync).toContain('body 只写 2～3 个精准核心词');
-    expect(sync).toContain('不要默认加 "tall female" 与 "long legs"');
-    expect(sync).toContain('已高频占用的特征');
-  });
-});
-
-describe('双通道上下文承接', () => {
-  it('状态表与导演的 user 消息都带上上一楼原文（否则只看本楼，穿脱与体位接不上）', async () => {
-    const context = {
-      chat: [
-        { name: '用户', is_user: true, is_system: false, mes: '开场。' },
-        { name: '温岚', is_user: false, is_system: false, mes: '上一楼：她解开衬衫扣子，坐到他腿上。' },
-        { name: '用户', is_user: true, is_system: false, mes: '本楼提问。' },
-        { name: '温岚', is_user: false, is_system: false, mes: '本楼正文。' },
-      ],
-      chatMetadata: {},
-      name1: '用户',
-      name2: '温岚',
-      getCurrentChatId: () => 'chat-1',
-      getRequestHeaders: () => ({}),
-      saveMetadataDebounced: () => {},
-      saveChat: async () => {},
-    } as unknown as STContext;
-    const messages = await buildStateSyncMessages({
-      context,
-      targetFloor: 3,
-      options: { contextMessages: 4 } as unknown as AutoTagSettings,
-      preparedTarget: { promptText: '本楼正文。', segments: [] } as unknown as PreparedTargetText,
-      memoryText: '',
-      libraryBlock: '',
-      outfitSnapshot: '',
-      nlOn: true,
-      minImages: 1,
-      maxImages: 2,
-      world: defaultWorldAnchor(),
-    });
-    const user = String(messages[messages.length - 1].content);
-    expect(user).toContain('上一楼及之前的上下文');
-    expect(user).toContain('她解开衬衫扣子');
-    expect(user).toContain('本楼正文');
-    // 上一楼在前、目标正文在后：模型是从上往下读的
-    expect(user.indexOf('她解开衬衫扣子')).toBeLessThan(user.indexOf('目标正文'));
+  it('只出现一次的不算高频，空库给提示语', () => {
+    expect(buildUsedTraitsSummary([entry('甲', 'pink hair', 'blue eyes')])).toContain('暂无高频占用');
+    expect(buildUsedTraitsSummary([])).toContain('暂无高频占用');
   });
 });

@@ -5,6 +5,7 @@ import type { CharTagEntry, CharTagField } from '@/state/charTags';
 import { readBookMemory } from './bookMemory';
 import { cleanHistoryText } from './clean';
 import { defaultWorldAnchor, readWorldAnchor, worldAnchorBlock, type WorldAnchorConfig } from '@/state/worldAnchor';
+import { traitCandidateBlock } from '@/state/traitPool';
 
 /** 重Roll 只覆盖这五个固定外貌字段;sex/outfit/fandom/raw/nl 不在其中。 */
 export const REROLL_FIELDS = ['hair', 'eyes', 'skin', 'body', 'extra'] as const;
@@ -118,6 +119,11 @@ export function buildRerollMessages(request: RerollRequest, excerpts = ''): Chat
   const body = [
     `【目标角色】${name}`,
     `【本聊天世界观（外貌与饰品不得越界）】\n${worldAnchorBlock(world)}`,
+    traitCandidateBlock(
+      world.presetId,
+      [...request.otherEntries, ...(request.currentEntry ? [request.currentEntry] : [])],
+      3,
+    ),
     describeEntry('【旧外貌（用户不满意,需要在未写死的维度上明显改掉）】', currentEntry),
     others ? `【同聊天其他角色（必须错开 3 项）】\n${others}` : '',
     memory ? `【星绘书角色参考】\n${clamp(memory, 1200)}` : '',

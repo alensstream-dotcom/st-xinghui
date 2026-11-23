@@ -2,241 +2,222 @@ import { describe, expect, it } from 'vitest';
 
 import {
   assembleImageCharacters,
-  buildRemovedNegatives,
-  proportionGuardrailsFor,
+  compileWardrobeForFrame,
   stripLeakedAppearance,
-} from '@/autoTag/assemblePrompt';
+} from './assemblePrompt';
+import type { CharacterWardrobe } from '@/state/outfitState';
 import type { CharTagEntry } from '@/state/charTags';
-import type { ImageInsertion } from '@/autoTag/protocol';
-import { defaultWorldAnchor, WORLD_PRESETS, type WorldAnchorConfig } from '@/state/worldAnchor';
+import type { ImageInsertion } from './protocol';
+import { defaultWorldAnchor } from '@/state/worldAnchor';
 
 function entry(name: string, fields: Partial<CharTagEntry['fields']> = {}): CharTagEntry {
   return {
     name,
     fields: {
-      fandom: '',
       sex: '1girl',
-      hair: 'long black hair, straight hair',
-      eyes: 'brown eyes, tsurime',
-      skin: 'pale skin',
-      body: 'slender',
-      extra: '',
+      hair: 'long black hair, straight hair, hair down, blunt bangs',
+      eyes: 'brown eyes, tareme',
+      skin: 'fair skin',
+      body: 'petite, medium breasts',
+      extra: 'silver hairpin, mole under eye',
       outfit: '',
+      fandom: '',
       ...fields,
     },
     raw: '',
-    nl: '',
-    source: 'manual',
-    desc: '',
-    history: [],
-  };
+  } as CharTagEntry;
 }
 
-function image(tag: string, characters: ImageInsertion['characters']): ImageInsertion {
-  return { position: 'P1', sourceLine: 0, tag, nl: '', negative: '', characters, size: 'portrait' };
+function wardrobe(name: string, slots: Partial<Record<keyof CharacterWardrobe, { tag: string; status: 'on' | 'half' | 'off'; halfTag?: string }>>): CharacterWardrobe {
+  return { name, ...slots } as CharacterWardrobe;
 }
 
-const ancient: WorldAnchorConfig = {
-  ...defaultWorldAnchor(),
-  ...WORLD_PRESETS.chinese_ancient,
-  presetId: 'chinese_ancient',
-  lockedByUser: true,
-};
-
-describe('stripLeakedAppearance:只剥身份词,不碰服装', () => {
-  it('已建档女角:人数/发色/发型/瞳色/体型全剥,动作与标记留下', () => {
-    const tags = ['1girl', 'blue eyes', 'large breasts', 'white dress', 'source#licking', 'blush', 'kneeling'];
-    expect(stripLeakedAppearance(tags, true)).toEqual(['white dress', 'source#licking', 'blush', 'kneeling']);
+describe('compileWardrobeForFrame', () => {
+  it('外装穿着时隐藏内衣（扣好的衬衫下面不该冒出 bra）', () => {
+    const compiled = compileWardrobeForFrame(
+      wardrobe('温岚', {
+        top: { tag: 'white cotton shirt, long sleeves', status: 'on' },
+        innerTop: { tag: 'pink cotton bra', status: 'on' },
+      }),
+    );
+    expect(compiled.positive).toContain('white cotton shirt, long sleeves');
+    expect(compiled.positive).not.toContain('pink cotton bra');
+    expect(compiled.negatives).toEqual([]);
   });
 
-  it('未建档时身份词原样保留(这一格全靠导演写),标记与接触动作永不误伤', () => {
-    const tags = ['1girl', 'hand in hair', 'holding her hair', 'mutual#kissing'];
-    expect(stripLeakedAppearance(tags, false)).toEqual(['1girl', 'hand in hair', 'holding her hair', 'mutual#kissing']);
+  it('外装半脱时释放内衣并带上半脱形态', () => {
+    const compiled = compileWardrobeForFrame(
+      wardrobe('温岚', {
+        top: { tag: 'white cotton shirt, long sleeves', status: 'half', halfTag: 'open front' },
+        innerTop: { tag: 'pink cotton bra', status: 'on' },
+      }),
+    );
+    expect(compiled.positive).toEqual(
+      expect.arrayContaining(['white cotton shirt, long sleeves', 'open front', 'pink cotton bra']),
+    );
+  });
+
+  it('外装与内衣都脱掉时露胸，并把品类压进负面（不写 no bra）', () => {
+    const compiled = compileWardrobeForFrame(
+      wardrobe('温岚', {
+        top: { tag: 'white cotton shirt, long sleeves', status: 'off' },
+        innerTop: { tag: 'pink cotton bra', status: 'off' },
+      }),
+    );
+    expect(compiled.positive).toEqual(expect.arrayContaining(['bare breasts', 'nipples']));
+    expect(compiled.negatives).toEqual(expect.arrayContaining(['shirt', 'blouse', 'bra', 'underwear']));
+    expect(compiled.positive.join(', ')).not.toContain('no bra');
+  });
+
+  it('下装脱掉时加 bottomless 并压裙裤词；半身构图不输出下身词', () => {
+    const full = compileWardrobeForFrame(
+      wardrobe('温岚', {
+        top: { tag: 'white shirt', status: 'on' },
+        bottom: { tag: 'blue jeans', status: 'off' },
+      }),
+    );
+    expect(full.positive).toContain('bottomless');
+    expect(full.negatives).toEqual(expect.arrayContaining(['skirt', 'pants', 'shorts']));
+
+    const upper = compileWardrobeForFrame(
+      wardrobe('温岚', {
+        top: { tag: 'white shirt', status: 'on' },
+        bottom: { tag: 'blue jeans', status: 'off' },
+      }),
+      undefined,
+      true,
+    );
+    expect(upper.positive).not.toContain('bottomless');
+    expect(upper.negatives).not.toContain('skirt');
+  });
+
+  it('连身长袍没有下装记录时，下装状态跟着上装走', () => {
+    const compiled = compileWardrobeForFrame(
+      wardrobe('顾子衿', {
+        top: { tag: 'plain white silk taoist robe, cross-collar, ankle-length', status: 'off' },
+      }),
+    );
+    expect(compiled.positive).not.toContain('plain white silk taoist robe, cross-collar, ankle-length');
+    expect(compiled.negatives).toEqual(expect.arrayContaining(['robe', 'hanfu']));
+  });
+
+  it('wearState 当帧覆盖槽位状态，但装备描述沿用账本', () => {
+    const compiled = compileWardrobeForFrame(
+      wardrobe('温岚', {
+        top: { tag: 'white cotton shirt, long sleeves', status: 'on' },
+        innerTop: { tag: 'pink cotton bra', status: 'on' },
+      }),
+      { top: { status: 'half', halfTag: 'shirt lifted above chest' } },
+    );
+    expect(compiled.positive).toContain('white cotton shirt, long sleeves');
+    expect(compiled.positive).toContain('shirt lifted above chest');
+    expect(compiled.positive).toContain('pink cotton bra');
   });
 });
 
-describe('buildRemovedNegatives:谁真的脱了,就把品类压进这个角色的负面', () => {
-  it('胸罩脱掉压 bra/underwear,下装脱掉压裙裤(仅限非上半身特写)', () => {
-    expect(buildRemovedNegatives(['bra'], false)).toEqual(['bra', 'underwear', 'bikini top']);
-    expect(buildRemovedNegatives(['bottom'], false)).toEqual(['skirt', 'pants', 'shorts']);
-    expect(buildRemovedNegatives(['bottom'], true)).toEqual([]);
+describe('stripLeakedAppearance', () => {
+  it('剥掉导演偷塞的人数、发色瞳色与体型词，保留动作与标记', () => {
+    const kept = stripLeakedAppearance(
+      ['1girl', 'blue eyes', 'blonde hair', 'large breasts', 'blush', 'looking at viewer', 'source#holding her wrist'],
+      true,
+    );
+    expect(kept).toEqual(['blush', 'looking at viewer', 'source#holding her wrist']);
   });
 
-  it('外衣脱掉按外衣类压,不会顺手把内裤也压掉', () => {
-    expect(buildRemovedNegatives(['outer'], false)).toEqual(['shirt', 'blouse', 'dress', 'coat', 'robe', 'hanfu']);
-    expect(buildRemovedNegatives(['hosiery'], false)).toEqual(['pantyhose', 'stockings', 'thighhighs', 'socks']);
+  it('不剥服装词（服装由装备表决定，导演这一格写的 outfit 也要保留）', () => {
+    const kept = stripLeakedAppearance(['white shirt', 'open front', 'blush'], true);
+    expect(kept).toEqual(['white shirt', 'open front', 'blush']);
+  });
+
+  it('接触短语（hand in hair）不会被当成发色词剥掉', () => {
+    const kept = stripLeakedAppearance(['hand in hair', 'holding her hair', 'blush'], true);
+    expect(kept).toEqual(['hand in hair', 'holding her hair', 'blush']);
   });
 });
 
-describe('导演当帧穿脱编译', () => {
-  it('顺序是固定外貌 → 导演 outfit → 导演动作词,标记词必须留下', () => {
-    const out = assembleImageCharacters(
-      image('1girl, cowboy shot, bedroom, from front', [
-        { name: '温岚', tag: 'blush, source#licking nipple, kneeling', nl: 'She kneels and looks up.', outfit: 'white shirt, jeans', uc: '' },
-      ]),
-      [entry('温岚')],
-    );
-    const got = out.characters[0].tag.split(', ');
-    expect(got.slice(0, 7)).toEqual(['girl', 'long black hair', 'straight hair', 'brown eyes', 'tsurime', 'pale skin', 'slender']);
-    expect(out.characters[0].tag).toContain('white shirt, jeans');
-    expect(out.characters[0].tag).toContain('source#licking nipple');
-    expect(out.characters[0].tag).toContain('blush');
-  });
+describe('assembleImageCharacters', () => {
+  const world = defaultWorldAnchor();
 
-  it('导演偷塞的发色/人数/体型被剥掉,但服装照他的 outfit 走', () => {
-    const out = assembleImageCharacters(
-      image('cowboy shot, bedroom', [
-        { name: '温岚', tag: '1girl, blue eyes, large breasts, white dress, blush', nl: '', outfit: 'red hanfu, long sleeves', uc: '' },
-      ]),
-      [entry('温岚')],
-    );
-    const tag = out.characters[0].tag;
-    expect(tag).not.toContain('1girl');
-    expect(tag).not.toContain('blue eyes');
-    expect(tag).not.toContain('large breasts');
-    expect(tag).toContain('red hanfu, long sleeves');
-    expect(tag).toContain('blush');
-  });
-
-  it('违规当帧由导演给的 removed 决定:胸罩脱了就压 bra,下装还在就不压裙子', () => {
-    const out = assembleImageCharacters(
-      image('full body, bedroom', [
-        { name: '温岚', tag: 'blush', nl: '', outfit: 'white shirt, jeans', removed: ['bra'], uc: '' },
-      ]),
-      [entry('温岚')],
-    );
-    expect(out.characters[0].uc).toContain('bra, underwear, bikini top');
-    expect(out.characters[0].uc).not.toContain('skirt');
-  });
-
-  it('上半身特写里下装词先被剔掉,腿与鞋也不再冒出来', () => {
-    const out = assembleImageCharacters(
-      image('upper body, close-up, bedroom', [
-        { name: '温岚', tag: 'blush', nl: '', outfit: 'white shirt, pleated skirt, sheer black pantyhose, leather loafers', uc: '' },
-      ]),
-      [entry('温岚')],
-    );
-    const tag = out.characters[0].tag;
-    expect(tag).toContain('white shirt');
-    expect(tag).not.toContain('skirt');
-    expect(tag).not.toContain('pantyhose');
-    expect(tag).not.toContain('loafers');
-  });
-
-  it('cowboy shot 只压鞋,丝袜本身保留', () => {
-    const out = assembleImageCharacters(
-      image('cowboy shot, bedroom', [
-        { name: '温岚', tag: 'blush', nl: '', outfit: 'white shirt, jeans, sheer black pantyhose, black loafers', uc: '' },
-      ]),
-      [entry('温岚')],
-    );
-    expect(out.characters[0].tag).toContain('sheer black pantyhose');
-    expect(out.characters[0].tag).not.toContain('loafers');
-  });
-
-  it('男角色跳过外貌与服装,只留导演给的 boy 与局部动作', () => {
-    const out = assembleImageCharacters(
-      image('1girl, 1boy, bedroom', [
-        { name: '温岚', tag: 'blush', nl: '', outfit: 'white shirt', uc: '' },
-        { name: '李斌', tag: '1boy, faceless male, hand on her waist', nl: '', outfit: 'black shirt', uc: '' },
-      ]),
-      [entry('温岚'), entry('李斌', { sex: '1boy', hair: 'short black hair' })],
-    );
-    expect(out.characters[1].tag).toBe('1boy, faceless male, hand on her waist');
-    expect(out.characters[1].tag).not.toContain('black shirt');
-    expect(out.characters[1].tag).not.toContain('short black hair');
-  });
-
-  it('omitFeatures 只摘配饰,摘不到发型瞳色;结果里不留临时字段', () => {
-    const out = assembleImageCharacters(
-      image('cowboy shot', [
-        { name: '温岚', tag: 'blush', nl: '', outfit: 'white shirt', omitFeatures: ['glasses', 'hair'], uc: '' },
-      ]),
-      [entry('温岚', { extra: 'glasses, hairpin' })],
-    );
-    const tag = out.characters[0].tag;
-    expect(tag).not.toContain('glasses');
-    expect(tag).toContain('hairpin');
-    expect(tag).toContain('long black hair');
-    expect('omitFeatures' in out.characters[0]).toBe(false);
-  });
-
-  it('多人同框防串色:各自 uc 含对方标志特征,不含自己的', () => {
-    const out = assembleImageCharacters(
-      image('2girls, bedroom', [
-        { name: '温岚', tag: 'blush', nl: '', outfit: 'white shirt', uc: '' },
-        { name: '顾子衿', tag: 'blush', nl: '', outfit: 'hanfu', uc: '' },
-      ]),
-      [
-        entry('温岚', { hair: 'long black hair, high ponytail', extra: 'hairpin' }),
-        entry('顾子衿', { hair: 'silver hair, low bun', extra: 'glasses' }),
+  function image(overrides: Partial<ImageInsertion> = {}): ImageInsertion {
+    return {
+      position: 'P4',
+      sourceLine: 3,
+      tag: '1girl, 1boy, bedroom, pov, from above, cowboy shot, dim lighting',
+      nl: '',
+      negative: '',
+      size: 'portrait',
+      characters: [
+        {
+          name: '温岚',
+          tag: '1girl, blonde hair, blue eyes, large breasts, white dress, blush, source#lifting her robe',
+          nl: 'She leans back.',
+        },
+        {
+          name: '李斌',
+          tag: '1boy, faceless male, hand on her waist, target#lifting her robe',
+          nl: 'He pulls her close.',
+        },
       ],
-    );
-    expect(out.characters[0].uc).toContain('glasses');
-    expect(out.characters[1].uc).toContain('high ponytail');
-    expect(out.characters[1].uc).not.toContain('low bun');
-  });
-});
+      ...overrides,
+    } as ImageInsertion;
+  }
 
-describe('比例防畸变与世界观防穿帮', () => {
-  it('站着 + 跪着的高低差画面给角色负面补比例词,没有高低差不乱加', () => {
-    expect(proportionGuardrailsFor('standing girl, kneeling man, bedroom')).toEqual([
-      'giantess',
-      'size difference',
-      'miniature',
+  it('固定外貌在前、装备居中、导演动作在后；导演偷塞的身份词被剥掉', () => {
+    const wardrobes = new Map<string, CharacterWardrobe>([
+      ['温岚', wardrobe('温岚', { top: { tag: 'white cotton blouse, long sleeves', status: 'on' } })],
     ]);
-    expect(proportionGuardrailsFor('two girls sitting on a couch')).toEqual([]);
+    const result = assembleImageCharacters(image(), [entry('温岚'), entry('李斌', { sex: '1boy' })], wardrobes, world);
+    const woman = result.characters[0];
+    const tags = woman.tag.split(', ');
+    expect(tags.slice(0, 4)).toEqual(['girl', 'long black hair', 'straight hair', 'hair down']);
+    expect(woman.tag).toContain('white cotton blouse, long sleeves');
+    expect(woman.tag).toContain('blush');
+    expect(woman.tag).toContain('source#lifting her robe');
+    expect(woman.tag).not.toContain('blonde hair');
+    expect(woman.tag).not.toContain('large breasts');
+    expect(woman.tag).not.toContain('1girl');
   });
 
-  it('高低差命中时,uc 里真的带上比例词', () => {
-    const out = assembleImageCharacters(
-      image('full body, standing, bedroom', [
-        { name: '温岚', tag: 'standing, blush', nl: '', outfit: 'white shirt', uc: '' },
-        { name: '李斌', tag: 'kneeling, hand on her waist', nl: '', outfit: '', uc: '' },
-      ]),
-      [entry('温岚'), entry('李斌', { sex: '1boy' })],
-    );
-    expect(out.characters[0].uc).toContain('size difference');
+  it('男角色只留导演给的动作，不接外貌与装备', () => {
+    const wardrobes = new Map<string, CharacterWardrobe>([
+      ['温岚', wardrobe('温岚', { top: { tag: 'white cotton blouse', status: 'on' } })],
+    ]);
+    const result = assembleImageCharacters(image(), [entry('温岚'), entry('李斌', { sex: '1boy' })], wardrobes, world);
+    const man = result.characters[1];
+    expect(man.tag).toBe('1boy, faceless male, hand on her waist, target#lifting her robe');
+    expect(man.tag).not.toContain('blouse');
   });
 
-  it('古风世界观把现代单品压进负面,但正文已经写上的汉服不压', () => {
-    const out = assembleImageCharacters(
-      image('full body, ancient room', [
-        { name: '顾子衿', tag: 'blush', nl: '', outfit: 'white traditional hanfu, wide long sleeves', uc: '' },
-      ]),
-      [entry('顾子衿')],
-      ancient,
-    );
-    // 正文没写的现代单品全压进负面（汉服已经在正向里，所以不会被压）
-    expect(out.characters[0].uc).toContain('jeans');
-    expect(out.characters[0].uc).toContain('modern building');
-    expect(out.characters[0].uc).not.toContain('hanfu');
-    expect(out.characters[0].tag).toContain('white traditional hanfu');
+  it('内衣脱掉时 uc 里出现 bra/underwear 负面', () => {
+    const wardrobes = new Map<string, CharacterWardrobe>([
+      [
+        '温岚',
+        wardrobe('温岚', {
+          top: { tag: 'white cotton blouse, long sleeves', status: 'off' },
+          innerTop: { tag: 'pink cotton bra', status: 'off' },
+        }),
+      ],
+    ]);
+    const result = assembleImageCharacters(image(), [entry('温岚'), entry('李斌', { sex: '1boy' })], wardrobes, world);
+    const woman = result.characters[0];
+    expect(woman.tag).toContain('bare breasts');
+    expect(woman.uc ?? '').toContain('bra, underwear, bikini top');
   });
 
-  it('正文明确写了的牛仔裤不再被古风负面屏蔽', () => {
-    const out = assembleImageCharacters(
-      image('full body, alley', [
-        { name: '温岚', tag: 'blush', nl: '', outfit: 'white t-shirt, jeans', uc: '' },
-      ]),
-      [entry('温岚')],
-      ancient,
+  it('两个女角同框时，把对方的标志性特征压进自己的 uc（防串色）', () => {
+    const withTwo = image({
+      tag: '2girls, bedroom, cowboy shot',
+      characters: [
+        { name: '温岚', tag: 'blush', nl: '' },
+        { name: '苏小雨', tag: 'smile', nl: '' },
+      ],
+    });
+    const result = assembleImageCharacters(
+      withTwo,
+      [entry('温岚'), entry('苏小雨', { hair: 'silver twin braids, straight hair, blunt bangs' })],
+      new Map(),
+      world,
     );
-    expect(out.characters[0].uc).not.toContain('jeans');
-    expect(out.characters[0].uc).not.toContain('t-shirt');
-  });
-});
-
-describe('带中文的标记词被清掉', () => {
-  it('中文人名写进 source# 就丢,英文原样保留', () => {
-    const out = assembleImageCharacters(
-      image('cowboy shot', [
-        { name: '温岚', tag: 'source#李斌抚摸 target#licking nipple, mutual#kissing', nl: '', outfit: 'white shirt', uc: '' },
-      ]),
-      [entry('温岚')],
-    );
-    expect(out.characters[0].tag).toContain('target#licking nipple');
-    expect(out.characters[0].tag).toContain('mutual#kissing');
-    expect(out.characters[0].tag).not.toContain('李斌');
+    expect(result.characters[0].uc ?? '').toContain('silver twin braids');
   });
 });

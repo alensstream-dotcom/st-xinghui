@@ -6,12 +6,13 @@ vi.mock('@/st/context', () => ({ getContext: getContextMock }));
 
 import {
   BBI_OUTFIT_EXTRA_KEY,
-  buildOutfitSnapshotText,
-  deriveOutfitSnapshots,
-  makeOutfitFloorDelta,
-  outfitStatesBeforeFloor,
-  readOutfitFloorDelta,
-  type CharOutfitSnapshot,
+  applyWardrobeUpdate,
+  buildWardrobeText,
+  deriveWardrobes,
+  makeWardrobeFloorDelta,
+  readWardrobeFloorDelta,
+  wardrobesBeforeFloor,
+  type WardrobeUpdate,
 } from './outfitState';
 import type { STMessage } from '@/st/context';
 
@@ -27,99 +28,120 @@ function message(extra: Record<string, unknown>, swipe = 0, swipes = 1): STMessa
   };
 }
 
-function withDelta(snapshots: CharOutfitSnapshot[], swipe = 0, swipes = 1): STMessage {
-  const delta = makeOutfitFloorDelta(snapshots, swipe);
+function withDelta(updates: WardrobeUpdate[], swipe = 0, swipes = 1): STMessage {
+  const delta = makeWardrobeFloorDelta(updates, swipe);
   return message({ [BBI_OUTFIT_EXTRA_KEY]: delta }, swipe, swipes);
 }
 
-describe('结楼穿搭指纹读写', () => {
-  it('写入后能原样读回,去掉重复类目并补上缺省字段', () => {
+const robe: WardrobeUpdate = {
+  name: '顾子衿',
+  mode: 'replace',
+  slots: {
+    top: { tag: 'plain white silk taoist robe, ankle-length', status: 'on' },
+    innerTop: { tag: 'white halterneck camisole, backless', status: 'on' },
+    innerBottom: { tag: 'white silk shorts', status: 'on' },
+  },
+};
+
+describe('装备表 v3 读写', () => {
+  it('写入后能原样读回，脱掉的槽位也保留 tag', () => {
     const floor = withDelta([
-      { name: '温岚', wearing: 'white shirt, jeans', removed: ['bra', 'BRA', ' panties '] },
-      { name: '苏小雨', wearing: '' },
-    ] as CharOutfitSnapshot[]);
-    const delta = readOutfitFloorDelta(floor);
-    expect(delta?.v).toBe(2);
-    expect(delta?.snapshots[0]).toEqual({
-      name: '温岚',
-      wearing: 'white shirt, jeans',
-      removed: ['bra', 'panties'],
+      {
+        name: '顾子衿',
+        mode: 'patch',
+        slots: { top: { tag: 'plain white silk taoist robe, ankle-length', status: 'off' } },
+      },
+    ]);
+    const delta = readWardrobeFloorDelta(floor);
+    expect(delta?.v).toBe(3);
+    expect(delta?.updates[0]?.slots.top).toEqual({
+      tag: 'plain white silk taoist robe, ankle-length',
+      status: 'off',
     });
-    expect(delta?.snapshots[1]).toEqual({ name: '苏小雨', wearing: '' });
   });
 
-  it('旧版 v1 的五层记录安全忽略,绝不崩也不会被当成全裸', () => {
-    const legacy = message({ [BBI_OUTFIT_EXTRA_KEY]: { v: 1, swipe: 0, ops: [{ sourceLine: 1, op: { kind: 'update_layer' } }] } });
-    expect(readOutfitFloorDelta(legacy)).toBeNull();
-    expect(readOutfitFloorDelta(message({}))).toBeNull();
-    expect(readOutfitFloorDelta(undefined)).toBeNull();
+  it('旧版本账本（v1/v2）安全忽略，返回 null 而不抛错', () => {
+    const legacy = message({ [BBI_OUTFIT_EXTRA_KEY]: { v: 2, swipe: 0, snapshots: [] } });
+    expect(readWardrobeFloorDelta(legacy)).toBeNull();
+    const broken = message({ [BBI_OUTFIT_EXTRA_KEY]: { v: 3, swipe: 0, updates: 'nope' } });
+    expect(readWardrobeFloorDelta(broken)).toBeNull();
   });
 
-  it('没有任何快照时写出 undefined,让落盘侧删掉旧键', () => {
-    expect(makeOutfitFloorDelta([], 0)).toBeUndefined();
-    expect(makeOutfitFloorDelta([{ name: '  ', wearing: 'x' }], 0)).toBeUndefined();
-  });
-});
-
-describe('逐楼回放与 swipe 隔离', () => {
-  it('同一角色后楼覆盖前楼,不同角色各自保留', () => {
-    const chat = [
-      withDelta([{ name: '温岚', wearing: 'white shirt, jeans' }]),
-      withDelta([
-        { name: '温岚', wearing: 'white shirt, jeans', removed: ['bra'] },
-        { name: '顾子衿', wearing: 'white silk taoist robe' },
-      ]),
-    ];
-    const state = deriveOutfitSnapshots(chat);
-    expect(state.get('温岚')).toEqual({ name: '温岚', wearing: 'white shirt, jeans', removed: ['bra'] });
-    expect(state.get('顾子衿')?.wearing).toBe('white silk taoist robe');
-  });
-
-  it('另一条 swipe 的记录整楼跳过,不许把别人的「已脱」混进来', () => {
-    // 第 1 楼当前停在 swipe 0，但身上挂的是 swipe 1 那次的「已脱上衣」——必须整楼跳过。
-    const chat = [
-      withDelta([{ name: '温岚', wearing: 'white shirt' }], 0, 2),
-      message({ [BBI_OUTFIT_EXTRA_KEY]: makeOutfitFloorDelta([{ name: '温岚', wearing: '', removed: ['top'] }], 1) }, 0, 2),
-    ];
-    const state = deriveOutfitSnapshots(chat);
-    expect(state.get('温岚')).toEqual({ name: '温岚', wearing: 'white shirt' });
-  });
-
-  it('回放到指定楼层为止,不含该楼自身', () => {
-    const chat = [
-      withDelta([{ name: '温岚', wearing: 'floor0' }]),
-      withDelta([{ name: '温岚', wearing: 'floor1' }]),
-    ];
-    expect(deriveOutfitSnapshots(chat, 1).get('温岚')?.wearing).toBe('floor0');
-    expect(deriveOutfitSnapshots(chat, 2).get('温岚')?.wearing).toBe('floor1');
-  });
-
-  it('读聊天上下文并只回放到目标楼之前', () => {
-    getContextMock.mockReturnValue({
-      chat: [
-        withDelta([{ name: '温岚', wearing: 'white shirt' }]),
-        withDelta([{ name: '温岚', wearing: 'naked-ish' }]),
-      ],
+  it('patch 只给 status:on 且省略 tag 时，沿用旧指纹原样穿回', () => {
+    const wardrobes = new Map();
+    applyWardrobeUpdate(wardrobes, robe);
+    applyWardrobeUpdate(wardrobes, {
+      name: '顾子衿',
+      mode: 'patch',
+      slots: { top: { tag: 'plain white silk taoist robe, ankle-length', status: 'off' } },
     });
-    expect(outfitStatesBeforeFloor(1).get('温岚')?.wearing).toBe('white shirt');
-    getContextMock.mockReturnValue(null);
-    expect(outfitStatesBeforeFloor(1).size).toBe(0);
+    applyWardrobeUpdate(wardrobes, {
+      name: '顾子衿',
+      mode: 'patch',
+      slots: { top: { tag: 'plain white silk taoist robe, ankle-length', status: 'on' } },
+    });
+    expect(wardrobes.get('顾子衿')?.top).toEqual({
+      tag: 'plain white silk taoist robe, ankle-length',
+      status: 'on',
+    });
   });
-});
 
-describe('喂给提示词的指纹文本', () => {
-  it('按三人称列出穿着/已脱/状态三段', () => {
-    const text = buildOutfitSnapshotText(
-      new Map<string, CharOutfitSnapshot>([
-        ['顾子衿', { name: '顾子衿', wearing: 'white silk taoist robe, ankle-length', removed: ['bra'], stateNote: 'robe open front' }],
-        ['温岚', { name: '温岚', wearing: '' }],
-      ]),
+  it('replace 重置整套槽位（隔天换装）', () => {
+    const wardrobes = new Map();
+    applyWardrobeUpdate(wardrobes, robe);
+    applyWardrobeUpdate(wardrobes, {
+      name: '顾子衿',
+      mode: 'replace',
+      slots: { top: { tag: 'black long-sleeved dress, midi', status: 'on' } },
+    });
+    const current = wardrobes.get('顾子衿');
+    expect(current?.top?.tag).toBe('black long-sleeved dress, midi');
+    expect(current?.innerTop).toBeUndefined();
+  });
+
+  it('逐楼回放并跳过 swipe 不匹配的楼', () => {
+    // 第 2 楼账本写的是 swipe 0 的脱衣记录，但当前看的是 swipe 1 → 整楼跳过。
+    const stale = withDelta(
+      [{ name: '顾子衿', mode: 'patch', slots: { top: { tag: 'plain white silk taoist robe, ankle-length', status: 'off' } } }],
+      0,
+      2,
     );
-    expect(text).toContain('- 顾子衿：穿着[white silk taoist robe, ankle-length]｜已脱[bra]｜状态[robe open front]');
-    expect(text).toContain('- 温岚：穿着[全裸]');
+    stale.swipe_id = 1;
+    getContextMock.mockReturnValue({ chat: [withDelta([robe]), stale] });
+    const wardrobes = deriveWardrobes(getContextMock().chat, 2);
+    expect(wardrobes.get('顾子衿')?.top?.status).toBe('on');
+
+    const sameSwipe = withDelta(
+      [{ name: '顾子衿', mode: 'patch', slots: { top: { tag: 'plain white silk taoist robe, ankle-length', status: 'off' } } }],
+      1,
+      2,
+    );
+    getContextMock.mockReturnValue({ chat: [withDelta([robe]), sameSwipe] });
+    const applied = deriveWardrobes(getContextMock().chat, 2);
+    expect(applied.get('顾子衿')?.top?.status).toBe('off');
   });
 
-  it('没有任何记录时给一句可执行的兜底说明,而不是空串', () => {
-    expect(buildOutfitSnapshotText(new Map())).toContain('上一楼无服装记录');
+  it('wardrobesBeforeFloor 只回放到该楼之前', () => {
+    getContextMock.mockReturnValue({
+      chat: [withDelta([robe]), withDelta([{ ...robe, slots: { innerTop: { tag: 'x', status: 'off' } } }], 0, 1)],
+    });
+    const before = wardrobesBeforeFloor(1);
+    expect(before.get('顾子衿')?.innerTop?.status).toBe('on');
+    const after = wardrobesBeforeFloor(2);
+    expect(after.get('顾子衿')?.innerTop?.status).toBe('off');
+  });
+
+  it('装备表文本带状态码与半脱形态，空表给提示语', () => {
+    const wardrobes = new Map();
+    applyWardrobeUpdate(wardrobes, robe);
+    applyWardrobeUpdate(wardrobes, {
+      name: '顾子衿',
+      mode: 'patch',
+      slots: { top: { tag: 'plain white silk taoist robe, ankle-length', status: 'half', halfTag: 'robe open front' } },
+    });
+    const text = buildWardrobeText(wardrobes);
+    expect(text).toContain('外衣/上装[plain white silk taoist robe, ankle-length|半脱(robe open front)]');
+    expect(text).toContain('上内衣[white halterneck camisole, backless|穿着]');
+    expect(buildWardrobeText(new Map())).toContain('上一楼无装备记录');
   });
 });
