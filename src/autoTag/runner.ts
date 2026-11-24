@@ -73,7 +73,7 @@ import {
   type WardrobeUpdate,
 } from '@/state/outfitState';
 import { traitCandidateBlock } from '@/state/traitPool';
-import { applyDueWardrobes, applyFrameWearState, narrativeOrder, synthesiseTailUpdates } from '@/autoTag/wardrobeSequence';
+import { applyDueWardrobes, applyFrameWearState, wardrobesAfterFloor } from '@/autoTag/wardrobeSequence';
 
 const processed = new Set<string>();
 const running = new Map<string, AbortController>();
@@ -313,29 +313,19 @@ async function runUnifiedPass(params: {
   for (const [name, wardrobe] of wardrobesBefore) wardrobes.set(name, { ...wardrobe, name: wardrobe.name });
   let cursor = 0;
 
-  // 模型输出的图片顺序不一定跟着正文（可能先 P12 再 P2）。编译顺序必须按 sourceLine
-  // 排一遍，否则 P2 会穿上 P10 才换的新衣服；返回顺序仍保持原样。
-  const compileOrder = narrativeOrder(plan.images);
-  const compiled: typeof plan.images = new Array(plan.images.length);
-  for (const index of compileOrder) {
-    const img = plan.images[index];
+  const assembledImages = plan.images.map(img => {
     const entriesAtPos = entriesAtPosition(params.entries, positionedOps, img.sourceLine, params.lockedNames);
     cursor = applyDueWardrobes(wardrobes, ordered, cursor, img.sourceLine);
-    compiled[index] = assembleImageCharacters(img, entriesAtPos, wardrobes, world);
+    const assembled = assembleImageCharacters(img, entriesAtPos, wardrobes, world);
     // 叠完这一帧的穿脱状态，供下一帧继承（直到后续图写出 status:"on" 穿回）。
     for (const character of img.characters) applyFrameWearState(wardrobes, character);
-  }
-  const assembledImages = compiled;
+    return assembled;
+  });
 
-  // 最后一张图之后正文还可能写「把外套穿回去了」：这些 update 也必须落在楼尾。
-  applyDueWardrobes(wardrobes, ordered, cursor, Number.POSITIVE_INFINITY);
-  // 楼尾落盘 = 逐帧 wearState 的结果 + 收尾 update，而不是只重放 wardrobeUpdates。
-  const finalWardrobes = wardrobes;
-  const tailUpdates = synthesiseTailUpdates(wardrobesBefore, wardrobeUpdates, finalWardrobes);
-  const persistedUpdates = [...wardrobeUpdates, ...tailUpdates];
+  const finalWardrobes = wardrobesAfterFloor(wardrobesBefore, wardrobeUpdates);
   diagnostic('unified:wardrobe', {
     timeJump: plan.timeJump,
-    updates: persistedUpdates.map(update => `${update.name}@${update.position ?? '楼尾'}`),
+    updates: wardrobeUpdates.map(update => `${update.name}@${update.position ?? '楼首'}`),
     final: [...finalWardrobes.values()].map(wardrobe => wardrobe.name),
   });
 
@@ -346,7 +336,7 @@ async function runUnifiedPass(params: {
     changes: plan.changes.length,
     timeJump: plan.timeJump,
   });
-  return { plan: { images: assembledImages, changes: plan.changes }, wardrobeUpdates: persistedUpdates, world };
+  return { plan: { images: assembledImages, changes: plan.changes }, wardrobeUpdates, world };
 }
 
 async function runForFloor(floor: number, opts: RunOptions = {}): Promise<void> {

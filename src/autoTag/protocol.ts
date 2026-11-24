@@ -268,13 +268,10 @@ function sanitizeWearState(
     if (!raw || typeof raw !== 'object' || Array.isArray(raw)) continue;
     const item = raw as Record<string, unknown>;
     const status = item.status;
-    const known =
-      status === 'on' || status === 'half' || status === 'half_top' || status === 'half_bottom' || status === 'off';
-    if (!known) continue;
+    if (status !== 'on' && status !== 'half' && status !== 'off') continue;
     const halfTag =
       typeof item.halfTag === 'string' ? item.halfTag.trim().replace(/\s+/g, ' ').slice(0, 60) : '';
-    const half = status === 'half' || status === 'half_top' || status === 'half_bottom';
-    out[key] = { status, ...(half && halfTag ? { halfTag } : {}) };
+    out[key] = { status, ...(status === 'half' && halfTag ? { halfTag } : {}) };
   }
   return out;
 }

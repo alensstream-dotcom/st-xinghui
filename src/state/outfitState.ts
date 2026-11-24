@@ -16,13 +16,7 @@ import { getContext, type STMessage } from '@/st/context';
  * 每张图的 `wearState` 当帧覆盖，不再写成 P 节点微操作。
  */
 
-export type SlotWearStatus = 'on' | 'half' | 'half_top' | 'half_bottom' | 'off';
-
-/** 只涉及领口/上身的半脱（连身衣解领口、上衣敞开）。旧值 half 无 side 信息时按它兜底。 */
-export const HALF_TOP_STATUSES: SlotWearStatus[] = ['half', 'half_top'];
-
-/** 只涉及下摆/裙摆的半脱（连身衣掀裙摆、裙子撩到腰）。 */
-export const HALF_BOTTOM_STATUSES: SlotWearStatus[] = ['half_bottom'];
+export type SlotWearStatus = 'on' | 'half' | 'off';
 
 export type WardrobeSlotKey = 'top' | 'innerTop' | 'bottom' | 'innerBottom' | 'legs';
 
@@ -39,14 +33,11 @@ export const WARDROBE_SLOT_LABELS: Record<WardrobeSlotKey, string> = {
 export interface GarmentSlot {
   /** 装备本身的视觉指纹（脱掉时绝不删除，以便后续穿回 100% 原样还原）。 */
   tag: string;
-  /** on=正常穿着 | half/half_top/half_bottom=半脱 | off=已脱掉 */
+  /** on=正常穿着 | half=半脱/敞开/撩起 | off=已脱掉 */
   status: SlotWearStatus;
-  /** 半脱时的具体动作词（"unbuttoned, open front" / "skirt lift"）。 */
+  /** 仅 status === 'half' 时的具体动作词（"unbuttoned, open front" / "skirt lift"）。 */
   halfTag?: string;
 }
-
-/** patch 可以只给状态（穿回原件），tag 由运行期从旧账本取回。 */
-export type GarmentPatch = Partial<GarmentSlot> & { status: SlotWearStatus };
 
 export interface CharacterWardrobe {
   name: string;
@@ -63,7 +54,7 @@ export type TimeJump = 'same_day' | 'new_day';
 export interface WardrobeUpdate {
   name: string;
   mode: 'replace' | 'patch';
-  slots: Partial<Record<WardrobeSlotKey, GarmentPatch>>;
+  slots: Partial<Record<WardrobeSlotKey, GarmentSlot>>;
   /** 这次换装从哪个 P 编号开始生效；省略表示从楼首生效。 */
   position?: string;
   /** position 解析出的正文行号（协议层填，运行期按它逐图生效）。 */
@@ -78,40 +69,20 @@ export interface WardrobeFloorDelta {
 
 export const BBI_OUTFIT_EXTRA_KEY = 'bbiOutfitOps';
 
-const STATUSES: SlotWearStatus[] = ['on', 'half', 'half_top', 'half_bottom', 'off'];
+const STATUSES: SlotWearStatus[] = ['on', 'half', 'off'];
 
-/**
- * 服装指纹里的临时穿法词：它们是「这一次怎么穿」，不是「这件衣服长什么样」。
- * 留在指纹里，下一次半敞时就会变成 buttoned, unbuttoned 自相矛盾。
- * 只剥独立词；button-down shirt / zip-up hoodie 这类款式复合词原样保留。
- */
-const TRANSIENT_WEAR = new Set(['buttoned', 'unbuttoned', 'zipped', 'unzipped', 'zipper open', 'zipper closed']);
-
-export function stripTransientWear(tag: string): string {
-  return tag
-    .split(',')
-    .map(part => part.trim())
-    .filter(part => part && !TRANSIENT_WEAR.has(part.toLowerCase()))
-    .join(', ');
-}
-
-/**
- * 归一一个槽位。replace 要求给新衣服的 tag（否则无指纹可存）；
- * patch 允许只给 { status: "on" } —— 这正是「穿回原件」，tag 由 applyWardrobeUpdate 从旧账本取回。
- */
-function normaliseSlot(raw: unknown, requireTag: boolean): GarmentSlot | null {
+function normaliseSlot(raw: unknown): GarmentSlot | null {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
   const record = raw as Record<string, unknown>;
-  const tag = typeof record.tag === 'string' ? stripTransientWear(record.tag.trim().replace(/[\r\n]+/g, ' ')) : '';
+  const tag = typeof record.tag === 'string' ? record.tag.trim().replace(/[\r\n]+/g, ' ') : '';
   const status = typeof record.status === 'string' && STATUSES.includes(record.status as SlotWearStatus)
     ? (record.status as SlotWearStatus)
     : '';
   if (!status) return null;
-  // replace 缺 tag 视为无效（没有衣服描述可存）；patch 缺 tag 合法，表示沿用旧指纹。
-  if (requireTag && !tag) return null;
+  // off 也必须有 tag：这正是「穿回时不必重写」的前提，缺 tag 的 off 视为无效。
+  if (!tag) return null;
   const halfTag = typeof record.halfTag === 'string' ? record.halfTag.trim().replace(/[\r\n]+/g, ' ') : '';
-  const half = status === 'half' || status === 'half_top' || status === 'half_bottom';
-  return { tag, status, ...(half && halfTag ? { halfTag } : {}) };
+  return { tag, status, ...(status === 'half' && halfTag ? { halfTag } : {}) };
 }
 
 export function normaliseWardrobe(raw: unknown): CharacterWardrobe | null {
@@ -121,7 +92,7 @@ export function normaliseWardrobe(raw: unknown): CharacterWardrobe | null {
   if (!name) return null;
   const wardrobe: CharacterWardrobe = { name };
   for (const key of WARDROBE_SLOT_KEYS) {
-    const slot = normaliseSlot(record[key], true);
+    const slot = normaliseSlot(record[key]);
     if (slot) wardrobe[key] = slot;
   }
   return wardrobe;
@@ -138,7 +109,7 @@ export function normaliseWardrobeUpdate(raw: unknown): WardrobeUpdate | null {
   if (!rawSlots || typeof rawSlots !== 'object' || Array.isArray(rawSlots)) return null;
   const slots: Partial<Record<WardrobeSlotKey, GarmentSlot>> = {};
   for (const key of WARDROBE_SLOT_KEYS) {
-    const slot = normaliseSlot((rawSlots as Record<string, unknown>)[key], mode === 'replace');
+    const slot = normaliseSlot((rawSlots as Record<string, unknown>)[key]);
     if (slot) slots[key] = slot;
   }
   if (!Object.keys(slots).length) return null;
@@ -193,7 +164,7 @@ export function applyWardrobeUpdate(
         next[key] = {
           tag: patch.tag || previous?.tag || '',
           status: patch.status,
-          ...(patch.status !== 'on' && patch.status !== 'off' && (patch.halfTag || previous?.halfTag)
+          ...(patch.status === 'half' && (patch.halfTag || previous?.halfTag)
             ? { halfTag: patch.halfTag || previous?.halfTag }
             : {}),
         };
