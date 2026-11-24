@@ -466,7 +466,10 @@ export interface UnifiedInput {
 const WARDROBE_RULES = `② 装备表与跨楼规则
 - 装备表 = 装备指纹 + 状态码，五槽：top/innerTop/bottom/innerBottom/legs。tag 记衣服视觉指纹，**永不改写**（脱掉再穿回靠它还原）。status：on 穿着 / half 半脱敞开撩起挂手臂 / off 已离开身体。
 - 首出场、明确换装、隔天换装→{"mode":"replace"} 给整套槽位；同楼同日穿脱→{"mode":"patch"} 只给变化槽位。**patch 里只写 {"status":"on"} 省略 tag 就是穿回原来那件**。
+- tag 只写「这件衣服长什么样」（颜色/面料/领口/袖长/长度版型），**不要写 buttoned、unbuttoned、zipped 这类本次穿法**——穿法归 status 与 halfTag。
 - half 必须配 halfTag 写形态（"unbuttoned, open front" / "shirt lifted above chest" / "skirt lift" / "panties pulled aside"）。
+- 连身衣分上下：只解领口/敞开上身用 "half_top"（下身仍被长摆盖着），只掀裙摆/撩起下摆用 "half_bottom"（上身仍穿着）；拿不准就用 half 并在 halfTag 写清是领口还是裙摆。
+- 内搭只在正文明确写了「没穿内衣/里面什么都没有」时才填 innerTop:{"status":"off"}；正文没交代内搭就整个省略，不要猜，也别在 wearState 里补。
 - 连身服饰（道袍/汉服长衫/连身裙/旗袍/和服）没另穿下装时 bottom 留空，不凭空补短裙裤子丝袜；正文写了黑丝短裙照写，正文优先于世界观。
 - 古风内衣换等效词，禁 dudou/xieku/silk traditional underwear：肚兜→"red halterneck camisole, backless, tied at neck, chinese clothes"；中衣→"white inner robe, loose white kimono, open robe"；亵裤→"white silk shorts, loose shorts"；罗袜绣鞋→"white socks, traditional shoes"。
 - timeJump：same_day（换房间/室内到室外/短时过渡）时正文没换衣服就别发 replace，原样沿用或 patch 穿脱；正文明确换装或 new_day（隔天/睡醒次日/跨日/换装赴约）发 replace。**replace 一旦发出就按它执行**，不要求任何附加开关。
@@ -569,7 +572,7 @@ export function unifiedSystemPrompt(
 首楼（世界观还没锁定时）在 worldPreset 填一次：modern / chinese_ancient / western_fantasy / retro_republic / urban_fantasy / scifi_cyberpunk；后续楼层不再输出该字段。
 
 输出结构（字段名不许改，无变化给 []）：
-{"worldPreset":"modern","timeJump":"same_day","changes":[{"name":"温岚","field":"new","position":"P2","reason":"首次出场","fields":{"sex":"1girl","hair":"long black hair, straight hair, hair down, parted bangs","eyes":"brown eyes, tareme","skin":"fair skin","body":"slender, medium breasts","extra":"round eyewear, mole under eye","fandom":""}}],"wardrobeUpdates":[{"name":"温岚","mode":"patch","slots":{"top":{"tag":"white shirt, long sleeves, buttoned, hip-length","status":"on"},"bottom":{"tag":"pleated skirt, knee-length","status":"on"}}}],"images":[{"position":"P12","tag":"1girl, 1boy, bedroom, pov, from above, cowboy shot, night, dim lighting","nl":"${nlOn ? 'He pins her wrists above her head and leans over her.' : ''}","size":"portrait","characters":[{"name":"温岚","omitFeatures":[],"wearState":{"top":{"status":"half","halfTag":"unbuttoned, open front"}},"tag":"blush, half-closed eyes, looking up, parted lips, source#pinning her wrists","nl":"${nlOn ? 'She lies on her back with her shirt hanging open, wrists held above her head.' : ''}"},{"name":"李斌","omitFeatures":[],"tag":"1boy, faceless male, hand on her wrists, target#pinning her wrists","nl":""}]}]}
+{"worldPreset":"modern","timeJump":"same_day","changes":[{"name":"温岚","field":"new","position":"P2","reason":"首次出场","fields":{"sex":"1girl","hair":"long black hair, straight hair, hair down, parted bangs","eyes":"brown eyes, tareme","skin":"fair skin","body":"slender, medium breasts","extra":"round eyewear, mole under eye","fandom":""}}],"wardrobeUpdates":[{"name":"温岚","mode":"patch","slots":{"top":{"tag":"white shirt, long sleeves, hip-length","status":"on"},"bottom":{"tag":"pleated skirt, knee-length","status":"on"}}}],"images":[{"position":"P12","tag":"1girl, 1boy, bedroom, pov, from above, cowboy shot, night, dim lighting","nl":"${nlOn ? 'He pins her wrists above her head and leans over her.' : ''}","size":"portrait","characters":[{"name":"温岚","omitFeatures":[],"wearState":{"top":{"status":"half","halfTag":"unbuttoned, open front"}},"tag":"blush, half-closed eyes, looking up, parted lips, target#pinning her wrists","nl":"${nlOn ? 'She lies on her back with her shirt hanging open, wrists held above her head.' : ''}"},{"name":"李斌","omitFeatures":[],"tag":"1boy, faceless male, hand on her wrists, source#pinning her wrists","nl":""}]}]}
 
 ${countRule}
 

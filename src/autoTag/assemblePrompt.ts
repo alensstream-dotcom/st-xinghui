@@ -194,6 +194,11 @@ function extractDistinctiveFeatures(entry: CharTagEntry | undefined): string[] {
 const SEX_WORD_TAG = /^(?:1girl|2girls|3girls|multiple girls|1boy|2boys|3boys|multiple boys|girl|boy|solo)$/i;
 const HAIR_TAG = /\b(hair|bangs|ponytail|twintails|braid|braids|braided|bun|bob|updo|ahoge)\b/i;
 const EYE_SKIN_TAG = /\b(eyes|tsurime|tareme|jitome|sanpaku|pale skin|fair skin|dark skin|tan)\b/i;
+/**
+ * 眼部**表情**词：虽然含 eyes，但它们描述的是这一格的表情，不是瞳色眼型。
+ * 旧写法只按 \beyes\b 剥，把闭眼、半眯、眯眼、含泪这些合法表情一起吞掉了。
+ */
+const EYE_EXPRESSION_TAG = /^(?:closed eyes|half-closed eyes|wide-eyed|teary eyes|watery eyes|rolling eyes|empty eyes|narrowed eyes)$/i;
 const STATIC_BODY_TAG = /\b(tall female|petite|slender|curvy|voluptuous|flat chest|small breasts|medium breasts|large breasts|huge breasts|wide hips|long legs)\b/i;
 /** 这些词说明这一格正在发生接触（手在头发里、抓着衣领），属于动作，不算外貌声明。 */
 const ACTION_TOUCH_TAG = /\b(hand|hands|holding|touching|grabbing|pulling|lifting|unbuttoning|pressed|against|around|on her|on his)\b/i;
@@ -204,6 +209,7 @@ export function stripLeakedAppearance(tags: string[], hasLibraryEntry: boolean):
     if (!token) return false;
     // 标记词(source#/target#/mutual#)永远是动作,不许动。
     if (token.includes('#')) return true;
+    if (EYE_EXPRESSION_TAG.test(token)) return true;
     if (hasLibraryEntry && SEX_WORD_TAG.test(token)) return false;
     if (ACTION_TOUCH_TAG.test(token)) return true;
     if (hasLibraryEntry && HAIR_TAG.test(token)) return false;
@@ -304,65 +310,99 @@ export function compileWardrobeForFrame(
   const innerBottom = resolveSlot(wardrobe, wearState, 'innerBottom');
   const legs = resolveSlot(wardrobe, wearState, 'legs');
 
+  // 连身衣（道袍/汉服/连身裙/旗袍/和服）：只有上装一条记录，但上下可能分别半脱。
+  // half_top=只解领口（上身露、下身还被长摆盖着），half_bottom=只掀裙摆（下身露、上身还穿着）。
+  const isOnePiece = Boolean(top?.tag && ONEPIECE_GARMENT.test(top.tag));
+  const topHalfSide = top ? halfSide(top.status, top.halfTag, isOnePiece) : 'none';
+
   // 上装
   if (top?.status === 'on') {
     push(top.tag);
-  } else if (top?.status === 'half') {
-    push(top.tag);
-    push(top.halfTag);
+  } else if (isHalfStatus(top?.status)) {
+    push(top?.tag);
+    push(top?.halfTag);
   } else if (top?.status === 'off') {
     negatives.push(...SLOT_NEGATIVES.top);
   }
 
+  // 上身是否露出：外装不在原位，且这一帧确实是「上身」半脱（half_bottom 只掀裙摆时不算）。
+  const upperOpen = !top || (top.status !== 'on' && topHalfSide !== 'bottom');
+
   // 只有「确实有上装或内衣记录，且外装不在原位」时才判定露出：完全没有装备记录时
   // 不该替模型断言她裸着（首次出场还没建表，那一格由正文与导演的 outfit 决定）。
-  // 与下身对称：只穿内衣/肚兜出场（top 为空、innerTop 有记录）也必须正常输出内衣。
-  if ((top || innerTop) && (!top || top.status !== 'on')) {
+  // 内搭**未建档（undefined）**＝正文没交代，同样不猜；只有明确脱了（off）才写裸露词。
+  if ((top || innerTop) && upperOpen) {
     if (innerTop?.status === 'on') {
       push(innerTop.tag);
-    } else if (innerTop?.status === 'half') {
-      push(innerTop.tag);
-      push(innerTop.halfTag);
-    } else {
+    } else if (isHalfStatus(innerTop?.status)) {
+      push(innerTop?.tag);
+      push(innerTop?.halfTag);
+    } else if (innerTop?.status === 'off') {
       positive.push('bare breasts', 'nipples');
-      if (innerTop?.status === 'off') negatives.push(...SLOT_NEGATIVES.innerTop);
+      negatives.push(...SLOT_NEGATIVES.innerTop);
     }
   }
 
   if (upperOnly) return { positive: dedupeTags(positive), negatives: dedupeTags(negatives) };
 
-  // 下装（连身衣没有 bottom 记录时，状态跟着上装）
+  // 下装（连身衣没有 bottom 记录时，状态跟着上装，但只有下身半脱/全脱才判露出）
   const bottom: ResolvedSlot | null =
-    bottomRaw ?? (top && ONEPIECE_GARMENT.test(top.tag) ? { tag: '', status: top.status } : null);
+    bottomRaw ?? (isOnePiece && top ? { tag: '', status: top.status, halfTag: top.halfTag } : null);
   const bottomStatus = bottom?.status ?? null;
+  const bottomHalfSide = isOnePiece ? topHalfSide : halfSide(bottomStatus, bottom?.halfTag, false);
+  const lowerOpen = bottomStatus !== 'on' && bottomHalfSide !== 'top';
+
   if (bottom?.tag && bottomStatus === 'on') {
     push(bottom.tag);
-  } else if (bottom?.tag && bottomStatus === 'half') {
+  } else if (bottom?.tag && isHalfStatus(bottomStatus)) {
     push(bottom.tag);
     push(bottom.halfTag);
   } else if (bottomStatus === 'off') {
     negatives.push(...SLOT_NEGATIVES.bottom);
   }
 
-  if ((bottom || innerBottom) && bottomStatus !== 'on') {
+  if ((bottom || innerBottom) && lowerOpen) {
     if (innerBottom?.status === 'on') {
       push(innerBottom.tag);
-    } else if (innerBottom?.status === 'half') {
-      push(innerBottom.tag);
-      push(innerBottom.halfTag);
-    } else {
+    } else if (isHalfStatus(innerBottom?.status)) {
+      push(innerBottom?.tag);
+      push(innerBottom?.halfTag);
+    } else if (innerBottom?.status === 'off') {
       if (bottomStatus === 'off') positive.push('bottomless');
-      if (innerBottom?.status === 'off') negatives.push(...SLOT_NEGATIVES.innerBottom);
+      negatives.push(...SLOT_NEGATIVES.innerBottom);
     }
   }
 
   if (legs?.status === 'on') push(legs.tag);
-  else if (legs?.status === 'half') {
+  else if (isHalfStatus(legs?.status) && legs) {
     push(legs.tag);
     push(legs.halfTag);
   } else if (legs?.status === 'off') negatives.push(...SLOT_NEGATIVES.legs);
 
   return { positive: dedupeTags(positive), negatives: dedupeTags(negatives) };
+}
+
+/** 半脱状态（含连身衣的上下半脱）。 */
+export function isHalfStatus(status: string | null | undefined): boolean {
+  return status === 'half' || status === 'half_top' || status === 'half_bottom';
+}
+
+/**
+ * 半脱落在哪一半。
+ * - half_top / half_bottom 直接给答案；
+ * - 旧值 half 没有侧别：连身衣看 halfTag 有没有裙摆/掀起词，有就算下身，否则按上身；
+ *   非连身衣的 half（衬衫敞开、裙子撩起）两半都算，行为与旧版一致。
+ */
+export function halfSide(
+  status: string | null | undefined,
+  halfTag: string | undefined,
+  onePiece: boolean,
+): 'none' | 'top' | 'bottom' | 'both' {
+  if (status === 'half_top') return 'top';
+  if (status === 'half_bottom') return 'bottom';
+  if (status !== 'half') return 'none';
+  if (!onePiece) return 'both';
+  return /\b(lift|lifted|hem|skirt|apron)\b/i.test(halfTag ?? '') ? 'bottom' : 'top';
 }
 
 /**

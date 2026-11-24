@@ -1,6 +1,7 @@
 import type { ImageCharacterPrompt } from '@/autoTag/protocol';
 import {
   applyWardrobeUpdate,
+  WARDROBE_SLOT_KEYS,
   type CharacterWardrobe,
   type GarmentSlot,
   type WardrobeSlotKey,
@@ -33,6 +34,18 @@ export function applyDueWardrobes(
   return index;
 }
 
+/**
+ * 正文顺序：模型给的图片顺序不一定跟着正文（可能先 P12 再 P2）。
+ * 编译前必须按 sourceLine 稳定排序，否则 P2 会穿上 P10 才换的新衣服。
+ * 返回的是原数组下标，落位写回时仍用原顺序。
+ */
+export function narrativeOrder<T extends { sourceLine: number }>(items: T[]): number[] {
+  return items
+    .map((item, index) => ({ item, index }))
+    .sort((a, b) => a.item.sourceLine - b.item.sourceLine || a.index - b.index)
+    .map(entry => entry.index);
+}
+
 /** 把一张图里某个角色的 wearState 叠加进装备表（tag 沿用账本，只改状态码）。 */
 export function applyFrameWearState(
   wardrobes: Map<string, CharacterWardrobe>,
@@ -55,6 +68,38 @@ export function applyFrameWearState(
   }
   if (!Object.keys(slots).length) return;
   applyWardrobeUpdate(wardrobes, { name: character.name, mode: 'patch', slots });
+}
+
+/**
+ * 楼尾补丁：只靠 wardrobeUpdates 重放会漏掉本楼逐帧 wearState 造成的穿脱
+ * （比如第一张图把外套脱了、后面没有再写，落盘就会退回「穿着」）。
+ * 这里把「最终状态」与「只重放 update 的状态」比一遍，差出来的槽位补成 patch。
+ */
+export function synthesiseTailUpdates(
+  before: Map<string, CharacterWardrobe>,
+  updates: WardrobeUpdate[],
+  final: Map<string, CharacterWardrobe>,
+): WardrobeUpdate[] {
+  const replay = wardrobesAfterFloor(before, updates);
+  const tail: WardrobeUpdate[] = [];
+  for (const [name, wardrobe] of final) {
+    const previous = replay.get(name);
+    const slots: Partial<Record<WardrobeSlotKey, GarmentSlot>> = {};
+    for (const key of WARDROBE_SLOT_KEYS) {
+      const want = wardrobe[key];
+      const got = previous?.[key];
+      if (!want) continue;
+      const same =
+        got
+        && got.tag === want.tag
+        && got.status === want.status
+        && (got.halfTag ?? '') === (want.halfTag ?? '');
+      if (same) continue;
+      slots[key] = { ...want };
+    }
+    if (Object.keys(slots).length) tail.push({ name, mode: 'patch', slots });
+  }
+  return tail;
 }
 
 /** 楼尾装备表：把本楼全部 update 依次应用一遍（落盘给下一楼的就是这份）。 */

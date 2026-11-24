@@ -65,9 +65,9 @@ describe('楼内穿脱时序', () => {
     // 第 1 张：上衣在，正面写 shirt，负面不许出现上衣品类。
     expect(compiled[0]).toContain('white shirt');
     expect(compiled[0]).not.toContain('bare breasts');
-    // 第 2 张：上衣压掉并判露出；裙子仍在（off 只屏蔽上衣品类）。
+    // 第 2 张：上衣压掉；内衣未建档所以不脑补裸露词，裙子仍在。
     expect(compiled[1]).not.toContain('white shirt');
-    expect(compiled[1]).toContain('bare breasts');
+    expect(compiled[1]).not.toContain('bare breasts');
     expect(compiled[1]).toContain('pleated skirt');
     // 第 3 张：穿回同一件（tag 未重写）。
     expect(compiled[2]).toContain('white shirt');
