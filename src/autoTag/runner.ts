@@ -64,7 +64,6 @@ import { getTagGenChannel, isCurrentChatExcluded, settings, type ApiChannel } fr
 import { applyDetectedWorldPreset, readWorldAnchor, type WorldAnchorConfig } from '@/state/worldAnchor';
 import {
   BBI_OUTFIT_EXTRA_KEY,
-  applyWardrobeUpdate,
   buildWardrobeText,
   makeWardrobeFloorDelta,
   readWardrobeFloorDelta,
@@ -72,8 +71,9 @@ import {
   type CharacterWardrobe,
   type WardrobeUpdate,
 } from '@/state/outfitState';
+import { captureFrame, FRAME_CONTINUITY_KEY, readFloorContinuity, type FrameContinuity, type FloorContinuity } from './frameContinuity';
 import { traitCandidateBlock } from '@/state/traitPool';
-import { applyDueWardrobes, applyFrameWearState, wardrobesAfterFloor } from '@/autoTag/wardrobeSequence';
+import { compileWardrobeSequence } from '@/autoTag/wardrobeSequence';
 
 const processed = new Set<string>();
 const running = new Map<string, AbortController>();
@@ -134,6 +134,7 @@ function textHash(text: string): string {
 }
 
 interface RunOptions {
+  baselineRetried?: boolean;
   /** 手动触发(楼层按钮):绕过 autoTag.enabled 与 processed 去重;空结果也给出反馈。 */
   manual?: boolean;
   /** 重新生成:先把已有 tag 从正文剔除再分析/注入;旧图片保留在卡片历史里。 */
@@ -250,8 +251,13 @@ async function runUnifiedPass(params: {
   maleNames?: ReadonlySet<string>;
   signal: AbortSignal;
   retries: number;
-}): Promise<{ plan: ImagePlan; wardrobeUpdates: WardrobeUpdate[]; world: WorldAnchorConfig }> {
-  const wardrobesBefore = wardrobesBeforeFloor(params.floor);
+  chatId: string;
+  wardrobesBefore: Map<string, CharacterWardrobe>;
+  reuseNew?: CharChange[];
+  reuseOutfits?: WardrobeUpdate[];
+  captureFrames: boolean;
+}): Promise<{ plan: ImagePlan; wardrobeUpdates: WardrobeUpdate[]; world: WorldAnchorConfig; frames: FrameContinuity[] }> {
+  const wardrobesBefore = params.wardrobesBefore;
   const input: UnifiedInput = {
     ...params.input,
     wardrobeText: buildWardrobeText(wardrobesBefore),
@@ -262,6 +268,7 @@ async function runUnifiedPass(params: {
 
   const plan = await runChannelWithRetries(async next => {
     const raw = await dispatchLlm(messages, params.channel, next);
+    diagnostic('unified:response', { floor: params.floor, chars: raw.length });
     try {
       return parseUnifiedPlan(raw, params.segments, input.minImages, input.maxImages, {
         femaleScenesOnly: true,
@@ -294,6 +301,7 @@ async function runUnifiedPass(params: {
     },
   });
 
+  if (params.signal.aborted || getContext()?.getCurrentChatId?.() !== params.chatId) throw new DOMException('聊天已切换', 'AbortError');
   let world = params.input.world;
   if (plan.worldPreset) {
     const applied = applyDetectedWorldPreset(plan.worldPreset);
@@ -303,32 +311,46 @@ async function runUnifiedPass(params: {
     world = applied;
   }
 
+  for (const prior of params.reuseNew ?? []) {
+    const index = plan.changes.findIndex(change => change.name === prior.name && change.field === 'new');
+    if (index >= 0) plan.changes[index] = prior;
+    else plan.changes.push(prior);
+  }
+  for (const update of plan.wardrobeUpdates) {
+    if (update.mode !== 'replace') continue;
+    const matches = params.reuseOutfits?.filter(prior => prior.mode === 'replace' && prior.name === update.name
+      && prior.position === update.position && prior.step === update.step);
+    if (matches?.length === 1) update.slots = matches[0].slots;
+  }
+  const canonical = new Map<string, Set<string>>();
+  const nameKey = (name: string) => name.normalize('NFKC').trim().toLowerCase();
+  const knownNames = new Set([...params.entries.map(entry => entry.name), ...wardrobesBefore.keys()]);
+  for (const name of knownNames) {
+    const key = nameKey(name);
+    if (!canonical.has(key)) canonical.set(key, new Set());
+    canonical.get(key)!.add(name);
+  }
+  function canonicalName(name: string): string {
+    const matches = canonical.get(nameKey(name));
+    return !knownNames.has(name) && matches?.size === 1 ? [...matches][0] : name;
+  }
+  for (const change of plan.changes) change.name = canonicalName(change.name);
+  for (const update of plan.wardrobeUpdates) update.name = canonicalName(update.name);
+  for (const shot of plan.images) for (const character of shot.characters) character.name = canonicalName(character.name);
   const positionedOps = params.opsResolver(plan.changes);
   // 换装按 position 逐图生效：带 position 的 update 只对 sourceLine 不早于它的图片生效，
   // 省略 position 的从楼首起生效。这样「P10 进房间换女仆装」不会把 P2 那张旧衣裳的图
   // 也套上女仆装，而 P12 之后立刻穿新装。
-  const wardrobeUpdates = plan.wardrobeUpdates;
-  const ordered = [...wardrobeUpdates].sort((a, b) => (a.sourceLine ?? 0) - (b.sourceLine ?? 0));
-  const wardrobes: Map<string, CharacterWardrobe> = new Map();
-  for (const [name, wardrobe] of wardrobesBefore) wardrobes.set(name, { ...wardrobe, name: wardrobe.name });
-  let cursor = 0;
-
-  const assembledImages = plan.images.map(img => {
-    const entriesAtPos = entriesAtPosition(params.entries, positionedOps, img.sourceLine, params.lockedNames);
-    cursor = applyDueWardrobes(wardrobes, ordered, cursor, img.sourceLine);
-    const assembled = assembleImageCharacters(img, entriesAtPos, wardrobes, world);
-    // 叠完这一帧的穿脱状态，供下一帧继承（直到后续图写出 status:"on" 穿回）。
-    for (const character of img.characters) applyFrameWearState(wardrobes, character);
-    return assembled;
+  const sequence = compileWardrobeSequence(wardrobesBefore, plan.wardrobeUpdates, plan.images, (shot, wardrobe) => {
+    const entries = entriesAtPosition(params.entries, positionedOps, shot.sourceLine, params.lockedNames);
+    return {
+      image: assembleImageCharacters(shot, entries, wardrobe, world),
+      frame: params.captureFrames ? captureFrame(shot, entries, wardrobe) : undefined,
+    };
   });
-
-  const finalWardrobes = wardrobesAfterFloor(wardrobesBefore, wardrobeUpdates);
-  diagnostic('unified:wardrobe', {
-    timeJump: plan.timeJump,
-    updates: wardrobeUpdates.map(update => `${update.name}@${update.position ?? '楼首'}`),
-    final: [...finalWardrobes.values()].map(wardrobe => wardrobe.name),
-  });
-
+  const assembledImages = sequence.frames.map(item => item.image);
+  const frames = sequence.frames.flatMap(item => item.frame ?? []);
+  const wardrobeUpdates = sequence.updates;
   diagnostic('unified:compiled', {
     shots: plan.images.length,
     images: assembledImages.length,
@@ -336,7 +358,7 @@ async function runUnifiedPass(params: {
     changes: plan.changes.length,
     timeJump: plan.timeJump,
   });
-  return { plan: { images: assembledImages, changes: plan.changes }, wardrobeUpdates, world };
+  return { plan: { images: assembledImages, changes: plan.changes }, wardrobeUpdates, world, frames };
 }
 
 async function runForFloor(floor: number, opts: RunOptions = {}): Promise<void> {
@@ -473,7 +495,21 @@ async function runForFloor(floor: number, opts: RunOptions = {}): Promise<void> 
     // 单槽重写:库文本要包含本楼已落档的增量(首次全量分析建的档),否则 AI 会把
     // 已建档角色当新人重写。charTagsBeforeFloor(floor + 1) 正好含本楼(swipe 匹配时生效)。
     const profile = autoTagProfile();
-    const previousEntries = charTagsBeforeFloor(slot ? floor + 1 : floor);
+    const baseline = charTagsBeforeFloor(floor);
+    const wardrobeBaseline = wardrobesBeforeFloor(floor);
+    const signature = textHash(preparedTarget.promptText);
+    const baselineFingerprint = (entries = baseline, wardrobes = wardrobeBaseline) => textHash(JSON.stringify([
+      entries.map(entry => [entry.name, entry.fields, entry.raw, entry.nl]),
+      [...wardrobes], readWorldAnchor(),
+    ]));
+    const baselineHash = baselineFingerprint();
+    let expectedBaseline = baselineHash;
+    const priorRun = profile.naiCharPrompts && !profile.comic
+      ? readFloorContinuity(message.extra?.[FRAME_CONTINUITY_KEY], swipeId ?? 0, signature, baselineHash)
+      : undefined;
+    const previousFrame = slot && slotRawTag && priorRun?.frames[slot.seq]?.promptHash === textHash(slotRawTag)
+      ? priorRun.frames[slot.seq] : undefined;
+    const previousEntries = previousFrame?.entries ?? (slot ? charTagsBeforeFloor(floor + 1) : baseline);
     const previousDelta = readCharTagFloorDelta(message);
     const previousOutfitDelta = readWardrobeFloorDelta(message);
     const storyProfiles = profile.naiCharPrompts
@@ -506,7 +542,13 @@ async function runForFloor(floor: number, opts: RunOptions = {}): Promise<void> 
         memory,
         preparedTarget,
         anchors.text,
-        slot ? buildSlotTaskNote(rawSource, slot.seq) : '',
+        slot ? [
+          buildSlotTaskNote(rawSource, slot.seq),
+          ...(previousFrame ? [
+            '当前镜头在 ' + previousFrame.position + '。本格的外貌和衣物由插件按原镜头补齐，角色 tag 只写动作表情；英文只补此刻可见的信息。共享关系写一次。',
+            buildWardrobeText(new Map(previousFrame.wardrobes.map(item => [item.name, item]))),
+          ] : []),
+        ].join('\n') : '',
         profile,
       );
     }
@@ -514,6 +556,7 @@ async function runForFloor(floor: number, opts: RunOptions = {}): Promise<void> 
     let lastError = '';
     /** 本楼装备变化；非单通道路径下恒为空。 */
     let wardrobeUpdates: WardrobeUpdate[] = [];
+    let frameDelta: FloorContinuity | undefined;
     const retries = Math.max(0, Math.floor(Number(settings.autoTag.retryCount) || 0));
     if (unifiedEligible) {
       const unified = await runUnifiedPass({
@@ -534,6 +577,16 @@ async function runForFloor(floor: number, opts: RunOptions = {}): Promise<void> 
         },
         segments: preparedTarget.segments,
         entries: anchors.entries,
+        chatId,
+        wardrobesBefore: wardrobeBaseline,
+        captureFrames: profile.naiCharPrompts,
+        reuseOutfits: priorRun && previousOutfitDelta?.swipe === (swipeId ?? 0) ? previousOutfitDelta.updates : undefined,
+        reuseNew: priorRun && previousDelta?.swipe === (swipeId ?? 0) ? previousDelta.ops.flatMap(op =>
+          op.kind === 'new' && Object.values(op.fields).some(Boolean) ? [{
+            name: op.name, field: 'new' as const, position: preparedTarget.segments[0].id,
+            sourceLine: preparedTarget.segments[0].sourceLine, reason: op.reason,
+            value: JSON.stringify(op.fields), nl: op.nl,
+          }] : []) : undefined,
         opsResolver: changes => {
           const resolved = planChangeOps({ images: [], changes });
           return lockedNames.size
@@ -546,6 +599,10 @@ async function runForFloor(floor: number, opts: RunOptions = {}): Promise<void> 
         retries,
       });
       plan = unified.plan;
+      expectedBaseline = baselineFingerprint();
+      if (profile.naiCharPrompts) frameDelta = {
+        swipe: swipeId ?? 0, sourceHash: signature, baselineHash: expectedBaseline, frames: unified.frames,
+      };
       wardrobeUpdates = unified.wardrobeUpdates;
       if (controller.signal.aborted) {
         processed.delete(identity);
@@ -612,6 +669,12 @@ async function runForFloor(floor: number, opts: RunOptions = {}): Promise<void> 
           return;
         }
         plan = parsed.plan;
+        if (plan && previousFrame) {
+          const wardrobe = new Map(previousFrame.wardrobes.map(item => [item.name, item]));
+          plan.images = plan.images.map(image => assembleImageCharacters({
+            ...image, characters: image.characters.map(({ wearState, ...character }) => character),
+          }, previousEntries, wardrobe, world));
+        }
       } catch (error) {
         if (controller.signal.aborted) {
           processed.delete(identity);
@@ -737,6 +800,15 @@ async function runForFloor(floor: number, opts: RunOptions = {}): Promise<void> 
     // 单槽重写是用户在卡片上的显式意图(同提示词编辑弹窗的「应用并重新生成」),
     // 不受 autoTag.autoGenerate 开关约束,一律 force 出图。
     const markSwipeId = message.swipe_id ?? 0;
+    if (profile.naiCharPrompts && !profile.comic && getContext()?.getCurrentChatId?.() === chatId &&
+        baselineFingerprint(charTagsBeforeFloor(floor), wardrobesBeforeFloor(floor)) !== expectedBaseline) {
+      processed.delete(identity);
+      if (!controller.signal.aborted && context.chat[floor] === message && activeSwipeId(message) === swipeId) {
+        if (!opts.baselineRetried) return await runForFloor(floor, { ...opts, baselineRetried: true });
+        toastr.info('上一楼连续变动，本次未写入过时状态，可重新分析本楼', '星绘');
+      }
+      return;
+    }
     const marked = plan.images.length > 0 && (settings.autoTag.autoGenerate || !!slot);
     if (marked) {
       if (slot) {
@@ -750,6 +822,16 @@ async function runForFloor(floor: number, opts: RunOptions = {}): Promise<void> 
     // 正文在 buildNext 里基于「落盘那一刻的真实正文」现算:分析期间别的插件对正文的修改
     // (翻译/润色/追加状态栏/改写句子)全部保留,tag 按叙事行重新定位后照常注入。
     let rebaseNote = '';
+    if (slot && priorRun && previousFrame) {
+      frameDelta = { ...priorRun, frames: priorRun.frames.map((frame, index) => index === slot.seq
+        ? { ...frame, promptHash: textHash(serializeImageTag(plan.images[0])) } : frame) };
+    } else if (frameDelta) {
+      const plannedFrames = frameDelta.frames;
+      frameDelta.frames = plan.images.map((image, index) => ({
+        sourceLine: image.sourceLine, frame: { ...plannedFrames[index], promptHash: textHash(serializeImageTag(image)) },
+      })).sort((a, b) => a.sourceLine - b.sourceLine).map(item => item.frame);
+    }
+    const frameExtra = { key: FRAME_CONTINUITY_KEY, value: frameDelta };
     const result = await applyMessageText(
       floor,
       currentText => {
@@ -781,8 +863,9 @@ async function runForFloor(floor: number, opts: RunOptions = {}): Promise<void> 
       // 单槽不写法:本楼角色增量与其它槽位图片都不归它管,不传 extraUpdate 即保持原样。
       // 服装增量与角色增量必须同一次写盘:若正文先落、服装后落,中途失败就会让下一楼读到旧的穿着。
       slot
-        ? undefined
+        ? (frameDelta ? frameExtra : undefined)
         : [
+            ...(frameDelta || message.extra?.[FRAME_CONTINUITY_KEY] ? [frameExtra] : []),
             {
               key: BBI_CHAR_EXTRA_KEY,
               value: makeCharTagFloorDelta(floorOps, swipeId ?? 0),

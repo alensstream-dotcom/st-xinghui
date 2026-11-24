@@ -293,6 +293,7 @@ async function requestCompletionAtUrl(
         throw new ApiError(data.error.message || '副 API 返回错误');
       }
 
+      if (data?.choices?.[0]?.finish_reason === 'length') console.info('[星绘] 副 API 响应达到输出上限', opts.source);
       const parsed = extractContent(data);
       if (!parsed) throw new ApiError('副 API 返回空内容');
       // ST 代理非流式分支是 response.send(json) 原样透传,故 usage 是上游真值。
@@ -358,6 +359,7 @@ export async function readSseContent(resp: Response): Promise<string> {
         const json = JSON.parse(payload);
         if (json?.error) throw new ApiError(json.error.message || '副 API 返回错误');
         const choice = json?.choices?.[0];
+        if (choice?.finish_reason === 'length') console.info('[星绘] 副 API 流式响应达到输出上限');
         const src = choice?.delta ?? choice?.message;
         const piece = textOf(src?.content) || textOf(choice?.text);
         if (piece) out += piece;

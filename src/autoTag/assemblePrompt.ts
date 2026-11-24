@@ -3,18 +3,7 @@ import type { CharTagEntry } from '@/state/charTags';
 import type { CharacterWardrobe, SlotWearStatus, WardrobeSlotKey } from '@/state/outfitState';
 import type { WorldAnchorConfig } from '@/state/worldAnchor';
 
-/**
- * 本地确定性编译器（服装架构 v2）。
- *
- * 分工是死的，而且各有唯一出处：
- * - 角色库档案：这个人长什么样（发色/发型/瞳色/肤色/体型/配饰），任何一帧都不变；
- * - 导演通道当帧给的 `outfit`：这一格她实际穿成什么样（自由英文词串，全裸给空串）；
- * - 导演通道当帧给的 `removed`：这一格明确脱掉的类目，编译成角色级负面（uc）；
- * - 导演通道的 `tag`：只允许是动作/姿势/表情/视线/source#-target#-mutual# 标记。
- *
- * 这里不再维护五层状态机、不再推断「谁盖住了谁」：上一楼的穿搭指纹由任务 A 交回
- * `finalOutfits`，导演在它基础上写本帧，缺省沿用。编译器只做三件事——拼、剥、压干扰。
- */
+/** 角色提示依次使用当刻的固定外貌、可见衣物与导演描述。 */
 
 function splitTags(raw: string): string[] {
   return raw
@@ -194,8 +183,14 @@ function extractDistinctiveFeatures(entry: CharTagEntry | undefined): string[] {
 const SEX_WORD_TAG = /^(?:1girl|2girls|3girls|multiple girls|1boy|2boys|3boys|multiple boys|girl|boy|solo)$/i;
 const HAIR_TAG = /\b(hair|bangs|ponytail|twintails|braid|braids|braided|bun|bob|updo|ahoge)\b/i;
 const EYE_SKIN_TAG = /\b(eyes|tsurime|tareme|jitome|sanpaku|pale skin|fair skin|dark skin|tan)\b/i;
+/**
+ * 眼部**表情**词：虽然含 eyes，但它们描述的是这一格的表情，不是瞳色眼型。
+ * 旧写法只按 \beyes\b 剥，把闭眼、半眯、眯眼、含泪这些合法表情一起吞掉了。
+ */
+const EYE_EXPRESSION_TAG = /^(?:closed eyes|half-closed eyes|wide-eyed|teary eyes|watery eyes|rolling eyes|empty eyes|narrowed eyes)$/i;
 const STATIC_BODY_TAG = /\b(tall female|petite|slender|curvy|voluptuous|flat chest|small breasts|medium breasts|large breasts|huge breasts|wide hips|long legs)\b/i;
 /** 这些词说明这一格正在发生接触（手在头发里、抓着衣领），属于动作，不算外貌声明。 */
+const STATIC_CLOTHING = /^(?:(?:white|black|red|blue|navy|green|pink|brown|grey|gray|yellow|purple|cotton|silk|long|short|pleated|leather|lace|wool|denim)\s+)*(?:dress|shirt|jacket|blouse|robe|skirt|coat|bra|panties|pants|jeans|shorts|stockings|boots|shoes)$/i;
 const ACTION_TOUCH_TAG = /\b(hand|hands|holding|touching|grabbing|pulling|lifting|unbuttoning|pressed|against|around|on her|on his)\b/i;
 
 export function stripLeakedAppearance(tags: string[], hasLibraryEntry: boolean): string[] {
@@ -204,6 +199,7 @@ export function stripLeakedAppearance(tags: string[], hasLibraryEntry: boolean):
     if (!token) return false;
     // 标记词(source#/target#/mutual#)永远是动作,不许动。
     if (token.includes('#')) return true;
+    if (EYE_EXPRESSION_TAG.test(token)) return true;
     if (hasLibraryEntry && SEX_WORD_TAG.test(token)) return false;
     if (ACTION_TOUCH_TAG.test(token)) return true;
     if (hasLibraryEntry && HAIR_TAG.test(token)) return false;
@@ -238,6 +234,8 @@ export function proportionGuardrailsFor(text: string): string[] {
 const SLOT_NEGATIVES: Record<WardrobeSlotKey, string[]> = {
   // 只压「上衣品类」这一组词。绝不能写 'clothes' 这类核弹词：脱掉上衣但还穿着裙子时，
   // 它会把下装一起屏蔽掉，人被画成裸的。
+  outer: ['coat', 'jacket'],
+  shoes: ['shoes', 'boots', 'heels'],
   top: ['shirt', 'blouse', 'jacket', 'coat', 'sweater', 'hoodie', 't-shirt', 'dress', 'robe', 'hanfu'],
   innerTop: ['bra', 'underwear', 'bikini top'],
   bottom: ['skirt', 'pants', 'shorts'],
@@ -275,7 +273,7 @@ function resolveSlot(
   const status: SlotWearStatus = override?.status ?? base?.status ?? 'on';
   const tag = (base?.tag ?? '').trim();
   const halfTag = (override?.halfTag || base?.halfTag || '').trim();
-  if (!tag) return null;
+  if (!tag && !(status === 'off' && (key === 'innerTop' || key === 'innerBottom'))) return null;
   return { tag, status, ...(halfTag ? { halfTag } : {}) };
 }
 
@@ -304,65 +302,123 @@ export function compileWardrobeForFrame(
   const innerBottom = resolveSlot(wardrobe, wearState, 'innerBottom');
   const legs = resolveSlot(wardrobe, wearState, 'legs');
 
-  // 上装
-  if (top?.status === 'on') {
+  // 连身衣（道袍/汉服/连身裙/旗袍/和服）：只有上装一条记录，但上下可能分别半脱。
+  // half_top=只解领口（上身露、下身还被长摆盖着），half_bottom=只掀裙摆（下身露、上身还穿着）。
+  const isOnePiece = Boolean(top?.tag && ONEPIECE_GARMENT.test(top.tag));
+  const topHalfSide = top ? halfSide(top.status, top.halfTag, isOnePiece) : 'none';
+
+  const outer = resolveSlot(wardrobe, wearState, 'outer');
+  const shoes = resolveSlot(wardrobe, wearState, 'shoes');
+  const outerOpen = !outer || outer.status !== 'on';
+  if (outer && outer.status !== 'off') {
+    push(outer.tag);
+    if (isHalfStatus(outer.status)) push(outer.halfTag);
+  }
+  // 外套敞开仍有衬衫，衬衫扣好时继续遮住内衣。
+  if (outerOpen && top?.status === 'on') {
     push(top.tag);
-  } else if (top?.status === 'half') {
-    push(top.tag);
-    push(top.halfTag);
+  } else if (outerOpen && isHalfStatus(top?.status)) {
+    push(top?.tag);
+    push(top?.halfTag);
   } else if (top?.status === 'off') {
     negatives.push(...SLOT_NEGATIVES.top);
   }
 
+  // 上身是否露出：外装不在原位，且这一帧确实是「上身」半脱（half_bottom 只掀裙摆时不算）。
+  const upperOpen = !top || top.status === 'off' || topHalfSide === 'top' || topHalfSide === 'both';
+
   // 只有「确实有上装或内衣记录，且外装不在原位」时才判定露出：完全没有装备记录时
   // 不该替模型断言她裸着（首次出场还没建表，那一格由正文与导演的 outfit 决定）。
-  // 与下身对称：只穿内衣/肚兜出场（top 为空、innerTop 有记录）也必须正常输出内衣。
-  if ((top || innerTop) && (!top || top.status !== 'on')) {
+  // 内搭**未建档（undefined）**＝正文没交代，同样不猜；只有明确脱了（off）才写裸露词。
+  if (outerOpen && (top || innerTop) && upperOpen) {
     if (innerTop?.status === 'on') {
       push(innerTop.tag);
-    } else if (innerTop?.status === 'half') {
-      push(innerTop.tag);
-      push(innerTop.halfTag);
-    } else {
+    } else if (isHalfStatus(innerTop?.status)) {
+      push(innerTop?.tag);
+      push(innerTop?.halfTag);
+    } else if (innerTop?.status === 'off' && (!top || top.status === 'off')) {
       positive.push('bare breasts', 'nipples');
-      if (innerTop?.status === 'off') negatives.push(...SLOT_NEGATIVES.innerTop);
+      negatives.push(...SLOT_NEGATIVES.innerTop);
     }
   }
 
-  if (upperOnly) return { positive: dedupeTags(positive), negatives: dedupeTags(negatives) };
+  if (outer?.status === 'off') negatives.push(...SLOT_NEGATIVES.outer);
+  if (upperOnly) return finishWardrobe(positive, negatives);
 
-  // 下装（连身衣没有 bottom 记录时，状态跟着上装）
+  // 下装（连身衣没有 bottom 记录时，状态跟着上装，但只有下身半脱/全脱才判露出）
   const bottom: ResolvedSlot | null =
-    bottomRaw ?? (top && ONEPIECE_GARMENT.test(top.tag) ? { tag: '', status: top.status } : null);
+    bottomRaw ?? (isOnePiece && top ? { tag: '', status: top.status, halfTag: top.halfTag } : null);
   const bottomStatus = bottom?.status ?? null;
-  if (bottom?.tag && bottomStatus === 'on') {
+  const hemOpen = !isOnePiece || top?.status === 'off' || topHalfSide === 'bottom' || topHalfSide === 'both';
+  const lowerOpen = hemOpen && bottomStatus !== 'on';
+
+  if (hemOpen && bottom?.tag && bottomStatus === 'on') {
     push(bottom.tag);
-  } else if (bottom?.tag && bottomStatus === 'half') {
+  } else if (hemOpen && bottom?.tag && isHalfStatus(bottomStatus)) {
     push(bottom.tag);
     push(bottom.halfTag);
   } else if (bottomStatus === 'off') {
     negatives.push(...SLOT_NEGATIVES.bottom);
   }
 
-  if ((bottom || innerBottom) && bottomStatus !== 'on') {
+  if ((bottom || innerBottom) && lowerOpen) {
     if (innerBottom?.status === 'on') {
       push(innerBottom.tag);
-    } else if (innerBottom?.status === 'half') {
-      push(innerBottom.tag);
-      push(innerBottom.halfTag);
-    } else {
+    } else if (isHalfStatus(innerBottom?.status)) {
+      push(innerBottom?.tag);
+      push(innerBottom?.halfTag);
+    } else if (innerBottom?.status === 'off') {
       if (bottomStatus === 'off') positive.push('bottomless');
-      if (innerBottom?.status === 'off') negatives.push(...SLOT_NEGATIVES.innerBottom);
+      negatives.push(...SLOT_NEGATIVES.innerBottom);
     }
   }
 
   if (legs?.status === 'on') push(legs.tag);
-  else if (legs?.status === 'half') {
+  else if (isHalfStatus(legs?.status) && legs) {
     push(legs.tag);
     push(legs.halfTag);
   } else if (legs?.status === 'off') negatives.push(...SLOT_NEGATIVES.legs);
 
-  return { positive: dedupeTags(positive), negatives: dedupeTags(negatives) };
+  if (shoes?.status === 'off') negatives.push(...SLOT_NEGATIVES.shoes);
+  if (shoes && shoes.status !== 'off') {
+    push(shoes.tag);
+    if (isHalfStatus(shoes.status)) push(shoes.halfTag);
+  }
+  return finishWardrobe(positive, negatives);
+}
+
+function finishWardrobe(positive: string[], negatives: string[]): CompiledWardrobe {
+  const visible = positive.join(', ').toLowerCase().split(/[^a-z]+/);
+  const visibleUnderwear = visible.some(word => ['panties', 'bra', 'underwear'].includes(word));
+  const safe = negatives.filter(word => !visible.includes(word) && !(word === 'underwear' && visibleUnderwear));
+  return { positive: dedupeTags(positive), negatives: dedupeTags(safe) };
+}
+
+/** 半脱状态（含连身衣的上下半脱）。 */
+export function isHalfStatus(status: string | null | undefined): boolean {
+  return status === 'half' || status === 'half_top' || status === 'half_bottom';
+}
+
+/**
+ * 半脱落在哪一半。
+ * - half_top / half_bottom 直接给答案；
+ * - 旧值 half 没有侧别：连身衣看 halfTag 有没有裙摆/掀起词，有就算下身，否则按上身；
+ *   非连身衣的 half（衬衫敞开、裙子撩起）两半都算，行为与旧版一致。
+ */
+export function halfSide(
+  status: string | null | undefined,
+  halfTag: string | undefined,
+  onePiece: boolean,
+): 'none' | 'top' | 'bottom' | 'both' {
+  if (status === 'half_top') return 'top';
+  if (status === 'half_bottom') return 'bottom';
+  if (status !== 'half') return 'none';
+  if (!onePiece) return 'both';
+  const detail = halfTag ?? '';
+  const lower = /\b(hem|skirt|dress lift|apron lift)\b/i.test(detail);
+  const upper = /\b(collar|neckline|unbuttoned|front|chest|shoulders?)\b/i.test(detail);
+  if (lower && upper) return 'both';
+  return lower ? 'bottom' : upper ? 'top' : 'none';
 }
 
 /**
@@ -413,10 +469,11 @@ export function assembleImageCharacters(
     }
 
     const fixedTags = buildFixedAppearanceTags(entry, character.omitFeatures);
-    const hasLibraryEntry = Boolean(entry?.fields.hair.trim() || entry?.fields.eyes.trim());
+    const hasLibraryEntry = Boolean(entry);
     const compiled = compileWardrobeForFrame(wardrobes.get(character.name), character.wearState, upperOnly);
-    const outfitTags = compiled.positive.filter(tag => !(upperOnly && LOWER_ONLY.test(tag)));
-    const directorTags = stripLeakedAppearance(dropLocalizedMarkers(splitTags(character.tag)), hasLibraryEntry);
+    const outfitTags = compiled.positive.flatMap(splitTags).filter(tag => !(upperOnly && LOWER_ONLY.test(tag)));
+    const directorTags = stripLeakedAppearance(dropLocalizedMarkers(splitTags(character.tag)), hasLibraryEntry)
+      .filter(tag => !wardrobes.has(character.name) || !STATIC_CLOTHING.test(tag));
 
     const mergedPositive = dedupeTags([...fixedTags, ...outfitTags, ...directorTags])
       .filter(tag => !(upperOnly && LEG_ONLY.test(tag)))
@@ -438,7 +495,8 @@ export function assembleImageCharacters(
         const other = image.characters[otherIndex];
         const otherEntry = entriesAtPos.find(item => item.name === other.name);
         for (const feature of extractDistinctiveFeatures(otherEntry)) {
-          if (ownLower.has(feature.toLowerCase())) continue;
+          const word = feature.toLowerCase();
+          if (ownLower.has(word) || [...ownLower].some(tag => (' ' + tag + ' ').includes(' ' + word + ' '))) continue;
           negativeParts.push(feature);
         }
       }
@@ -448,7 +506,7 @@ export function assembleImageCharacters(
     const result: ImageCharacterPrompt = {
       name: character.name,
       tag: visiblePositive.join(', '),
-      nl: character.nl,
+      nl: image.nl && image.nl.trim() === character.nl.trim() ? '' : character.nl,
     };
     if (mergedUc) result.uc = mergedUc;
     return result;

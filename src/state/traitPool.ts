@@ -385,6 +385,13 @@ function inventoryUsage(entries: CharTagEntry[]): Map<string, number> {
         const word = token.trim().toLowerCase();
         if (!word) continue;
         usage.set(word, (usage.get(word) ?? 0) + 1);
+        // 档案允许 "long black hair"，候选池里的颜色词是 "black hair"。
+        const composite = key === 'hair' && word.match(/^(very long|long|medium|short) (.+ hair)$/);
+        if (composite) {
+          for (const trait of [composite[1] + ' hair', composite[2]]) {
+            usage.set(trait, (usage.get(trait) ?? 0) + 1);
+          }
+        }
       }
     }
   }

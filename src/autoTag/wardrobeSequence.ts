@@ -1,6 +1,7 @@
-import type { ImageCharacterPrompt } from '@/autoTag/protocol';
+import type { ImageCharacterPrompt, ImageInsertion } from '@/autoTag/protocol';
 import {
   applyWardrobeUpdate,
+  WARDROBE_SLOT_KEYS,
   type CharacterWardrobe,
   type GarmentSlot,
   type WardrobeSlotKey,
@@ -68,4 +69,62 @@ export function wardrobesAfterFloor(
     applyWardrobeUpdate(wardrobes, { name: update.name, mode: update.mode, slots: update.slots });
   }
   return wardrobes;
+}
+
+type Moment = { sourceLine: number; step?: number };
+
+export function compareMoments(a: Moment, b: Moment): number {
+  return a.sourceLine - b.sourceLine || (a.step ?? 0) - (b.step ?? 0);
+}
+
+/** 显式变化先于同一瞬间的镜头；旧导演只返回 wearState 时补录在它自己的 P 点。 */
+export function compileWardrobeSequence<T>(
+  before: Map<string, CharacterWardrobe>,
+  updates: WardrobeUpdate[],
+  shots: ImageInsertion[],
+  compile: (shot: ImageInsertion, wardrobe: Map<string, CharacterWardrobe>) => T,
+): { frames: T[]; updates: WardrobeUpdate[] } {
+  const state = new Map(before);
+  const persisted: WardrobeUpdate[] = [];
+  const frames: T[] = new Array(shots.length);
+  const ordered = updates.map(update => ({ ...update, sourceLine: update.position ? (update.sourceLine ?? 0) : -1 })).sort(compareMoments);
+  const order = shots.map((shot, index) => ({ shot, index })).sort((a, b) => compareMoments(a.shot, b.shot));
+  let cursor = 0;
+
+  function apply(update: WardrobeUpdate): void {
+    const slots = { ...update.slots };
+    if (update.mode === 'patch') {
+      const previous = state.get(update.name);
+      for (const key of WARDROBE_SLOT_KEYS) {
+        const patch = slots[key];
+        if (!patch) continue;
+        if (previous?.[key]?.tag) slots[key] = { ...patch, tag: previous[key].tag };
+        else if (!patch.tag && !(patch.status === 'off' && (key === 'innerTop' || key === 'innerBottom'))) {
+          console.warn('[星绘] 穿脱未找到原衣物', update.name, key, update.position);
+          delete slots[key];
+        }
+      }
+    }
+    if (!Object.keys(slots).length) return;
+    const resolved: WardrobeUpdate = { ...update, slots };
+    applyWardrobeUpdate(state, resolved);
+    persisted.push(resolved);
+  }
+
+  for (const { shot, index } of order) {
+    while (cursor < ordered.length && compareMoments(ordered[cursor], shot) <= 0) apply(ordered[cursor++]);
+    for (const character of shot.characters) {
+      if (!character.wearState) continue;
+      const slots = { ...character.wearState };
+      for (const update of ordered) {
+        if (update.name !== character.name || compareMoments(update, shot) !== 0) continue;
+        for (const key of WARDROBE_SLOT_KEYS) if (update.slots[key]) delete slots[key];
+      }
+      apply({ name: character.name, mode: 'patch', slots, position: shot.position, sourceLine: shot.sourceLine, step: shot.step });
+    }
+    const characters = shot.characters.map(({ wearState, ...character }) => character);
+    frames[index] = compile({ ...shot, characters }, state);
+  }
+  while (cursor < ordered.length) apply(ordered[cursor++]);
+  return { frames, updates: persisted };
 }

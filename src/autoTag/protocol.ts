@@ -9,13 +9,12 @@ import {
   type CharTagHistoryField,
 } from '@/state/charTags';
 import type {
-  GarmentSlot,
   SlotWearStatus,
   TimeJump,
   WardrobeSlotKey,
   WardrobeUpdate,
 } from '@/state/outfitState';
-import { normaliseWardrobeUpdate, WARDROBE_SLOT_KEYS } from '@/state/outfitState';
+import { normaliseWardrobeUpdate, readWardrobeStep, WARDROBE_SLOT_KEYS } from '@/state/outfitState';
 
 export interface ImageCharacterPrompt {
   name: string;
@@ -44,6 +43,8 @@ export interface ImageCharacterPrompt {
 }
 
 export interface ImageInsertion {
+  /** 同一 P 段内有多个状态时才指定。 */
+  step?: number;
   /** 模型选择的目标正文位置 ID。 */
   position: string;
   /** 位置 ID 对应的原始物理行(0-based，仅插件内部使用)。 */
@@ -124,26 +125,24 @@ function jsonObjects(raw: string): string[] {
   for (const match of cleaned.matchAll(/```(?:json)?\s*([\s\S]*?)```/gi)) candidates.push(match[1].trim());
   candidates.push(cleaned);
 
-  for (let start = 0; start < cleaned.length; start += 1) {
-    if (cleaned[start] !== '{') continue;
-    let depth = 0;
-    let quoted = false;
-    let escaped = false;
-    for (let index = start; index < cleaned.length; index += 1) {
-      const char = cleaned[index];
-      if (quoted) {
-        if (escaped) escaped = false;
-        else if (char === '\\') escaped = true;
-        else if (char === '"') quoted = false;
-        continue;
-      }
-      if (char === '"') quoted = true;
-      else if (char === '{') depth += 1;
-      else if (char === '}' && --depth === 0) {
-        candidates.push(cleaned.slice(start, index + 1));
-        break;
-      }
+  // 只提取完整的顶层对象。输出被截断时，内部完整的第一张图不能冒充整楼计划。
+  let start = 0;
+  let depth = 0;
+  let quoted = false;
+  let escaped = false;
+  for (let index = 0; index < cleaned.length; index++) {
+    const char = cleaned[index];
+    if (!depth) {
+      if (char === '{') { start = index; depth = 1; }
+      continue;
     }
+    if (quoted) {
+      if (escaped) escaped = false;
+      else if (char === '\\') escaped = true;
+      else if (char === '"') quoted = false;
+    } else if (char === '"') quoted = true;
+    else if (char === '{') depth++;
+    else if (char === '}' && --depth === 0) candidates.push(cleaned.slice(start, index + 1));
   }
   return candidates;
 }
@@ -268,10 +267,13 @@ function sanitizeWearState(
     if (!raw || typeof raw !== 'object' || Array.isArray(raw)) continue;
     const item = raw as Record<string, unknown>;
     const status = item.status;
-    if (status !== 'on' && status !== 'half' && status !== 'off') continue;
+    const known =
+      status === 'on' || status === 'half' || status === 'half_top' || status === 'half_bottom' || status === 'off';
+    if (!known) continue;
     const halfTag =
       typeof item.halfTag === 'string' ? item.halfTag.trim().replace(/\s+/g, ' ').slice(0, 60) : '';
-    out[key] = { status, ...(status === 'half' && halfTag ? { halfTag } : {}) };
+    const half = status === 'half' || status === 'half_top' || status === 'half_bottom';
+    out[key] = { status, ...(half && halfTag ? { halfTag } : {}) };
   }
   return out;
 }
@@ -336,7 +338,8 @@ export function parseImagePlan(
     // 兼容模型按习惯返回 orientation / aspect 键
     const size = normalizeOrientation(entry.size ?? entry.orientation ?? entry.aspect);
     if (rules.femaleScenesOnly && !hasNaiFemaleSubject(tag, characters)) continue;
-    images.push({ position, sourceLine, tag, nl, negative, characters, size });
+    const step = readWardrobeStep(entry.step);
+    images.push({ position, sourceLine, ...(step ? { step } : {}), tag, nl, negative, characters, size });
   }
 
   const limitedImages = images.slice(0, normalizedMax);
@@ -532,7 +535,7 @@ function planText(value: unknown, limit = 300): string {
  * 装备变化解析。
  *
  * 允许同一角色在一楼里出现多次（P2 旧衣、P10 换女仆装）：位置不同就是两件事，
- * 按位置分别去重；position 解析成 sourceLine 后升序排列，运行期按图逐段生效。
+ * 同 P 可以发生多条变化；position 解析成 sourceLine，运行期再按可选 step 排序。
  * 位置写坏且不是楼首语义的，宁可丢这一条也不猜——猜错会让她整楼穿错衣服。
  */
 function parseWardrobeUpdates(
@@ -542,7 +545,6 @@ function parseWardrobeUpdates(
 ): WardrobeUpdate[] {
   if (!Array.isArray(rawUpdates)) return [];
   const out: WardrobeUpdate[] = [];
-  const seen = new Set<string>();
   for (const item of rawUpdates) {
     const update = normaliseWardrobeUpdate(item);
     if (!update) continue;
@@ -551,15 +553,14 @@ function parseWardrobeUpdates(
     let position = '';
     if (update.position) {
       const parsed = parsePosition(update.position, positions);
-      if (!parsed) continue;
+      if (!parsed) {
+        console.warn('[星绘] 装备变化位置无效', update.name, update.position);
+        continue;
+      }
       sourceLine = parsed.sourceLine;
       position = parsed.position;
     }
-    const key = `${update.name}\u0000${sourceLine}`;
-    if (seen.has(key)) continue;
-    seen.add(key);
     out.push({ ...update, sourceLine, ...(position ? { position } : {}) });
-    if (out.length >= 12) break;
   }
   return out.sort((a, b) => (a.sourceLine ?? 0) - (b.sourceLine ?? 0));
 }

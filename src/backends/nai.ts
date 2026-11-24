@@ -436,6 +436,21 @@ export function buildNaiParameters(nai: NaiRunConfig, values: NaiGenerateValues)
       char_caption: characterCaption(character),
       centers: [{ x: 0.5, y: 0.5 }],
     }));
+    // 只观察实际发出的正向文本。字符启发式不是 tokenizer，不按估值裁剪人物或用户预设。
+    if (naiSupportsCharacterPrompts(nai.model)) {
+      const rough = (text: string) => Math.ceil(text.length / 4);
+      const base = rough(prompt);
+      const perCharacter = charCaptions.map(item => rough(item.char_caption));
+      const v5 = isNai5(nai.model);
+      const budget = v5 ? (nai.model.includes('curated') ? 703 : 1471) : 512;
+      const estimate = v5 ? base : base + perCharacter.reduce((sum, value) => sum + value, 0);
+      if (estimate >= budget * 0.9) {
+        console.info('[星绘] 提示词接近模型参考预算（字符粗估）', {
+          model: nai.model, scope: v5 ? 'Base' : 'Base + characters', base, perCharacter,
+          artist: rough(naiArtistPrompt(nai)), quality: rough(naiQualityTags(nai)), budget,
+        });
+      }
+    }
     // 角色级负面：只否掉「这一个角色身上不该出现的东西」（已脱的内衣、别人的外套）。
     // 挂到全局 negative 会把另一个真穿着它的人一起否掉，所以必须按 char_captions 下标对齐。
     const charNegatives = activeCharacters.map(character => ({

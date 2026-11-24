@@ -69,11 +69,13 @@ describe('compileWardrobeForFrame', () => {
     expect(compiled.positive.join(', ')).not.toContain('no bra');
   });
 
-  it('下装脱掉时加 bottomless 并压裙裤词；半身构图不输出下身词', () => {
+  it('下装与内裤都脱掉时加 bottomless 并压裙裤词；半身构图不输出下身词', () => {
+    // 内裤未建档＝正文没交代，不能替模型断言 bottomless；只有明确 off 才算。
     const full = compileWardrobeForFrame(
       wardrobe('温岚', {
         top: { tag: 'white shirt', status: 'on' },
         bottom: { tag: 'blue jeans', status: 'off' },
+        innerBottom: { tag: 'white panties', status: 'off' },
       }),
     );
     expect(full.positive).toContain('bottomless');
@@ -83,6 +85,7 @@ describe('compileWardrobeForFrame', () => {
       wardrobe('温岚', {
         top: { tag: 'white shirt', status: 'on' },
         bottom: { tag: 'blue jeans', status: 'off' },
+        innerBottom: { tag: 'white panties', status: 'off' },
       }),
       undefined,
       true,
