@@ -1,5 +1,6 @@
 import type { TargetSegment } from './clean';
 import type { ImageCharacterPrompt, ImageInsertion } from './protocol';
+import { applyFrameStaging, keepGroundedSupport, stagingActionQuote } from './frameStaging';
 import { affirmedCue, groundFrameAnchor } from './frameAnchor';
 import { readContactLayers } from './wardrobeProjection';
 import { storyClauses } from './storyMoment';
@@ -87,7 +88,7 @@ function applyViewpoint(image: ImageInsertion, raw: unknown, at: string): void {
 /** 旧导演也能用正文校验。新导演可提供准确的触发短句和镜头必须容纳的部位。 */
 export function groundStoryImage(image: ImageInsertion, raw: Record<string, unknown>, segments: TargetSegment[]): ImageInsertion {
   if (image.singleFrame === false) return image;
-  groundFrameAnchor(image, raw, segments);
+  groundFrameAnchor(image, raw, segments, stagingActionQuote(raw.staging));
   const index = segments.findIndex(segment => segment.id === image.position);
   const clauses = storyClauses(segments[index]?.text ?? '');
   const matched = clauses.flatMap((part, i) => !NON_ACTION.test(part) && readFocus(raw.focus, image, part) ? [i + 1] : []);
@@ -100,6 +101,7 @@ export function groundStoryImage(image: ImageInsertion, raw: Record<string, unkn
   const future = [clauses.slice(until).join(' '), ...segments.slice(index + 1, index + 7).map(segment => segment.text)].join(' ');
   enforceVisibleState(image, prefix, future);
   image.clearLayers = readContactLayers(raw.clearLayers, image, clauses.slice(0, until));
+  if (applyFrameStaging(image, raw.staging, segments)) return image;
   applyViewpoint(image, raw.view, at);
 
   const point = image.clause ? clauses[image.clause - 1] : at;
@@ -176,5 +178,6 @@ export function groundStoryImage(image: ImageInsertion, raw: Record<string, unkn
   const place = tags(image.tag).find(tag => PLACE.test(tag))?.match(PLACE)?.[0].toLowerCase();
   if (image.visualPose && actor) image.visualPose = [sceneStart, place ?? '', focus?.name ?? actor.name, image.visualPose].join('|');
   else if (!focus && (!actor || !place || !ACTION.test(shotText) && !ARM_HOLD.test(shotText))) delete image.visualPose;
+  keepGroundedSupport(image, segments);
   return image;
 }

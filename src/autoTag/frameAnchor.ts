@@ -3,7 +3,7 @@ import type { ImageInsertion } from './protocol';
 import { storyClauses } from './storyMoment';
 
 const INACTIVE_START = /^(?:[“「『"]|如果|假如|要是|想象|回忆|听说|本想|if\b|would\b)/i;
-const SCENE_BOUNDARY = /场景切换|翌日|次日|第二天|隔日|几天后|数小时后|\b(?:the next day|hours? later|meanwhile elsewhere)\b/i;
+const SCENE_BOUNDARY = /场景切换|镜头(?:切|转)到|转到另一边|翌日|次日|第二天|隔日|几天后|数小时后|\b(?:the next day|hours? later|meanwhile elsewhere)\b/i;
 const NEGATED = /(?:并未|并没有|还没(?:有)?|没有|未曾|尚未|没能|差点|本来要|正准备|想要|只是想|期待)(?:[^。！？]{0,22})$|\b(?:not yet|did not|didn.t|nearly|about to|wanted to)(?:[\w '’-]{0,35})$/i;
 
 interface Anchor {
@@ -11,6 +11,8 @@ interface Anchor {
   clause: number;
   cue: string;
 }
+
+export const isFrameSceneBoundary = (text: string): boolean => SCENE_BOUNDARY.test(text);
 
 export function affirmedCue(part: string, cue: string): boolean {
   const at = part.indexOf(cue);
@@ -48,7 +50,7 @@ function locatePropAttachment(near: TargetSegment[], image: ImageInsertion): Anc
 }
 
 /** 定位锚在正文中校验。引用可跨相邻段修正 P，但不可跨已知场景切换或跳到预告。 */
-export function groundFrameAnchor(image: ImageInsertion, raw: Record<string, unknown>, segments: TargetSegment[]): void {
+export function groundFrameAnchor(image: ImageInsertion, raw: Record<string, unknown>, segments: TargetSegment[], stagingQuote?: unknown): void {
   const index = segments.findIndex(segment => segment.id === image.position);
   if (index < 0) return;
   let start = index;
@@ -56,7 +58,7 @@ export function groundFrameAnchor(image: ImageInsertion, raw: Record<string, unk
   while (start > Math.max(0, index - 3) && !SCENE_BOUNDARY.test(segments[start].text)) start--;
   while (end + 1 < Math.min(segments.length, index + 4) && !SCENE_BOUNDARY.test(segments[end + 1].text)) end++;
   const near = segments.slice(start, end + 1);
-  const quotes = [raw.anchor, Array.isArray(raw.focus) ? raw.focus[1] : undefined]
+  const quotes = [stagingQuote, raw.anchor, Array.isArray(raw.focus) ? raw.focus[1] : undefined]
     .filter((value): value is string => typeof value === 'string' && value.trim().length >= 4 && value.length <= 160);
   const anchor = quotes.map(quote => findQuote(near, image.position, image.clause, quote.trim())).find(Boolean)
     ?? locatePropAttachment(near.slice(index - start), image);

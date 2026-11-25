@@ -16,6 +16,7 @@ import type {
 } from '@/state/outfitState';
 import { compareStoryMoments, storyClause, storyClauses } from './storyMoment';
 import { readSceneBeat, selectStoryImages, type SceneBeat } from './sceneSelection';
+import { carryFrameProps } from './frameStaging';
 import { groundStoryImage } from './sceneGrounding';
 import { frameAgeMatchesSource } from './visualIdentity';
 import { normaliseWardrobeUpdate, readWardrobeStep, WARDROBE_SLOT_KEYS } from '@/state/outfitState';
@@ -414,6 +415,7 @@ export function parseImagePlan(
     images.push(grounded);
   }
 
+  if (rules.selectBeats) carryFrameProps(parsed.propEvents, images, segments);
   const limitedImages = selectStoryImages(images, normalizedMax, normalizedMin, rules.selectBeats);
   const noEligibleScene = rules.femaleScenesOnly && limitedImages.length === 0;
   const exhausted = rules.selectBeats && (limitedImages.length < images.length || parsed.noMoreDistinctFrames === true);

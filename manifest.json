@@ -3,9 +3,9 @@
   "loading_order": 100,
   "requires": [],
   "optional": [],
-  "js": "dist/index.js?ver=0.3.32",
+  "js": "dist/index.js?ver=0.3.33",
   "author": "alensstream-dotcom",
-  "version": "0.3.32",
+  "version": "0.3.33",
   "homePage": "https://github.com/alensstream-dotcom/st-xinghui",
   "auto_update": false,
   "minimum_client_version": "1.12.13"

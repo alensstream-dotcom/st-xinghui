@@ -1010,3 +1010,109 @@ describe('服装缺档和跨楼恢复的 NovelAI 4.5 请求', () => {
   });
 
 });
+
+describe('有正文证据的分镜调度进入最终 NovelAI 请求', () => {
+  const woman = '周宁';
+  const man = '陈远';
+  const profile = (name: string, sex: string): CharTagEntry => ({
+    name, source: 'ai', desc: '', raw: '', nl: '', history: [], fields: { ...emptyCharFields(), sex, body: 'adult' },
+  });
+  const entries = [profile(woman, '1girl'), profile(man, '1boy')];
+  const draft = (position: string, extra: object = {}) => ({
+    position, tag: '1girl, 1boy, from behind, close-up, workshop, embrace', nl: 'They sit together and hug.',
+    characters: [
+      { name: woman, tag: 'girl, sitting, leaning back against his chest, pressed down, target#embrace, serious', nl: 'She leans backward.' },
+      { name: man, tag: '1boy, standing, source#embrace, hugging her from behind', nl: 'He hugs her.' },
+    ], ...extra,
+  });
+  function render(story: string, images: object[], propEvents: object[] = []) {
+    const segments = prepareTargetText(story, []).segments;
+    const plan = parseUnifiedPlan(JSON.stringify({ images, propEvents }), segments, 0, 8, { selectBeats: true });
+    return plan.images.map(raw => {
+      const image = compactGeneratedScene(assembleImageCharacters(raw, entries));
+      const parsed = parseImageTagContent(parseImageTags(serializeImageTag(image))[0]);
+      const body = buildNaiParameters(nai({ model: 'nai-diffusion-4-5-full' }), { prompt: parsed.tag, nl: parsed.nl, characters: parsed.characters, seed: 7 });
+      const caption = (body.v4_prompt as { caption: { base_caption: string; char_captions: { char_caption: string }[] } }).caption;
+      return { position: raw.position, clause: raw.clause, base: caption.base_caption,
+        roles: caption.char_captions.map(character => character.char_caption) };
+    });
+  }
+
+  it('从错误等待段移到接触当拍，保留施受、左手支撑和膝盖，摄影机独立取侧面', () => {
+    const body = '周宁跪下，左手扶住栏杆。\n陈远还没有俯到她身后。\n陈远从她身后俯身把传感器夹在她肩带上。';
+    const [frame] = render(body, [draft('P2', { staging: {
+      action: ['从她身后俯身把传感器夹在她肩带上', '@{陈远} leans forward behind @{周宁} and fastens the sensor to her shoulder strap'],
+      actors: [
+        [woman, 'kneeling', 'left hand braced on the railing and knees on the floor', ['周宁跪下', '左手扶住栏杆']],
+        [man, 'keep', 'torso angled forward from behind with one hand on the sensor', '从她身后俯身把传感器夹在她肩带上'],
+      ],
+      camera: ['from side', ['hands', 'knees', 'support', 'contact']],
+      link: [man, woman, 'attaching sensor'],
+    } })]);
+    expect(frame.position).toBe('P3');
+    expect(frame.base).toMatch(/the man leans forward behind the woman.*from side.*full body/);
+    expect(frame.roles[0]).toMatch(/kneeling.*left hand braced on the railing.*target#attaching sensor/);
+    expect(frame.roles[1]).toMatch(/torso angled forward from behind.*source#attaching sensor/);
+    expect([frame.base, ...frame.roles].join(' ')).not.toMatch(/embrace|hug|leaning back|She leans backward|close-up|[@{}]/);
+  });
+
+  it('只画入镜者并明确画外人的手在操作，动作保留在短词模式可用的主描述', () => {
+    const quote = '戴手套的手从左边伸入';
+    const [frame] = render('周宁坐着，双手搭在膝头。\n戴手套的手从左边伸入，按下肩带的扣。', [draft('P2', {
+      tag: '1girl, close-up, workshop', nl: '', characters: [{ name: woman, tag: 'girl, standing, grabbing the clasp' }],
+      staging: {
+        action: [quote, 'A gloved hand enters from frame left toward the shoulder clasp'],
+        actors: [[woman, 'sitting', 'both hands resting on her lap', ['周宁坐着', '双手搭在膝头']]],
+        camera: ['from side', ['hands', 'contact']],
+      },
+    })]);
+    expect(frame.base).toMatch(/1girl.*gloved hand enters from frame left/);
+    expect(frame.roles).toHaveLength(1);
+    expect(frame.roles[0]).toContain('sitting, both hands resting on her lap');
+    expect(frame.roles[0]).not.toMatch(/standing|grabbing the clasp/);
+  });
+
+  it('无图段也能安装和取下道具，之前不可预见，窄景与换场不可串入', () => {
+    const body = '周宁检查肩带。\n陈远把红色传感器夹在周宁的肩带上。\n周宁回头。\n周宁取下红色传感器。\n周宁走开。\n翌日周宁回到工坊。';
+    const item = 'red sensor clipped to her shoulder strap';
+    const withDraft = (position: string) => draft(position, {
+      characters: [{ name: woman, tag: 'girl, serious, ' + item }, { name: man, tag: '1boy, standing' }],
+    });
+    const placed = ['P2', '把红色传感器夹在周宁的肩带上', 'red-sensor', 'set', woman, item, 'upper'];
+    const cleared = ['P4', '取下红色传感器', 'red-sensor', 'clear'];
+    const frames = render(body, [withDraft('P1'), withDraft('P3'), withDraft('P5'), withDraft('P6')], [placed, cleared]);
+    expect(frames.map(f => f.roles[0].includes(item))).toEqual([false, true, false, false]);
+    const withNoClear = render(body, [draft('P3'), withDraft('P6')], [placed]);
+    expect(withNoClear.map(f => f.roles[0].includes(item))).toEqual([true, false]);
+
+    const low = render('周宁把工具袋扣在膝旁。\n周宁低头。', [
+      draft('P2'),
+    ], [['P1', '把工具袋扣在膝旁', 'toolbag', 'set', woman, 'tool pouch clipped beside her knee', 'low']]);
+    expect(low[0].roles[0]).not.toContain('tool pouch');
+  });
+
+  it('既有导演少写支撑时，从同场正文恢复栏杆并清理水平地面的错误支撑', () => {
+    const [frame] = render('周宁跪在阳台上，周宁双手撑住栏杆。\n周宁回头看向夜色。', [
+      { position: 'P2', tag: '1girl, from behind, medium shot, balcony', characters: [
+        { name: woman, tag: 'girl, kneeling, on all fours, hands on floor' },
+      ] },
+    ]);
+    expect(frame.base).toContain('full body');
+    expect(frame.roles[0]).toContain('hands braced on the railing');
+    expect(frame.roles[0]).not.toMatch(/hands on floor|on all fours/);
+  });
+
+  it('旧夹具提示词已固定的道具延续到同场下一张，正文取下后结束', () => {
+    const body = '周宁在工坊等待。\n金属夹子夹住周宁肩带上的布条。\n周宁和陈远一起转头看向走廊。\n周宁取下金属夹子。\n周宁走开。';
+    const frames = render(body, [
+      { position: 'P1', tag: '1girl, medium shot, workshop, clamps, chain', nl: 'A metal clamp holds her shoulder strap.',
+        characters: [{ name: woman, tag: 'girl, sitting' }] },
+      draft('P3'),
+      draft('P5'),
+    ]);
+    expect(frames[0].position).toBe('P2');
+    expect(frames[1].roles[0]).toContain('clips still attached and linked by a thin chain');
+    expect(frames[2].roles[0]).not.toContain('clips still attached');
+  });
+
+});
