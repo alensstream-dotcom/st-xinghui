@@ -4,6 +4,7 @@ import { recoverExplicitWear, wardrobeEvidence } from './wardrobeEvidence';
 import type { ImageCharacterPrompt, ImageInsertion } from '@/autoTag/protocol';
 import {
   applyWardrobeUpdate,
+  dressStyle,
   normaliseWardrobeUpdate,
   type TimeJump,
   WARDROBE_SLOT_KEYS,
@@ -111,6 +112,35 @@ export function compileWardrobeSequence<T>(
   const cast = [...new Set([...before.keys(), ...(narrative?.knownNames ?? []), ...updates.map(update => update.name),
     ...shots.flatMap(shot => shot.characters.map(c => c.name))])];
   const recovered = narrative ? recoverExplicitWear(narrative.segments, cast, updates) : [];
+  const backfilledSlots = new Set<WardrobeUpdate['slots']>();
+  if (narrative) updates = updates.map(update => ({ ...update, slots: { ...update.slots } }));
+  if (narrative?.timeJump === 'same_day') for (const update of updates) {
+    if (!update.describedSince || !update.observed) continue;
+    const start = narrative.segments.findIndex(s => s.id === update.describedSince);
+    const end = narrative.segments.findIndex(s => s.id === update.position);
+    if (start < 0 || end <= start) continue;
+    const intervening = narrative.segments.slice(start, end + 1).map(s => s.text).join(' ');
+    if (/换[上装衣成了]|更衣|脱[下掉]|穿[上回换]|另外一件|第二天|次日|走进.{0,8}(?:房间|家中)|\b(?:changes? into|takes? off|puts? on|later that|the next day)\b/i.test(intervening)) continue;
+    const evidence = wardrobeEvidence(update, narrative.segments, narrative.timeJump, cast);
+    const slots: WardrobeUpdate['slots'] = {};
+    for (const key of WARDROBE_SLOT_KEYS) {
+      const slot = update.slots[key];
+      if (!slot?.tag || slot.status !== 'on' || !evidence.observed(key, slot.tag)) continue;
+      if (before.get(update.name)?.[key]) continue;
+      const earlier = [...updates, ...recovered].filter(other => other !== update && other.name === update.name
+        && (other.mode === 'replace' || other.slots[key]) && (other.sourceLine ?? -1) < (update.sourceLine ?? 0));
+      const initial = earlier.length === 1 && earlier[0].mode === 'replace' ? earlier[0] : undefined;
+      if (initial?.position === update.describedSince
+        && !wardrobeEvidence(initial, narrative.segments, narrative.timeJump, cast).specifiedGarment) initial.slots[key] = slot;
+      else if (!earlier.length) slots[key] = slot;
+    }
+    if (Object.keys(slots).length) {
+      backfilledSlots.add(slots);
+      // 只补已确认的单件。真正的换装/损坏仍在原始时点执行。
+      recovered.push({ name: update.name, mode: 'swap', position: narrative.segments[start].id,
+        sourceLine: narrative.segments[start].sourceLine, slots });
+    }
+  }
   const ordered = [...updates, ...recovered].map(update => ({
     ...update, sourceLine: update.position ? (update.sourceLine ?? 0) : -1,
   })).sort(compareMoments);
@@ -138,7 +168,8 @@ export function compileWardrobeSequence<T>(
     const previous = state.get(update.name);
     let mode = update.mode;
     let day: string | undefined;
-    if (narrative) {
+    const backfilled = backfilledSlots.has(update.slots);
+    if (narrative && !backfilled) {
       // 旧楼层会把外套写在 top、把单独鞋履写在 legs。对原件做 patch 时认回旧地址。
       if (mode === 'patch' && previous) {
         if (slots.outer && !previous.outer && !slots.top && !slots.outer.tag
@@ -236,6 +267,10 @@ export function compileWardrobeSequence<T>(
       }
     }
     if (!Object.keys(slots).length) return;
+    if (narrative && mode !== 'patch' && slots.top?.tag && !slots.top.style) {
+      const style = dressStyle(slots.top.tag);
+      if (style) slots.top = { ...slots.top, style };
+    }
     const resolved: WardrobeUpdate = { ...update, mode, slots };
     applyWardrobeUpdate(state, resolved);
     if (day && mode === 'replace') resetByDay.set(update.name, day);

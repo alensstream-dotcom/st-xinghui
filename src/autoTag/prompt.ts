@@ -428,7 +428,7 @@ const ARCHIVE_RULES = `① 建档与世界观
 - 只给正式女角建档：有姓名，或本楼有重点/亲密剧情且会再出场的神秘女角。男性、纯背景龙套不建档；已在【角色固定外貌库】的人禁再输出 field:"new"，只有永久变化（剪发/染发/体型）才改对应 field。
 - 匿名转真名：同楼揭晓→全楼直接用真名；跨楼揭晓→新档案 100% 照抄原匿名档案的 hair/eyes/skin/body/extra，禁重随机。全程匿名→用正文最稳定的指称。name 逐字照抄正文/档案，禁音译、加姓、去姓。
 - 同一人物优先采用档案原名；有歧义的称呼结合当前 P 上下文消歧。已知外貌不靠灯光、姿势或临时造型变更；确实染发或剪发时只改对应分面，保留未改变的颜色、长度等词。
-- 按各自的年龄依据、身份、性格、世界观和体态建档。温婉丰满的少妇可用成熟体态和柔和眉眼，清瘦或飒爽的角色用各自的特征。空缺维度可跨候选按人设组合，避开已有发型轮廓、眼型与体态的组合。新原创女角可给 faceOptions 列出 2～4 个可选的脸部轮廓和眉形。亲属关系与年龄分开：女儿、妹妹、娇小、被照顾都不能推出小孩；角色卡或正文明确成年/少年/童年才写年龄。回忆或成长镜头可在该角色加 age（adult/teenager/child/elderly adult），只作用于当前一格。
+- 按各自的年龄依据、身份、性格、世界观和体态建档。温婉丰满的少妇可用成熟体态和柔和眉眼，清瘦或飒爽的角色用各自的特征。空缺维度可跨候选按人设组合，避开已有发型轮廓、眼型与体态的组合。新原创女角可给 faceOptions 列出 2～4 个可选的脸部轮廓和眉形。亲属关系与年龄分开：女儿、妹妹、娇小、被照顾都不能推出小孩；角色卡或正文明确成年/少年/童年才写年龄。回忆或成长镜头可在该角色加 age（adult/young adult/middle-aged adult/teenager/child/elderly adult），只作用于当前一格。
 - hair 用逗号分隔的 Danbooru 原子词，四要素齐：发色（black/brown/blonde/red/silver hair，必填）、长度（short/medium/long/very long hair）+直卷（straight 可省）、扎发（hair down / high ponytail / twin braids / side ponytail / low bun）、刘海（blunt/parted/side-swept bangs、forehead）。禁生僻长短语（"medium chestnut brown hair"），少用 half updo。
 - eyes = 瞳色+标准眼型（tsurime/tareme/jitome/sanpaku），如 "brown eyes, tareme"，禁 "sharp eyes"，不许留空。skin 写 fair/pale/tan。body 只写 2～3 词（curvy, large breasts / slender, medium breasts / petite, small breasts），禁堆 6～7 个形容词，正文没写极高别默认 "tall female"、"long legs"。extra 放常戴眼镜、常驻首饰、标志印记（mole under eye / fang / ahoge / choker / hairclip）；某套衣服的配饰写进装备 tag。同人必填 fandom "character name (copyright name)"，原创留空。
 - 正文没写的维度按世界观一次性补齐并定死：现代写实只用现实发色，禁奇幻发色/额纹/异色瞳/尖耳；二次元/奇幻才可用 white hair、heterochromia、forehead mark、pointy ears。
@@ -468,7 +468,7 @@ export interface UnifiedInput {
 /** 装备表规则（v3：装备描述永不删除，状态码 on/half/off 分离）。 */
 const WARDROBE_RULES = `② 装备表与跨楼规则
 - 从上一楼装备表开始，通读到本楼最后一段。没写换装就继承最近有效状态；换房间、出门、回家、镜头裁切、谈论和想象都不能变更现实装备。
-- 首次出现先取正文和卡明写的衣服，无描述才按时代和角色定一次。固定款式含主色、衣物名、显著材质，换的才记。系扣、敞开和卷袖写进穿法字段。用 outer 外套、top 上衣/连身服、innerTop 贴身内层、bottom 下装、innerBottom 贴身下层、legs 袜、shoes 鞋。未知层留空。没有衣物描写时男女入镜者均用该世界观的日常服饰，正文明确的反差保留。古风中衣可写 white inner robe，贴身古风衣物按原文用可画的等效词，例如系颈的传统内搭用 halterneck camisole。连身服没有独立下装时不凭空补。鞋袜和随套装的配饰跟随各自衣件。
+- 首次出现先取正文和卡明写的衣服，无描述才按时代和角色定一次。固定款式含主色、衣物名。初次建档用 style 补写 1～3 项能维持辨识度的剪裁、领口、袖型或纹样，后续镜头沿用，状态改在半穿/损坏字段。系扣、敞开和卷袖写进穿法字段。用 outer 外套、top 上衣/连身服、innerTop 贴身内层、bottom 下装、innerBottom 贴身下层、legs 袜、shoes 鞋。未知层留空。没有衣物描写时男女入镜者均用该世界观的日常服饰，正文明确的反差保留。古风中衣可写 white inner robe，贴身古风衣物按原文用可画的等效词，例如系颈的传统内搭用 halterneck camisole。连身服没有独立下装时不凭空补。鞋袜和随套装的配饰跟随各自衣件。
 - wardrobeUpdates：同一件穿脱或损坏用 patch（可省 tag，永远沿用原件），换单件用 swap，明确整套更换或首次设定用 replace。每次变化写实际发生的 P，楼首用 P1；同 P 先脱后穿才加 step 跨图区分。即使此处不出图、发生在末图之后也记录。无变化给 []，不用每张图重复 wearState。
 - status=on/off/half/half_top/half_bottom；halfTag 写可见的穿法（如 rolled sleeves / collar ajar / open front / hem lifted above hips）。只卷袖、领口开一颗扣子或滑肩而内层仍遮住时用 reveal:"none"；确实露出下一层时用 reveal:"layer"。连身衣开领和提下摆分上、下；外套敞开如果下面还穿着扣好的衬衫，只露衬衫。明确损坏或沾湿用 condition，恢复时给 condition:""。暂时裁掉或挡住的衣物保持原状态。
 - 时间按人判断：明确跨日且另场再见可设新套，连续赶路、回家、原文仍穿同套时继承。人物还没走进那次新场景、或只是另一个人跨日，不提前改变这件衣服。`;
@@ -479,7 +479,7 @@ export const CONTACT_PROMPT = '两人发生具体接触时可用 contact:[施动
 const SHOT_RULES = `③ 选帧与构图防线
 - 分级：**S 级**（平级互不让位）＝高张力挑逗/支配（勾项圈、抬下巴、贴耳压迫、解衣拉扯、壁咚、按墙、抓腕、膝枕挑逗、隔衣抚摸）与显式 NSFW/阶段跃迁（脱衣暴露、前戏、口交、乳交、手交、足交、舔阴、插入、后入、骑乘、中出、高潮余韵）；**A 级**＝强接触与情绪爆点（拥抱、牵手、泪目、羞愤、重要换装亮相、湿身、正式初登场）；**B 级**＝强氛围定格；**C 级跳过**（站桩对话、赶路转场、纯独白、动作未发生或已结束、同姿势重复帧）。
 - 必须从楼尾倒扫回开头通读全楼；S 级未覆盖完不许用 A/B 占名额；楼超 15～20 段且上限 ≥3 张时名额跨段分布。
-- 峰值帧：同一事件跨多个 P 编号选动作完全成立、张力最饱满那句，铺垫与收尾不算。同级候选优先改变眼前局面、关系或情绪且能用可见动作读懂的一刻，再用名额覆盖另一段不同事件。一姿势一图：不重复高光各占 1 张，有余量才补同姿势第 2 张且换机位与景别。
+- 峰值帧：同一事件跨多个 P 编号选动作完全成立、张力最饱满那句，铺垫与收尾不算。同级候选优先改变眼前局面、关系或情绪且能用可见动作读懂的一刻，再用名额覆盖另一段不同事件。一姿势一图：不重复高光各占 1 张，同姿势跨段或只换机位也只保留一张，名额不够可以少出。
 - 机位：pov（女主默认 looking at viewer）用于面对面直视、男主伸手触碰、身前侍奉、后背位俯视（pov, from behind, from above）；第三人称（from side / three-quarter view / from above）用于独处、多女角同框、侧面曲线、背后环抱。连续两张或跨楼同体位必须换机位与景别；**男主整个人或上半身入镜一律第三人称禁 pov**。高低差互动（一人站+一人坐/跪/躺）禁 from below / low angle，改 from side, eye-level。
 - 景别以要看见的身体跨度为准：双手与脚踝、两人的站蹲高低差等要同时入镜时 extent:"whole"，有意只拍手、鞋、触点时 extent:"detail"。其余省略 extent。Base.tag：人数、机位、一个景别、地点和环境光。一张插画保持一个取景。避免分屏、背后加放大的同一张脸或用角色设定表代替当前镜头；剧中特意设计分格时可标 layout:"sequence"。
 - 标记 source#/target#/mutual#<1～3 词英文动作> 的两侧逐字相同，施受绝不写反；参与的男方入镜时也有角色块，用 boy 标识这一人。 ${CONTACT_PROMPT}
@@ -562,7 +562,7 @@ export function unifiedSystemPrompt(
   const countRule =
     minImages > 0
       ? `名额：本楼至少 ${minImages} 张、最多 ${maxImages} 张；合格镜头够数就必须给满 ${minImages} 张。`
-      : `名额：本楼 0～${maxImages} 张；有合格镜头就按上限给满，不要因为没把握只给一张。`;
+      : `名额：本楼 0～${maxImages} 张；有足够的独立合格镜头才达到上限。`;
   return `你只做一件事：读「目标正文」，一次交出本楼的完整出图计划——判世界观、判跨楼时间、为女角建档、记装备变化、挑值得画的瞬间、把每格写成 NAI 提示词。
 
 镜头只写此刻可见的场景和动作。固定外貌与服装在 changes、wardrobeUpdates 记录，由插件按镜头时点合成。
@@ -581,7 +581,10 @@ ${WARDROBE_RULES}
 
 ${SHOT_RULES}
 
-${trackMoments ? '同一 P 有 ⟦1⟧、⟦2⟧ 等子句标记时，镜头和发生服装或外貌变化的记录可填 clause:对应数字。只定位一个已经发生的瞬间；同子句多步仍用 step。图片可填 beat:["同一事件用相同短编号","S/A/B 中一个","peak/lead-in/aftermath 中一个"]，画动作成立时填 peak；不同事件用不同编号。清楚写已经穿着新衣、但没写换装动作时，可用 swap + observed:true，只给原文明确的那件。单只鞋离脚在 shoes 填 offSide:"left"/"right"，不确定哪只时用 halfTag。' : ''}
+${trackMoments ? `- P 决定插图落在哪句后；同 P 的 clause 决定动作取在哪个子句。focus:[施动者原名,"该子句原文中的连续短语","短英文可见动作与对象及位置","feet/hands/faces/whole 取一个"]。正文有触点时把正在接触的双方或道具和位置交代完整，例如 "shoe touching the cracked smartphone on the floor"。刚要碰、正碰到、已分开各是单独一帧，后续结果不能写进当前图。红眼和落泪分别取证，已经放到桌上的道具不能继续拿在手里。Base.nl 第一拍写 focus；其他角色只补同刻可见的反应。
+- pose 写 2～6 个英文单词表示主要身体姿势和动作，重复姿势沿用同一短语。beat:["同一事件重复使用的短编号","S/A/B 取一个","peak/lead-in/aftermath 取一个"]。前后动作相同仅情绪变化，选正文已有情绪变化后、仍有该姿势的一个定格。有效候选确实少于最少张数时，可给少量并在外层输出 noMoreDistinctFrames:true。
+- 角色表只列摄影机拍到的人。女性反应、指出、望向画外叙事视角，男性仅被看见/被指/站着旁观时用 POV，省掉该人的正向人像块和人数词；如果输出仍列了这名旁观角色，可用 view:["pov","画外视角角色名"] 标识。手部参与、确实不需要露脸时用 POV 局部，并在相应动作短语写清所属。必须看见两人动作和反应时让两人入镜，景别由所需部位决定。两名女性同框时给双方可读的脸和轮廓，用名字 @{原名} 或稳定可见特征互指；中文称呼留给剧情，避免 girl、mother、daughter 这类在英文里暗示年龄的称呼。
+- 已穿衣物后来才被写出时，用 swap + observed:true。只有首次补述同一场里早已穿着、期间没有变化，才可加 describedSince:"P编号" 回填缺失衣件。跨日、换装、穿法变化和遮挡仍遵照事件时点。单只鞋离脚在 shoes 填 offSide:"left"/"right"，不确定哪只时用 halfTag。` : ''}
 
 ${OUTPUT_RULES}`;
 }

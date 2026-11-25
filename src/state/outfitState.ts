@@ -34,6 +34,8 @@ export const WARDROBE_SLOT_LABELS: Record<WardrobeSlotKey, string> = {
 export interface GarmentSlot {
   /** 装备本身的视觉指纹（脱掉时绝不删除，以便后续穿回 100% 原样还原）。 */
   tag: string;
+  /** 固定剪裁和纹样，随原件继承。 */
+  style?: string;
   /** on=正常穿着 | half/half_top/half_bottom=半脱 | off=已脱掉 */
   status: SlotWearStatus;
   /** 半脱时的具体动作词（"unbuttoned, open front" / "skirt lift"）。 */
@@ -70,6 +72,8 @@ export interface WardrobeUpdate {
   clause?: number;
   /** 正文直接描写已经穿着的不同衣物，用于没有写换装过程的情况。 */
   observed?: boolean;
+  /** 同一场内首次补述这一件本来就在穿的衣物。 */
+  describedSince?: string;
   slots: Partial<Record<WardrobeSlotKey, GarmentPatch>>;
   /** 这次换装从哪个 P 编号开始生效；省略表示从楼首生效。 */
   position?: string;
@@ -102,6 +106,12 @@ export function stripTransientWear(tag: string): string {
     .join(', ');
 }
 
+export function dressStyle(tag: string): string {
+  // 旧的“颜色 + dress”只确定了颜色。用一个稳定、普通的轮廓补足未指定的款式。
+  return /^(?:(?:light|dark|pale|pastel|dusty) )?(?:black|white|red|blue|navy|green|pink|brown|gr[ae]y|yellow|purple|ivory|cream|beige|orange|teal|burgundy|lavender) dress$/i.test(tag)
+    ? 'plain woven fabric, simple round neckline, short sleeves, single-piece dress' : '';
+}
+
 /**
  * 归一一个槽位。replace 要求给新衣服的 tag（否则无指纹可存）；
  * patch 允许只给 { status: "on" } —— 这正是「穿回原件」，tag 由 applyWardrobeUpdate 从旧账本取回。
@@ -127,7 +137,10 @@ function normaliseSlot(raw: unknown, requireTag: boolean): GarmentSlot | null {
   const condition = typeof record.condition === 'string'
     ? record.condition.trim().replace(/\s+/g, ' ').slice(0, 90)
     : parts.filter(part => damage.test(part)).join(', ') || undefined;
-  return { tag, status, ...(offSide ? { offSide } : {}), ...(wear ? { halfTag: wear } : {}), ...(reveal ? { reveal } : {}),
+  const style = typeof record.style === 'string' && !/[<>\r\n]/.test(record.style)
+    ? stripTransientWear(record.style.slice(0, 120)).split(', ').filter(part =>
+      !/\b(?:half-off|lifted|open front|rolled (?:up )?sleeves|loose strap|slipping|bra|panties|nude|bare breasts)\b/i.test(part)).join(', ') : '';
+  return { tag, status, ...(style ? { style } : {}), ...(offSide ? { offSide } : {}), ...(wear ? { halfTag: wear } : {}), ...(reveal ? { reveal } : {}),
     ...(condition !== undefined ? { condition } : {}) };
 }
 
@@ -169,7 +182,9 @@ export function normaliseWardrobeUpdate(raw: unknown): WardrobeUpdate | null {
   const step = readWardrobeStep(record.step);
   const clause = readWardrobeStep(record.clause);
   return { name, mode, slots, ...(step ? { step } : {}), ...(clause ? { clause } : {}),
-    ...(record.observed === true ? { observed: true } : {}), ...(position ? { position } : {}) };
+    ...(record.observed === true ? { observed: true } : {}),
+    ...(record.observed === true && typeof record.describedSince === 'string' && /^P[1-9]\d*$/.test(record.describedSince)
+      ? { describedSince: record.describedSince } : {}), ...(position ? { position } : {}) };
 }
 
 /**
@@ -222,6 +237,7 @@ export function applyWardrobeUpdate(
           status: patch.status,
           ...(patch.offSide ? { offSide: patch.offSide } : update.mode === 'patch' && patch.status === 'half'
             && !patch.halfTag && previous?.offSide ? { offSide: previous.offSide } : {}),
+          style: update.mode === 'patch' ? previous?.style : patch.style,
           condition: patch.condition ?? (update.mode === 'patch' ? previous?.condition : undefined),
           reveal: patch.reveal ?? (update.mode === 'patch' && patch.status === previous?.status && !patch.halfTag ? previous?.reveal : undefined),
           ...(patch.status !== 'on' && patch.status !== 'off' && (patch.halfTag || (update.mode !== 'swap' && patch.status === previous?.status && previous?.halfTag))
@@ -266,7 +282,7 @@ function describeSlot(label: string, slot: GarmentSlot | undefined): string | nu
   const detail = slot.halfTag ? `(${slot.halfTag})` : '';
   const shoeSide = slot.offSide === 'left' ? ' 左脚未穿' : slot.offSide === 'right' ? ' 右脚未穿' : '';
   const visibility = slot.reveal === 'layer' ? ' 内层明确可见' : slot.reveal === 'none' ? ' 内层遮住' : '';
-  return `${label}[${[slot.tag || '款式未知', slot.condition].filter(Boolean).join(', ')}|${statusText}${detail}${visibility}${shoeSide}]`;
+  return `${label}[${[slot.tag || '款式未知', slot.style, slot.condition].filter(Boolean).join(', ')}|${statusText}${detail}${visibility}${shoeSide}]`;
 }
 
 /** 喂给提示词的装备表文本。 */

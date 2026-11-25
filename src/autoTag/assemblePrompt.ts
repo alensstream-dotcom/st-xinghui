@@ -1,7 +1,7 @@
-import { ageBand, profileAge, RELATION_TAG, resolveVisualSubjects } from './visualIdentity';
+import { ageBand, FACE_IDENTITY, profileAge, RELATION_TAG, resolveVisualSubjects } from './visualIdentity';
 import type { ImageCharacterPrompt, ImageInsertion } from '@/autoTag/protocol';
 import type { CharTagEntry } from '@/state/charTags';
-import type { CharacterWardrobe, SlotWearStatus, WardrobeSlotKey } from '@/state/outfitState';
+import { dressStyle, type CharacterWardrobe, type SlotWearStatus, type WardrobeSlotKey } from '@/state/outfitState';
 import type { WorldAnchorConfig } from '@/state/worldAnchor';
 
 /** 角色提示依次使用当刻的固定外貌、可见衣物与导演描述。 */
@@ -116,6 +116,7 @@ function buildOmitMatcher(omitFeatures: string[]): (token: string) => boolean {
 function buildFixedAppearanceTags(
   entry: CharTagEntry | undefined,
   omitFeatures: string[] = [],
+  visualSubjects = false,
 ): string[] {
   if (!entry) return [];
   const isOmitted = buildOmitMatcher(omitFeatures);
@@ -141,22 +142,31 @@ function buildFixedAppearanceTags(
   };
   pushIdentity(fields.fandom);
   pushIdentity(normalizeSexTag(fields.sex) || 'girl');
-  pushIdentity(fields.hair);
+  const hair = identity(fields.hair);
+  const gathered = visualSubjects && hair.some(t => /^low bun$/i.test(t))
+    && !hair.some(t => /(?:half[- ]up|partly|hair down|loose (?:hair|length)|hanging|trailing|braid|ponytail|partially)/i.test(t));
+  const length = hair.find(t => /^(?:very long|long|medium) hair$/i.test(t))?.split(' hair')[0];
+  if (gathered && length) {
+    pushIdentity(hair.filter(t => t !== length + ' hair' && !/^low bun$/i.test(t)).join(', '));
+    pushIdentity(length + ' hair gathered into a low bun');
+  } else pushIdentity(fields.hair);
   pushIdentity(fields.eyes);
   pushIdentity(fields.skin);
   pushIdentity(fields.body);
   // 只有 extra(眼镜/首饰/发饰)允许被本帧临时摘掉
-  for (const t of filterOmit(fields.extra)) tags.push(t);
+  for (const t of identity(fields.extra)) if ((visualSubjects && FACE_IDENTITY.test(t)) || !isOmitted(t)) tags.push(t);
   return dedupeTags(tags);
 }
 
 /** 同一个人自己的防漂移负面：发型/体型最容易在长楼里被画回默认值。 */
-function buildSelfAntiDriftNegative(entry: CharTagEntry | undefined): string[] {
+function buildSelfAntiDriftNegative(entry: CharTagEntry | undefined, visualSubjects: boolean): string[] {
   if (!entry) return [];
   const hair = `${entry.fields.hair} ${entry.fields.extra}`.toLowerCase();
   const body = `${entry.fields.body} ${entry.fields.extra}`.toLowerCase();
   const out: string[] = [];
   if (/hair down|loose hair/.test(hair)) out.push('ponytail', 'twintails', 'twin braids', 'hair bun');
+  if (visualSubjects && /\blow bun\b/.test(hair) && !/half[- ]up|hair down|loose (?:hair|length)|trailing/.test(hair)) out.push('hair down');
+  if (visualSubjects && /\bside ponytail\b/.test(hair) && !/half[- ]up|hair down/.test(hair)) out.push('hair down', 'hair bun', 'twintails');
   if (/straight hair/.test(hair)) out.push('curly hair', 'wavy hair', 'drill hair');
   if (/short hair|short bob|bob cut/.test(hair)) {
     out.push('long hair', 'very long hair', 'ponytail', 'twintails');
@@ -167,11 +177,11 @@ function buildSelfAntiDriftNegative(entry: CharTagEntry | undefined): string[] {
 }
 
 /** 这个角色最有辨识度的特征（发色/标志发型/眼镜），用来给同框的别人当负面，防串色。 */
-function extractDistinctiveFeatures(entry: CharTagEntry | undefined): string[] {
+function extractDistinctiveFeatures(entry: CharTagEntry | undefined, visualSubjects: boolean): string[] {
   if (!entry) return [];
-  const source = `${entry.fields.hair}, ${entry.fields.extra}`;
+  const source = [entry.fields.hair, entry.fields.extra, visualSubjects ? entry.fields.eyes : ''].join(', ');
   return splitTags(source).filter(t =>
-    /\b(hair|ponytail|twintails|braids?|bun|bob|eyewear|glasses)\b/i.test(t),
+    /\b(hair|ponytail|twintails|braids?|bun|bob|eyewear|glasses)\b/i.test(t) || (visualSubjects && (/\beyes\b/i.test(t) || FACE_IDENTITY.test(t))),
   );
 }
 
@@ -304,7 +314,7 @@ function resolveSlot(
   const override = wearState?.[key];
   if (!base && !override) return null;
   const status: SlotWearStatus = override?.status ?? base?.status ?? 'on';
-  const tag = base?.tag ? [base.tag, base.condition].filter(Boolean).join(', ') : '';
+  const tag = base?.tag ? [base.tag, base.style, base.condition].filter(Boolean).join(', ') : '';
   const halfTag = (override?.halfTag || base?.halfTag || '').trim();
   if (!tag && !(status === 'off' && (key === 'innerTop' || key === 'innerBottom'))) return null;
   return { tag, status, halfTag, reveal: override ? undefined : base?.reveal, offSide: override ? undefined : base?.offSide };
@@ -590,17 +600,22 @@ export function assembleImageCharacters(
     const frameBand = ageBand(character.frameAge);
     const archivedBand = ageBand(profileAge(entry));
     const differentAge = frameBand && archivedBand && frameBand !== archivedBand;
-    const fixedTags = buildFixedAppearanceTags(entry, character.omitFeatures)
+    const fixedTags = buildFixedAppearanceTags(entry, character.omitFeatures, visualSubjects)
       .filter(t => !visualSubjects || (!RELATION_TAG.test(t)
-        && (!frameBand || !ageBand(t) || ageBand(t) === frameBand)))
+        && (!frameBand || !ageBand(t) || t.toLowerCase() === character.frameAge?.toLowerCase())))
       .filter(t => !differentAge || !STATIC_BODY_TAG.test(t))
       .filter(t => !distant || !DISTANT_DETAIL.test(t) || focus.includes(t.toLowerCase()))
       .filter(tag => !eyesClosed || !/^(?:narrowed eyes|half-closed eyes|wide-eyed|open eyes)$/i.test(tag));
     const hasLibraryEntry = Boolean(entry);
     const wardrobe = wardrobes.get(character.name);
-    const compiled = compileWardrobeForFrame(wardrobe, character.wearState, upperOnly);
+    const top = wardrobe?.top;
+    const fallbackStyle = visualSubjects && top && !top.style ? dressStyle(top.tag) : '';
+    const visibleWardrobe = fallbackStyle && wardrobe && top ? { ...wardrobe, top: { ...top, style: fallbackStyle } } : wardrobe;
+    const compiled = compileWardrobeForFrame(visibleWardrobe, character.wearState, upperOnly);
     const outfitTags = compiled.positive.flatMap(splitTags).filter(tag => !(upperOnly && LOWER_ONLY.test(tag)));
-    const directorTags = stripLeakedAppearance(frameTags, hasLibraryEntry)
+    const dress = visualSubjects && /\bdress\b/i.test(top?.tag ?? '') && !wardrobe?.bottom;
+    const onDress = (text: string) => dress ? text.replace(/\b(?:her|the) skirt\b/gi, 'the dress hem') : text;
+    const directorTags = stripLeakedAppearance(frameTags.map(onDress), hasLibraryEntry)
       .filter(tag => !wardrobeOwnsTag(tag, wardrobe));
 
     const visibleInCrop = (t: string) => !(upperOnly && (LEG_ONLY.test(t) || LOWER_ONLY.test(t)))
@@ -624,7 +639,7 @@ export function assembleImageCharacters(
     const negativeParts = [
       ...splitTags(character.uc ?? ''),
       ...compiled.negatives,
-      ...(differentAge ? [] : buildSelfAntiDriftNegative(entry).filter(tag => !affirms(tag))),
+      ...(differentAge ? [] : buildSelfAntiDriftNegative(entry, visualSubjects).filter(tag => !affirms(tag))),
       ...guardrailNegatives(world, visiblePositive),
       ...(heightGap ? PROPORTION_GUARDRAILS : []),
     ];
@@ -634,7 +649,7 @@ export function assembleImageCharacters(
         if (otherIndex === index) continue;
         const other = image.characters[otherIndex];
         const otherEntry = entriesAtPos.find(item => item.name === other.name);
-        for (const feature of extractDistinctiveFeatures(otherEntry)) {
+        for (const feature of extractDistinctiveFeatures(otherEntry, visualSubjects)) {
           if (affirms(feature)) continue;
           negativeParts.push(feature);
         }
@@ -645,7 +660,7 @@ export function assembleImageCharacters(
     const result: ImageCharacterPrompt = {
       name: character.name,
       tag: visiblePositive.join(', '),
-      nl: image.nl && image.nl.trim() === character.nl.trim() ? '' : visualSubjects ? trimWardrobeAside(character.nl, wardrobe) : character.nl,
+      nl: image.nl && image.nl.trim() === character.nl.trim() ? '' : visualSubjects ? trimWardrobeAside(onDress(character.nl), wardrobe) : character.nl,
     };
     if (mergedUc) result.uc = mergedUc;
     return result;
@@ -656,6 +671,8 @@ export function assembleImageCharacters(
     ? splitTags(tag).filter(t => !femaleIndexes.some(index => wardrobeOwnsTag(t, wardrobes.get(image.characters[index].name)))).join(', ')
     : tag;
   const soloWardrobe = image.characters.length === 1 ? wardrobes.get(image.characters[0].name) : undefined;
-  const nl = visualSubjects ? trimWardrobeAside(image.nl, soloWardrobe) : image.nl;
+  const dresses = image.characters.filter(c => /\bdress\b/i.test(wardrobes.get(c.name)?.top?.tag ?? '') && !wardrobes.get(c.name)?.bottom);
+  const linkedDress = dresses.length === 1 && femaleIndexes.length === 1;
+  const nl = visualSubjects ? trimWardrobeAside(linkedDress ? image.nl.replace(/\b(?:her|the) skirt\b/gi, 'the dress hem') : image.nl, soloWardrobe) : image.nl;
   return { ...image, tag: baseTag, nl, characters };
 }

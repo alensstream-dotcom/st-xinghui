@@ -532,7 +532,7 @@ export function allocateFaceDetails(look: Look, options: unknown, others: Look[]
   const extra = words(look.extra);
   const similarities = others.map(other => {
     const overlap = (field: keyof Look) => words(look[field]).filter(t => words(other[field]).includes(t)).length;
-    return { extra: words(other.extra), weight: 1 + overlap('hair') * 2 + overlap('eyes') + overlap('body') + overlap('skin') };
+    return { extra: [...words(other.extra), ...words(other.eyes), ...words(other.body)], weight: 1 + overlap('hair') * 2 + overlap('eyes') + overlap('body') + overlap('skin') };
   });
   const added: string[] = [];
   for (const axis of FACE_AXES) {
@@ -551,19 +551,40 @@ export function allocateFaceDetails(look: Look, options: unknown, others: Look[]
   return [look.extra, ...added].filter(Boolean).join(', ');
 }
 
-export function allocateNewProfileFaces(changes: CharChange[], entries: CharTagEntry[], preset: string): void {
+export function allocateNewProfileFaces(
+  changes: CharChange[],
+  entries: CharTagEntry[],
+  preset: string,
+  cast?: { name: string; position: string; sourceLine: number }[],
+  locked?: ReadonlySet<string>,
+): void {
   const assigned = new Map<string, Look>(entries.map(entry => [entry.name, entry.fields]));
+  const defaults = FACE_AXES.flatMap(axis => enabledIn(traitPool, axis, scopesForPreset(preset)).map(item => item.tag));
   const profiles = changes.filter(change => change.field === 'new' && change.value.startsWith('{'))
     .sort((a, b) => Number(Boolean(a.faceOptions?.length)) - Number(Boolean(b.faceOptions?.length)) || a.sourceLine - b.sourceLine);
   for (const profile of profiles) {
     if (assigned.has(profile.name)) continue;
     // parseImagePlan 只保留已归一化的建档 JSON，旧镜头复用的档案也由 JSON.stringify 构造。
-    const fields = JSON.parse(profile.value) as Look & { fandom?: string };
-    if (profile.faceOptions?.length && !fields.fandom) {
-      const extra = allocateFaceDetails(fields, profile.faceOptions, [...assigned.values()], preset);
+    const fields = JSON.parse(profile.value) as Look & { fandom?: string; sex?: string };
+    if (!fields.fandom && !locked?.has(profile.name) && !/^(?:\d*boys?|male)$/i.test(fields.sex ?? '')
+      && !/匿名|别名|化名|易容|同一人|相貌相同|长得一模一样/.test(profile.reason)) {
+      const others = [...assigned.values()];
+      const preferred = allocateFaceDetails(fields, profile.faceOptions, others, preset);
+      const extra = cast ? allocateFaceDetails({ ...fields, extra: preferred }, defaults, others, preset) : preferred;
       if (extra !== (fields.extra ?? '')) profile.value = JSON.stringify({ ...fields, extra });
       fields.extra = extra;
     }
     assigned.set(profile.name, fields);
+  }
+  for (const entry of entries) {
+    const firstFrame = cast?.filter(c => c.name === entry.name).sort((a, b) => a.sourceLine - b.sourceLine)[0];
+    if (!firstFrame || entry.source !== 'ai' || locked?.has(entry.name) || entry.fields.fandom
+      || !/^(?:\d*girls?|female|woman)$/i.test(entry.fields.sex)
+      || changes.some(change => change.name === entry.name && (change.field === 'extra' || change.field === 'new'))) continue;
+    const others = [...assigned].filter(([name]) => name !== entry.name).map(([, look]) => look);
+    const extra = allocateFaceDetails(entry.fields, defaults, others, preset);
+    if (extra === entry.fields.extra) continue;
+    assigned.set(entry.name, { ...entry.fields, extra });
+    changes.push({ ...firstFrame, field: 'extra', value: extra, reason: '补全缺失的固定脸型及眉形' });
   }
 }

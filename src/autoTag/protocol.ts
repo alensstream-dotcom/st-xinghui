@@ -16,7 +16,8 @@ import type {
 } from '@/state/outfitState';
 import { compareStoryMoments, storyClause, storyClauses } from './storyMoment';
 import { readSceneBeat, selectStoryImages, type SceneBeat } from './sceneSelection';
-import { hasAgeCue } from './visualIdentity';
+import { groundStoryImage } from './sceneGrounding';
+import { frameAgeMatchesSource } from './visualIdentity';
 import { normaliseWardrobeUpdate, readWardrobeStep, WARDROBE_SLOT_KEYS } from '@/state/outfitState';
 
 export interface ImageCharacterPrompt {
@@ -53,6 +54,8 @@ export interface ImageInsertion {
   extent?: 'whole' | 'detail';
   clause?: number;
   beat?: SceneBeat;
+  visualPose?: string;
+  sourceCue?: string;
   singleFrame?: boolean;
   /** 模型选择的目标正文位置 ID。 */
   position: string;
@@ -218,7 +221,7 @@ function sanitizeCharacters(value: unknown, imageIndex: number): ImageCharacterP
       const uc = sanitizeOptionalContent(item.uc, `characters[${index}].uc`, imageIndex);
       const omitFeatures = sanitizeOmitFeatures(item.omitFeatures);
       const wearState = sanitizeWearState(item.wearState);
-      const frameAge = typeof item.age === 'string' && /^(?:adult|teenager|child|elderly adult)$/.test(item.age) ? item.age : undefined;
+      const frameAge = typeof item.age === 'string' && /^(?:adult|young adult|middle-aged adult|teenager|child|elderly adult)$/.test(item.age) ? item.age : undefined;
       if (name && tag) {
         characters.push({
           name,
@@ -397,20 +400,22 @@ export function parseImagePlan(
     const current = clause ? [storyClauses(text)[clause - 1] ?? ''] : storyClauses(text);
     for (const character of characters) {
       if (!character.frameAge) continue;
-      const ownAgeCue = current.some(part => hasAgeCue(part) && (part.includes(character.name)
+      const ownAgeCue = current.some(part => frameAgeMatchesSource(character.frameAge!, part) && (part.includes(character.name)
         || !characters.some(other => other.name !== character.name && part.includes(other.name))));
       if (!ownAgeCue) delete character.frameAge;
     }
     const beat = rules.selectBeats ? readSceneBeat(entry.beat) : undefined;
     const extent = entry.extent === 'whole' || entry.extent === 'detail' ? entry.extent : undefined;
-    images.push({ position, sourceLine, ...(step ? { step } : {}), ...(clause ? { clause } : {}),
+    const image: ImageInsertion = { position, sourceLine, ...(step ? { step } : {}), ...(clause ? { clause } : {}),
       ...(extent ? { extent } : {}), ...(beat ? { beat } : {}), ...(entry.layout === 'sequence' ? { singleFrame: false } : {}),
-      tag, nl, negative, characters, size });
+      tag, nl, negative, characters, size };
+    images.push(rules.selectBeats ? groundStoryImage(image, entry, segments) : image);
   }
 
-  const limitedImages = selectStoryImages(images, normalizedMax, normalizedMin);
+  const limitedImages = selectStoryImages(images, normalizedMax, normalizedMin, rules.selectBeats);
   const noEligibleScene = rules.femaleScenesOnly && limitedImages.length === 0;
-  if (!noEligibleScene && limitedImages.length < normalizedMin) {
+  const exhausted = rules.selectBeats && (limitedImages.length < images.length || parsed.noMoreDistinctFrames === true);
+  if (!noEligibleScene && !exhausted && limitedImages.length < normalizedMin) {
     throw new Error(
       `AI 返回了 ${limitedImages.length} 张图片，少于设置的最少图片数 ${normalizedMin}`,
     );

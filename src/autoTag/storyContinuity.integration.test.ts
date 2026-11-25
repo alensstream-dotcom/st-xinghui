@@ -232,3 +232,114 @@ it('同段永久染发的前后两格分别读旧档和新档，角色本人及�
   expect(entriesAtPosition(entries, changes, 0, undefined, 1)[0].fields).toMatchObject({ hair: 'black hair', eyes: 'amber eyes' });
   expect(entriesAtPosition(entries, changes, 0, undefined, 2)[0].fields).toMatchObject({ hair: 'brown hair', eyes: 'amber eyes' });
 });
+
+describe('用户反馈的五组样本', () => {
+  const heroine = '邱晓晓';
+  const viewer = '秦开宇';
+  const scores = { femaleScenesOnly: true, selectBeats: true };
+  function planned(text: string, images: object[], min = 0) {
+    const segments = prepareTargetText(text, []).segments;
+    return parseUnifiedPlan(JSON.stringify({ images }), segments, min, 8, scores).images;
+  }
+
+  it('抱手臂换对象、机位和事件编号仍是同一姿势，只留动作变化后确有泪花的定格', () => {
+    const text = '邱晓晓挽住高嘉豪的胳膊，皱起眉头。\n邱晓晓抱住秦开宇的胳膊，挤出笑容。\n她仍抱着他的胳膊，眼角沁出晶莹的泪花。';
+    const image = (position: string, name: string, beat: string[], tag = 'three-quarter view') => ({
+      position, beat, tag: '1girl, 1boy, medium close-up, school hallway, ' + tag,
+      nl: 'The woman hugs the man’s arm while tears well up in her eyes.',
+      characters: [{ name: heroine, tag: 'girl, standing, tears, source#arm hug, hugging his arm',
+        nl: 'She keeps a forced smile while tears well up in her eyes.' }, { name, tag: '1boy, standing' }],
+    });
+    const first = image('P1', '高嘉豪', ['first-hold', 'A', 'peak']);
+    const early = image('P2', viewer, ['second-hold', 'S', 'peak'], 'from side');
+    const late = image('P3', viewer, ['later-hold', 'A', 'peak']);
+    const [before] = planned(text, [early]);
+    expect(JSON.stringify(before)).not.toMatch(/\btears\b/);
+    const [after] = planned(text, [late]);
+    expect(after.characters[0].tag).toContain('tears');
+    const selected = planned(text, [first, early, late], 2);
+    expect(selected).toHaveLength(1);
+    const inserted = injectImageTags(text, selected);
+    if (selected[0].position === 'P3') expect(inserted.indexOf('<bbi_image>')).toBeGreaterThan(inserted.indexOf('泪花'));
+    else expect(inserted).not.toMatch(/\btears\b/);
+  });
+
+  it('一个 P 中用原文短语定位，后半句的表情不会灌进前半句', () => {
+    const [shot] = planned('她举起手中的信，邱晓晓眼角沁出泪花。', [{
+      position: 'P1', tag: '1girl, medium shot, indoors',
+      focus: [heroine, '举起手中的信', 'raising a letter in one hand', 'hands'],
+      characters: [{ name: heroine, tag: 'girl, tears, holding letter', nl: 'She holds the letter while tears well up.' }],
+    }]);
+    expect(shot.clause).toBe(1);
+    expect(shot.tag).toContain('hands visible');
+    expect(shot.characters[0].tag).toContain('raising a letter in one hand');
+    expect(shot.characters[0].tag).not.toContain('tears');
+    expect(shot.characters[0].nl).not.toContain('tears');
+  });
+
+  it('客厅双女角反应保留两名角色，果盘在茶几上，男性由视点表达', () => {
+    const text = '谢冬萱眼睛红红的，坐在沙发边。\n陈素云将果盘放在茶几上。\n谢冬萱从沙发上站起来，指向秦开宇。';
+    const images = [{
+      position: 'P3', tag: '2girls, 1boy, from side, wide shot, living room, coffee table',
+      nl: 'The younger woman stands up from the sofa pointing angrily at the man while the older woman stands by the coffee table with a fruit platter.',
+      characters: [
+        { name: '谢冬萱', tag: 'girl, tears, standing, pointing, looking at another', nl: 'She glares at the man with tear-filled eyes.' },
+        { name: '陈素云', tag: 'girl, standing, holding fruit platter', nl: 'She looks between the two in confusion.' },
+        { name: viewer, tag: '1boy, boy, scared, looking down, standing', nl: 'He keeps his head lowered nervously.' },
+      ],
+    }];
+    const [image] = planned(text, images);
+    expect(image.tag).toMatch(/2girls.*fruit platter on the coffee table.*pov.*eye-level/);
+    expect(image.tag).not.toMatch(/1boy|wide shot/);
+    expect(image.nl).toMatch(/pointing angrily at the viewer.*by the coffee table/);
+    expect(image.characters.map(c => c.name)).toEqual(['谢冬萱', '陈素云']);
+    expect(JSON.stringify(image)).not.toMatch(/tear|holding fruit platter|with a fruit platter/);
+  });
+
+  it('亲属称谓在两个角色块里不应覆盖成熟度，剧情确认的成人年龄变化保留原来特征', () => {
+    const daughter = profile('谢冬萱', { hair: 'black hair, long hair, hair down, side-swept bangs', body: 'adult, slender' });
+    const mother = profile('陈素云', { hair: 'black hair, long hair, low bun, parted bangs', body: 'mature female, curvy', extra: 'wooden hairpin, oval face, arched eyebrows' });
+    const [entrance, mirror] = planned('谢冬萱换好鞋，一抬头便看到秦开宇。\n陈素云恢复了二十五岁时的样子。', [
+      { position: 'P1', tag: '2girls, 1boy, three-quarter view, medium shot, entryway',
+        nl: 'The girl at the entryway looks surprised as she sees the man while her mother stands beside her.',
+        characters: [{ name: daughter.name, tag: 'girl, surprised', age: 'child' },
+          { name: mother.name, tag: 'girl, worried', nl: 'She stands beside her daughter.' },
+          { name: viewer, tag: '1boy, boy, smile, looking at another' }] },
+      { position: 'P2', tag: '1girl, medium shot', characters: [{ name: mother.name, tag: 'girl, standing', age: 'young adult',
+        omitFeatures: ['oval face', 'arched eyebrows'] }] },
+    ]).map(shot => assembleImageCharacters(shot, [daughter, mother]));
+    expect(entrance.nl).not.toMatch(/girl|mother|daughter/);
+    expect(entrance.characters).toHaveLength(2);
+    expect(entrance.characters[0].tag).toContain('adult, slender');
+    expect(entrance.characters[1].nl).not.toMatch(/daughter/);
+    expect(mirror.characters[0].tag).toMatch(/long hair gathered into a low bun.*oval face.*arched eyebrows.*young adult/);
+    expect(mirror.characters[0].tag).not.toContain('mature female');
+    expect(mirror.characters[0].tag).toContain('curvy');
+  });
+
+  it('二十五岁的形象不能因读到末尾五岁被标成儿童', () => {
+    const text = '陈素云恢复了二十五岁时的样子。';
+    const [shot] = planned(text, [{ position: 'P1', tag: '1girl, medium shot',
+      characters: [{ name: '陈素云', tag: 'girl, standing', age: 'child' }] }]);
+    expect(shot.characters[0].frameAge).toBeUndefined();
+  });
+
+  it('同场晚补服饰只补缺失衣件，真实换装不能倒灌', () => {
+    const raw = (position: string) => ({ position, tag: '1girl, medium shot, indoors', characters: [{ name: heroine, tag: 'girl, sitting' }] });
+    const update = {
+      position: 'P2', describedSince: 'P1', observed: true, name: heroine, mode: 'swap',
+      slots: { top: { tag: 'light blue dress', style: 'woven fabric, round neckline, short sleeves', status: 'on' } },
+    };
+    function tops(text: string, initial?: object) {
+      const segments = prepareTargetText(text, []).segments;
+      const plan = parseUnifiedPlan(JSON.stringify({ images: [raw('P1'), raw('P2')], wardrobeUpdates: initial ? [initial, update] : [update] }), segments, 0, 3, scores);
+      return compileWardrobeSequence(new Map(), plan.wardrobeUpdates, plan.images,
+        (_shot, wardrobe) => wardrobe.get(heroine)?.top, { segments, timeJump: 'same_day' }).frames;
+    }
+    expect(tops('邱晓晓坐在电影院后排。\n邱晓晓仍穿着那件浅蓝色连衣裙。')[0]).toMatchObject(update.slots.top);
+    expect(tops('邱晓晓坐在电影院后排。\n邱晓晓换上浅蓝色连衣裙。')[0]).toBeUndefined();
+    expect(tops('邱晓晓坐在电影院后排。\n邱晓晓仍穿着那件浅蓝色连衣裙。', {
+      position: 'P1', name: heroine, mode: 'replace', slots: { top: { tag: 'white top', status: 'on' } },
+    })[0]).toMatchObject(update.slots.top);
+  });
+});

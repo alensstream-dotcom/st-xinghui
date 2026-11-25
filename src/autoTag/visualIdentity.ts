@@ -5,6 +5,8 @@ import type { CharChange, ImageInsertion } from './protocol';
 export const RELATION_TAG = /^(?:(?:older|younger|little|big|adult|eldest) )?(?:daughter|mother|sister|son|father|brother)s?$/i;
 export const hasAgeCue = (text: string) => /成年|长大后|老年|年幼|童年|小时候|幼年|[岁歲]时|(?:十|[0-9]|[一二三四五六七八九])多?[岁歲]|\b(?:childhood|as a child|as an adult|grown up|long since grown|[0-9]+ years? old)\b/i.test(text);
 
+export const FACE_IDENTITY = /\b(?:face shape|oval face|round face|angular face|heart-shaped face|square face|long face|cheekbones|jawline|eyebrows?|brows?)\b/i;
+
 const tags = (text: string) => text.split(',').map(s => s.trim()).filter(Boolean);
 
 export function ageBand(tag = ''): string {
@@ -14,6 +16,19 @@ export function ageBand(tag = ''): string {
   if (/^(?:teen|teenager|teenage (?:girl|boy)|adolescent)$/i.test(tag)) return 'teen';
   if (/^(?:(?:young |middle-aged |elderly )?adult(?: woman| man| female| male)?|(?:mature|middle-aged|elderly|old) (?:woman|man|female|male)|young (?:woman|man))$/i.test(tag)) return 'adult';
   return '';
+}
+
+export function frameAgeMatchesSource(value: string, text: string): boolean {
+  if (!hasAgeCue(text)) return false;
+  const digit = '零一二三四五六七八九';
+  const ages = [...text.matchAll(/(\d{1,3}|[零一二三四五六七八九十两]{1,4})(?:岁|歲| years? old)/gi)].map(([, word]) => {
+    if (/^\d+$/.test(word)) return Number(word);
+    const [tens, units] = word.replace(/两/g, '二').split('十');
+    return units === undefined ? digit.indexOf(tens) : 10 * (tens ? digit.indexOf(tens) : 1) + (units ? digit.indexOf(units) : 0);
+  }).filter(age => age > 0);
+  if (value === 'child') return ages.some(age => age < 13) || /年幼|童年|小时候|幼年|\b(?:childhood|as a child)\b/i.test(text);
+  if (value === 'teenager') return ages.some(age => age >= 13 && age < 18) || /少年|青春期|未成年|\bteenage?r?\b/i.test(text);
+  return !/童年|幼年|未成年|childhood|as a child/i.test(text) && (!ages.length || ages.some(age => age >= 18));
 }
 
 export function profileAge(entry: CharTagEntry | undefined): string {
@@ -56,21 +71,39 @@ export function resolveVisualSubjects(image: ImageInsertion, entries: CharTagEnt
     const role = label.toLowerCase().split(' ').at(-1)!;
     relatives.set(role, [...(relatives.get(role) ?? []), c.name]);
   }
-  const childrenInView = image.characters.filter(c => ageBand(c.frameAge ?? profileAge(onScreen.find(e => e.name === c.name))) === 'child');
+  const women = image.characters.filter(c => /(?:^|,\s*)(?:1?girl|woman|female)(?:,|$)/i.test(
+    c.tag + ', ' + (onScreen.find(e => e.name === c.name)?.fields.sex ?? '')));
+  const text = [image.nl, ...image.characters.map(c => c.nl)].join(' ');
+  // 旧导演常只在英文里写 “her mother” 或 “beside her daughter”，角色标签中没有亲属字段。
+  // 只有二人且能唯一判定指称时才用它定位，身份和年龄依然从各自档案读取。
+  if (women.length === 2 && /\b(?:mother|daughter)\b/i.test(text)) {
+    const motherBySpeech = women.filter(c => /\b(?:her daughter|the other woman's daughter)\b/i.test(c.nl));
+    const daughterBySpeech = women.filter(c => /\b(?:her mother|the other woman's mother)\b/i.test(c.nl));
+    const mother = motherBySpeech.length === 1 ? motherBySpeech[0] :
+      daughterBySpeech.length === 1 ? women.find(c => c !== daughterBySpeech[0]) : undefined;
+    if (mother) {
+      if (!relatives.has('mother')) relatives.set('mother', [mother.name]);
+      if (!relatives.has('daughter')) relatives.set('daughter', [women.find(c => c !== mother)!.name]);
+    }
+  }
   const daughters = [...new Set(relatives.get('daughter') ?? [])];
-  const clearRelationalAge = !childrenInView.length && daughters.length === 1;
+  const clearRelationalAge = daughters.length === 1;
+  const daughter = image.characters.find(c => clearRelationalAge && daughters[0] === c.name);
+  const daughterAge = ageBand(daughter?.frameAge ?? profileAge(onScreen.find(e => e.name === daughter?.name)));
   const resolve = (text: string) => text
-    .replace(/\b(?:the|her|his|their) (?:little girl|young child)\b/gi, original =>
-      clearRelationalAge ? labels.get(daughters[0]) ?? original : original)
     .replace(/\b(?:the|her|his|their) (?:adult |younger |older |little )?(daughter|mother|sister|brother|son|father)\b/gi, (original, role: string) => {
       const matches = relatives.get(role.toLowerCase());
       return matches?.length === 1 ? labels.get(matches[0]) ?? original : original;
     })
+    .replace(/\bthe (?:little |young )?girl\b/gi, original =>
+      daughter ? labels.get(daughter.name) ?? original : original)
+    .replace(/\b(?:her|his|their) (?:little girl|young child)\b/gi, original =>
+      daughter && daughterAge !== 'child' ? labels.get(daughter.name) ?? original : original)
     .replace(token, (_match, bracket, plain) => labels.get(bracket ?? plain) ?? 'the person');
   return { ...image, tag: resolve(tags(image.tag).filter(t => !RELATION_TAG.test(t)).join(', ')), nl: resolve(image.nl), characters: image.characters.map(c => {
     const known = ageBand(c.frameAge ?? profileAge(onScreen.find(e => e.name === c.name)));
     const own = tags(c.tag).filter(t => t !== '@' + c.name && t !== '@{' + c.name + '}' && !RELATION_TAG.test(t)
-      && !((known || clearRelationalAge && c.name === daughters[0]) && ageBand(t) && known !== ageBand(t)));
+      && !((known || c.name === daughter?.name) && ageBand(t) && known !== ageBand(t)));
     if (c.frameAge && !own.includes(c.frameAge)) own.push(c.frameAge);
     return { ...c, tag: resolve(own.join(', ')), nl: resolve(c.nl) };
   }) };

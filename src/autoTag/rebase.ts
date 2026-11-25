@@ -147,6 +147,8 @@ export function rebaseImagePositions(
     if (oldIndex === undefined) return null;
     const direct = mapped[oldIndex];
     const target = direct >= 0 ? direct : nearestMapped(mapped, oldIndex);
+    // 对已核验的正文触发词，整句删除或改到无法识别时放弃此次保存，避免图和账本分离。
+    if (image.sourceCue && (direct < 0 || !newSegments[target]?.text.includes(image.sourceCue))) return null;
     if (target < 0) return null;
 
     if (direct < 0) report.drifted += 1;

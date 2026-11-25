@@ -774,3 +774,71 @@ describe('镜头编译后的 NovelAI 请求', () => {
     expect(detail.position).toBe('P2');
   });
 });
+
+describe('用户用例传入 NovelAI 4.5 的最终 caption', () => {
+  function captions(text: string, images: object[], entries: CharTagEntry[] = [], wardrobe = new Map<string, CharacterWardrobe>()) {
+    const segments = prepareTargetText(text, []).segments;
+    const plan = parseUnifiedPlan(JSON.stringify({ images }), segments, 0, 5, { femaleScenesOnly: true, selectBeats: true });
+    return plan.images.map(shot => {
+      const assembled = compactGeneratedScene(assembleImageCharacters(shot, entries, wardrobe));
+      const { tag, nl, characters } = parseImageTagContent(parseImageTags(serializeImageTag(assembled))[0]);
+      return (buildNaiParameters(nai({ model: 'nai-diffusion-4-5-full' }), { prompt: tag, nl, characters, seed: 7 }).v4_prompt as
+        { caption: { base_caption: string; char_captions: { char_caption: string }[] } }).caption;
+    });
+  }
+
+  it('手机在脚边的地面，留足取景，不把章节后文的最终落点提前', () => {
+    const [image] = captions('邱晓晓对着地上那部屏幕碎裂的手机，轻轻一踢。\n手机精准地停在了高嘉豪的脚边。', [{
+      position: 'P1', tag: '1girl, 2boys, from side, medium shot, school hallway, daylight',
+      nl: "The woman clings to one man's arm while kicking a cracked smartphone toward the other man's feet.",
+      characters: [
+        { name: '邱晓晓', tag: 'girl, standing, kicking, source#arm hold, holding his arm tightly', nl: 'She raises one foot lightly to kick the broken phone across the floor.' },
+        { name: '秦开宇', tag: '1boy, boy, standing, target#arm hold' },
+        { name: '高嘉豪', tag: '1boy, boy, standing' },
+      ],
+    }]);
+    expect(image.base_caption).toMatch(/full body.*cracked smartphone on the floor.*shoe and phone both in frame/);
+    expect(image.base_caption).not.toMatch(/toward the other|medium shot/);
+    expect(image.char_captions[0].char_caption).toMatch(/shoe touching the cracked smartphone on the floor.*source#arm hold/);
+    expect(image.char_captions[0].char_caption).not.toMatch(/raises one foot/);
+  });
+
+  it('三人同框只画接触当拍，保留支撑反应和它的正确归属', () => {
+    const [image] = captions('邱晓晓下意识地抓紧了秦开宇的衣角。\n秦开宇一脚重重踹在高嘉豪的腹部。\n高嘉豪跌倒在地。', [{
+      position: 'P2', tag: '1girl, 2boys, from side, medium shot, school hallway, daylight',
+      nl: 'One boy kicks the other boy in the abdomen while the woman stands nearby holding his sleeve.',
+      characters: [
+        { name: '邱晓晓', tag: 'girl, scared, standing, holding onto sleeve', nl: "She grips the boy's clothing in alarm." },
+        { name: '秦开宇', tag: '1boy, boy, serious, standing, kicking, leg lifted', nl: 'He lands a clean kick on his opponent.' },
+        { name: '高嘉豪', tag: '1boy, boy, surprised, falling backward, clutching stomach', nl: 'He stumbles back from the impact.' },
+      ],
+    }]);
+    expect(image.base_caption).toMatch(/full body.*both participants and point of contact visible/);
+    expect(image.char_captions.map(char => char.char_caption)).toEqual([
+      expect.stringContaining('holding onto shirt hem'),
+      expect.stringContaining('foot in contact with the third person'),
+      expect.stringContaining('recoiling at the instant of contact'),
+    ]);
+    expect(JSON.stringify(image)).not.toMatch(/falling backward|clutching stomach|leg lifted|sleeve|@\{/);
+  });
+
+  it('同一个侧马尾和蓝色连衣裙跨影院镜头沿用，穿法词不会重选衣领袖型', () => {
+    const name = '邱晓晓';
+    const entries: CharTagEntry[] = [{ name, raw: '', nl: '', desc: '', history: [], source: 'ai', fields: {
+      ...emptyCharFields(), sex: '1girl', hair: 'dark brown hair, medium hair, wavy hair, side ponytail, wispy bangs',
+      eyes: 'amber eyes, tareme', body: 'curvy, large breasts', extra: 'hair ribbon, oval face, arched eyebrows',
+    } }];
+    const wardrobe = new Map<string, CharacterWardrobe>([[name, { name, top: { tag: 'light blue dress', status: 'on' } }]]);
+    const views = ['from side', 'three-quarter view', 'from front'];
+    const images = captions('邱晓晓在影院坐下。\n她倚着靠背。\n她抬起手。', views.map((view, i) => ({
+      position: 'P' + (i + 1), tag: '1girl, medium shot, theater, ' + view,
+      characters: [{ name, tag: 'girl, sitting, holding the skirt', omitFeatures: ['oval face', 'side ponytail'], nl: 'She adjusts the skirt.' }],
+    })), entries, wardrobe);
+
+    for (const { char_captions: [role] } of images) {
+      expect(role.char_caption).toMatch(/dark brown hair.*side ponytail.*oval face.*arched eyebrows.*light blue dress.*simple round neckline.*short sleeves.*single-piece dress/);
+      expect(role.char_caption).not.toContain('the skirt');
+      expect(role.char_caption).toContain('dress hem');
+    }
+  });
+});
