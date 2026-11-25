@@ -262,6 +262,7 @@ async function runUnifiedPass(params: {
   reuseNew?: CharChange[];
   reuseOutfits?: WardrobeUpdate[];
   captureFrames: boolean;
+  previousStory?: string;
 }): Promise<{ plan: ImagePlan; wardrobeUpdates: WardrobeUpdate[]; world: WorldAnchorConfig; frames: FrameContinuity[] }> {
   const wardrobesBefore = params.wardrobesBefore;
   const input: UnifiedInput = {
@@ -339,7 +340,7 @@ async function runUnifiedPass(params: {
     if (!proposed) {
       const sourceLine = params.segments.find(segment => segment.id === prior.position)?.sourceLine;
       plan.wardrobeUpdates.push({ ...prior, sourceLine });
-    } else if (!wardrobeEvidence(proposed, params.segments, plan.timeJump).motion) {
+    } else if (!wardrobeEvidence(proposed, params.segments).motion) {
       proposed.slots = prior.slots;
     }
   }
@@ -382,7 +383,7 @@ async function runUnifiedPass(params: {
       frame: params.captureFrames ? captureFrame(shot, entries, wardrobe) : undefined,
     };
   }, params.captureFrames ? { segments: params.segments, timeJump: plan.timeJump,
-    knownNames: [...knownNames, ...plan.changes.map(change => change.name)], world: world.presetId } : undefined);
+    knownNames: [...knownNames, ...plan.changes.map(change => change.name)], maleNames: params.maleNames, world: world.presetId, previousStory: params.previousStory } : undefined);
   const assembledImages = sequence.frames.map(item => item.image);
   const frames = sequence.frames.flatMap(item => item.frame ?? []);
   const wardrobeUpdates = sequence.updates;
@@ -596,6 +597,8 @@ async function runForFloor(floor: number, opts: RunOptions = {}): Promise<void> 
     let frameDelta: FloorContinuity | undefined;
     const retries = Math.max(0, Math.floor(Number(settings.autoTag.retryCount) || 0));
     if (unifiedEligible) {
+      const previous = profile.naiCharPrompts ? context.chat.slice(0, floor).findLast(isAiStoryMessage) : undefined;
+      const previousStory = previous ? prepareTargetText(previous.mes, settings.excludes.customStripTags).segments.map(s => s.text).join('\n') : undefined;
       const unified = await runUnifiedPass({
         channel: channel ?? null,
         floor,
@@ -617,6 +620,7 @@ async function runForFloor(floor: number, opts: RunOptions = {}): Promise<void> 
         chatId,
         wardrobesBefore: wardrobeBaseline,
         captureFrames: profile.naiCharPrompts,
+        previousStory,
         reuseOutfits: priorRun && previousOutfitDelta?.swipe === (swipeId ?? 0) ? previousOutfitDelta.updates : undefined,
         reuseNew: priorRun && previousDelta?.swipe === (swipeId ?? 0) ? previousDelta.ops.flatMap(op =>
           op.kind === 'new' && Object.values(op.fields).some(Boolean) ? [{

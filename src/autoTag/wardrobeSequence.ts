@@ -1,4 +1,6 @@
 import type { TargetSegment } from './clean';
+import { isNaiMaleAppearance } from './naiStory';
+import { verifyNewWear, wardrobeBaseline } from './wardrobeBaseline';
 import { compareStoryMoments } from './storyMoment';
 import { recoverExplicitWear, wardrobeEvidence } from './wardrobeEvidence';
 import type { ImageCharacterPrompt, ImageInsertion } from '@/autoTag/protocol';
@@ -100,17 +102,17 @@ export function compileWardrobeSequence<T>(
   updates: WardrobeUpdate[],
   shots: ImageInsertion[],
   compile: (shot: ImageInsertion, wardrobe: Map<string, CharacterWardrobe>) => T,
-  narrative?: { segments: TargetSegment[]; timeJump: TimeJump; knownNames?: string[]; world?: string },
+  narrative?: { segments: TargetSegment[]; timeJump: TimeJump; knownNames?: string[]; maleNames?: ReadonlySet<string>; world?: string; previousStory?: string },
 ): { frames: T[]; updates: WardrobeUpdate[] } {
   const state = new Map(before);
   const persisted: WardrobeUpdate[] = [];
   const frames: T[] = new Array(shots.length);
-  const annotatedPositions = new Set(updates.filter(change => change.clause).map(change => change.position));
-  const momentOfShot = (shot: ImageInsertion) => shot.clause || !annotatedPositions.has(shot.position)
+  const momentOfShot = (shot: ImageInsertion) => shot.clause || !narrative
     ? shot : { ...shot, clause: Number.MAX_SAFE_INTEGER };
   const order = shots.map((shot, index) => ({ shot, index })).sort((a, b) => compareMoments(momentOfShot(a.shot), momentOfShot(b.shot)));
   const cast = [...new Set([...before.keys(), ...(narrative?.knownNames ?? []), ...updates.map(update => update.name),
     ...shots.flatMap(shot => shot.characters.map(c => c.name))])];
+  const baseline = narrative ? wardrobeBaseline(narrative.segments, cast, narrative.world, narrative.previousStory, narrative.timeJump, shots) : undefined;
   const recovered = narrative ? recoverExplicitWear(narrative.segments, cast, updates) : [];
   const backfilledSlots = new Set<WardrobeUpdate['slots']>();
   if (narrative) updates = updates.map(update => ({ ...update, slots: { ...update.slots } }));
@@ -121,7 +123,7 @@ export function compileWardrobeSequence<T>(
     if (start < 0 || end <= start) continue;
     const intervening = narrative.segments.slice(start, end + 1).map(s => s.text).join(' ');
     if (/换[上装衣成了]|更衣|脱[下掉]|穿[上回换]|另外一件|第二天|次日|走进.{0,8}(?:房间|家中)|\b(?:changes? into|takes? off|puts? on|later that|the next day)\b/i.test(intervening)) continue;
-    const evidence = wardrobeEvidence(update, narrative.segments, narrative.timeJump, cast);
+    const evidence = wardrobeEvidence(update, narrative.segments, cast);
     const slots: WardrobeUpdate['slots'] = {};
     for (const key of WARDROBE_SLOT_KEYS) {
       const slot = update.slots[key];
@@ -131,7 +133,7 @@ export function compileWardrobeSequence<T>(
         && (other.mode === 'replace' || other.slots[key]) && (other.sourceLine ?? -1) < (update.sourceLine ?? 0));
       const initial = earlier.length === 1 && earlier[0].mode === 'replace' ? earlier[0] : undefined;
       if (initial?.position === update.describedSince
-        && !wardrobeEvidence(initial, narrative.segments, narrative.timeJump, cast).specifiedGarment) initial.slots[key] = slot;
+        && !wardrobeEvidence(initial, narrative.segments, cast).specifiedGarment) initial.slots[key] = slot;
       else if (!earlier.length) slots[key] = slot;
     }
     if (Object.keys(slots).length) {
@@ -146,6 +148,34 @@ export function compileWardrobeSequence<T>(
   })).sort(compareMoments);
   let cursor = 0;
   const resetByDay = new Map<string, string>();
+  const wearPhase = new Map<string, string>();
+  const wornThisFloor = new Set<string>();
+
+  function resumeWardrobe(update: WardrobeUpdate & { sourceLine?: number }, baseTag = ''): void {
+    const previous = state.get(update.name);
+    if (!baseline || !previous || update.sourceLine === undefined) return;
+    const { day, workArrival, carries } = baseline.phase({ sourceLine: update.sourceLine, clause: update.clause }, update.name, baseTag);
+    if (carries) return;
+    // A new work arrival can resume last floor's temporary wear when the calendar cue was in the preceding floor.
+    const phase = day ? day.sourceLine + '.' + day.clause
+      : workArrival && before.has(update.name) && !wornThisFloor.has(update.name) ? 'work-arrival' : undefined;
+    if (!phase || wearPhase.get(update.name) === phase) return;
+    wearPhase.set(update.name, phase);
+    const slots = baseline.keepWornIdentity(previous);
+    const changed = WARDROBE_SLOT_KEYS.some(key => {
+      const prior = previous[key];
+      return prior && (prior.status !== 'on' || (prior.condition ?? '') !== (slots[key]?.condition ?? ''));
+    });
+    if (!changed) return;
+    const resolved: WardrobeUpdate = { ...update, mode: 'replace', slots };
+    if (Object.keys(slots).length) {
+      applyWardrobeUpdate(state, resolved);
+      persisted.push(resolved);
+    } else {
+      // Older saves can have only a status without a garment. Treat it as unknown in the new scene.
+      state.delete(update.name);
+    }
+  }
 
   function fitUnspecifiedAncientCostume(slots: WardrobeUpdate['slots']) {
     const replacements: Partial<Record<WardrobeSlotKey, [RegExp, string]>> = {
@@ -164,12 +194,15 @@ export function compileWardrobeSequence<T>(
   }
 
   function apply(update: WardrobeUpdate): void {
+    resumeWardrobe({ name: update.name, mode: 'replace', slots: {}, position: update.position,
+      sourceLine: update.sourceLine, clause: update.clause });
     const slots = { ...update.slots };
     const previous = state.get(update.name);
     let mode = update.mode;
     let day: string | undefined;
     const backfilled = backfilledSlots.has(update.slots);
-    if (narrative && !backfilled) {
+    const evidence = narrative && !backfilled ? wardrobeEvidence(update, narrative.segments, cast, previous) : undefined;
+    if (narrative && evidence) {
       // 旧楼层会把外套写在 top、把单独鞋履写在 legs。对原件做 patch 时认回旧地址。
       if (mode === 'patch' && previous) {
         if (slots.outer && !previous.outer && !slots.top && !slots.outer.tag
@@ -189,7 +222,6 @@ export function compileWardrobeSequence<T>(
           }
         }
       }
-      const evidence = wardrobeEvidence(update, narrative.segments, narrative.timeJump, cast, previous);
       if (mode === 'patch') {
         for (const key of WARDROBE_SLOT_KEYS) {
           const request = slots[key];
@@ -255,6 +287,15 @@ export function compileWardrobeSequence<T>(
         }
       }
     }
+    if (evidence && mode !== 'patch') {
+      for (const key of WARDROBE_SLOT_KEYS) {
+        const slot = slots[key];
+        if (!slot) continue;
+        const verified = verifyNewWear(slot, slot.status === 'off' ? evidence.off(key) : evidence.half(key));
+        if (verified) slots[key] = verified;
+        else delete slots[key];
+      }
+    }
     if (mode === 'patch') {
       for (const key of WARDROBE_SLOT_KEYS) {
         const patch = slots[key];
@@ -275,11 +316,31 @@ export function compileWardrobeSequence<T>(
     applyWardrobeUpdate(state, resolved);
     if (day && mode === 'replace') resetByDay.set(update.name, day);
     persisted.push(resolved);
+    if (WARDROBE_SLOT_KEYS.some(key => slots[key] && slots[key]!.status !== 'on')) wornThisFloor.add(update.name);
   }
 
   for (const { shot, index } of order) {
     while (cursor < ordered.length && compareMoments(ordered[cursor], momentOfShot(shot)) <= 0) apply(ordered[cursor++]);
     for (const character of shot.characters) {
+      const init = { name: character.name, mode: 'swap' as const, slots: {}, position: shot.position, sourceLine: shot.sourceLine, clause: shot.clause };
+      resumeWardrobe(init, shot.tag);
+      if (baseline && narrative && !narrative.maleNames?.has(character.name)
+        && !isNaiMaleAppearance('', character.tag) && !/\bfaceless male\b/i.test(character.tag)) {
+        const evidence = wardrobeEvidence(init, narrative.segments, cast, state.get(character.name));
+        const skip = new Set<'top' | 'bottom'>();
+        for (const key of ['top', 'bottom'] as const) if (evidence.off(key)) skip.add(key);
+        const known = state.get(character.name);
+        const slots = baseline.fill(shot, character, known, skip);
+        if (slots.top?.tag && !slots.top.style) {
+          const style = dressStyle(slots.top.tag);
+          if (style) slots.top.style = style;
+        }
+        if (Object.keys(slots).length) {
+          const resolved: WardrobeUpdate = { ...init, mode: known ? 'swap' : 'replace', slots };
+          applyWardrobeUpdate(state, resolved);
+          persisted.push(resolved);
+        }
+      }
       if (!character.wearState) continue;
       const slots = { ...character.wearState };
       for (const update of ordered) {

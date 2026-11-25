@@ -106,6 +106,10 @@ export function stripTransientWear(tag: string): string {
     .join(', ');
 }
 
+/** 未单独建下装时，这些衣物自身提供上下身覆盖。 */
+export const ONEPIECE_GARMENT =
+  /\b(dress|gown|kimono|yukata|hanfu|robe|cheongsam|qipao|nightgown|bodysuit|leotard|swimsuit|onesie|jumpsuit)\b/i;
+
 export function dressStyle(tag: string): string {
   // 旧的“颜色 + dress”只确定了颜色。用一个稳定、普通的轮廓补足未指定的款式。
   return /^(?:(?:light|dark|pale|pastel|dusty) )?(?:black|white|red|blue|navy|green|pink|brown|gr[ae]y|yellow|purple|ivory|cream|beige|orange|teal|burgundy|lavender) dress$/i.test(tag)

@@ -5,7 +5,7 @@ import { parseUnifiedPlan } from '@/autoTag/protocol';
 import { compileWardrobeSequence } from '@/autoTag/wardrobeSequence';
 import { compactGeneratedScene } from '@/autoTag/sceneCompaction';
 import { emptyCharFields, type CharTagEntry } from '@/state/charTags';
-import { type CharacterWardrobe } from '@/state/outfitState';
+import { deriveWardrobes, makeWardrobeFloorDelta, type CharacterWardrobe } from '@/state/outfitState';
 import { parseImageTagContent, parseImageTags, serializeImageTag } from '@/st/imageTagRegex';
 
 import {
@@ -840,5 +840,137 @@ describe('用户用例传入 NovelAI 4.5 的最终 caption', () => {
       expect(role.char_caption).not.toContain('the skirt');
       expect(role.char_caption).toContain('dress hem');
     }
+  });
+});
+
+describe('服装缺档和跨楼恢复的 NovelAI 4.5 请求', () => {
+  function run(
+    story: string,
+    images: object[],
+    before = new Map<string, CharacterWardrobe>(),
+    options: { previousStory?: string; timeJump?: 'new_day' | 'same_day'; updates?: object[] } = {},
+  ) {
+    const segments = prepareTargetText(story, []).segments;
+    const plan = parseUnifiedPlan(JSON.stringify({ images, timeJump: options.timeJump, wardrobeUpdates: options.updates }),
+      segments, 0, 8, { femaleScenesOnly: true, selectBeats: true });
+    return compileWardrobeSequence(before, plan.wardrobeUpdates, plan.images, (shot, wardrobe) => {
+      const image = assembleImageCharacters(shot, [], wardrobe);
+      const parsed = parseImageTagContent(parseImageTags(serializeImageTag(image))[0]);
+      const params = buildNaiParameters(nai({ model: 'nai-diffusion-4-5-full' }), {
+        prompt: parsed.tag, nl: parsed.nl, characters: parsed.characters, seed: 7,
+      });
+      const positive = params.v4_prompt as { caption: { base_caption: string; char_captions: { char_caption: string }[] } };
+      const negative = params.v4_negative_prompt as typeof positive;
+      return { positive: positive.caption, role: positive.caption.char_captions[0].char_caption,
+        uc: negative.caption.char_captions[0].char_caption };
+    }, { segments, world: 'modern', timeJump: plan.timeJump, previousStory: options.previousStory });
+  }
+
+  const commutes = '林雨霖';
+  const worker = '赵曼心';
+  const officeShot = (position: string, nl = '') => ({
+    position, tag: '1girl, medium shot, office, meeting room, daylight', nl,
+    characters: [{ name: worker, tag: 'girl, bottomless, sitting, chin rest',
+      nl: 'She sits without her skirt at the table.', uc: 'skirt' }],
+  });
+  const yesterday = new Map<string, CharacterWardrobe>([[worker, {
+    name: worker,
+    top: { tag: 'white short-sleeved blouse', style: 'collared', status: 'on' },
+    bottom: { tag: 'black straight skirt', style: 'knee-length, matte woven fabric', status: 'off', condition: 'damp fabric' },
+    innerBottom: { tag: 'blue briefs', status: 'off' },
+  }]]);
+
+  it('两张通勤图没提交衣物记录，裙子后文才提到，仍共同使用第一次建立的服装', () => {
+    const result = run('林雨霖与林牧在地铁车厢，林雨霖扶住他的肩。\n出了地铁站，林雨霖用提包挡住自己湿漉漉的黑色裙子。', [
+      { position: 'P1', tag: '1girl, 1boy, from side, medium shot, subway train, crowded, morning light',
+        characters: [{ name: commutes, tag: 'girl, luxury handbag, standing, gripping his shoulders tightly' },
+          { name: '林牧', tag: '1boy, standing' }] },
+      { position: 'P2', tag: '1girl, pov, medium shot, city street, outdoors, daylight',
+        nl: 'Outside the subway station, she holds her handbag in front of her damp skirt.',
+        characters: [{ name: commutes, tag: 'girl, luxury handbag, standing, holding bag' }] },
+    ]);
+    expect(result.frames).toHaveLength(2);
+    for (const frame of result.frames) expect(frame.role).toMatch(/ivory collared blouse.*black skirt/);
+    expect(result.frames[1].positive.base_caption).toContain('her damp skirt');
+    expect(result.updates).toHaveLength(1);
+    expect(result.updates[0]).toMatchObject({ name: commutes, position: 'P1', mode: 'replace',
+      slots: { top: { tag: 'ivory collared blouse', status: 'on' }, bottom: { tag: 'black skirt', status: 'on' } } });
+  });
+
+  it('正文未说裙款时，后镜头有归属的衣物词会补进同一套服装，并消解 dress hem 与裙子的冲突', () => {
+    const result = run('林雨霖与林牧在地铁车厢。\n林雨霖出了地铁站，走向出租车。', [
+      { position: 'P1', tag: '1girl, 1boy, medium shot, subway train',
+        characters: [{ name: commutes, tag: 'girl, standing, luxury handbag' }, { name: '林牧', tag: '1boy, standing' }] },
+      { position: 'P2', tag: '1girl, pov, medium shot, city street',
+        nl: 'She holds her handbag in front of her damp skirt.',
+        characters: [{ name: commutes, tag: 'girl, holding her handbag over the dress hem' }] },
+    ]);
+    expect(result.frames.map(frame => frame.role)).toEqual([
+      expect.stringContaining('ivory collared blouse, charcoal knee-length straight skirt'),
+      expect.stringContaining('ivory collared blouse, charcoal knee-length straight skirt'),
+    ]);
+    expect(result.frames[1].role).toContain('holding her handbag over the skirt hem');
+    expect(JSON.stringify(result.frames)).not.toMatch(/dress hem|trousers/);
+  });
+
+  it('隔天办公室即使导演漏报时间和换装，仍恢复已知下装并清理冲突的描述和负面词', () => {
+    const result = run('昨天的事情过去了。\n隔天，赵曼心坐在会议桌前，双手托腮。', [
+      officeShot('P2', 'The woman sits bottomless at the conference table resting her chin in both hands.'),
+    ], yesterday);
+    const [frame] = result.frames;
+    expect(frame.role).toMatch(/white short-sleeved blouse, collared.*black straight skirt, knee-length, matte woven fabric.*sitting, chin rest/);
+    expect(JSON.stringify(frame)).not.toMatch(/bottomless|without her skirt|damp fabric|blue briefs/);
+    expect(frame.uc).not.toMatch(/\bskirt\b/);
+    const delta = makeWardrobeFloorDelta(result.updates, 0);
+    const chat = [{ mes: '', name: '赵曼心', is_user: false, is_system: false, extra: { bbiOutfitOps: delta } }];
+    expect(deriveWardrobes(chat).get(worker)?.bottom).toMatchObject({ status: 'on', tag: 'black straight skirt' });
+  });
+
+  it('只存了上衣的旧档也能在正常上班的镜头补下装，忽略未经正文支持的 off 更新', () => {
+    const before = new Map<string, CharacterWardrobe>([[worker,
+      { name: worker, top: { tag: 'white short-sleeved blouse', status: 'on' } }]]);
+    const result = run('次日赵曼心来到公司开会。', [officeShot('P1')], before, { updates: [{
+      name: worker, position: 'P1', mode: 'replace',
+      slots: { top: { tag: 'white short-sleeved blouse', status: 'on' },
+        bottom: { tag: 'navy pleated skirt', status: 'off' }, innerBottom: { status: 'off' } },
+    }] });
+    expect(result.frames[0].role).toMatch(/white short-sleeved blouse.*navy pleated skirt/);
+    expect(JSON.stringify(result.frames[0])).not.toMatch(/bottomless|without her skirt|underwear/);
+  });
+
+  it('跨楼仍是同一会议时延用上一刻的状态，后面的穿回动作单独生效', () => {
+    const result = run('会议仍在继续，赵曼心仍坐在会议室。\n赵曼心穿回裙子。', [officeShot('P1'), officeShot('P2')],
+      yesterday, { previousStory: '赵曼心在会议室坐着，会议还没有结束。' });
+    expect(result.frames[0].role).toContain('bottomless');
+    expect(result.frames[1].role).toContain('black straight skirt');
+    expect(result.frames[1].role).not.toContain('bottomless');
+    expect(result.updates).toHaveLength(1);
+  });
+
+  it('跨到正常到岗能恢复衣件；次日正文明确延续某个穿着状态时以正文为准', () => {
+    const arrived = run('赵曼心准时来到公司开会。', [officeShot('P1')], yesterday, {
+      previousStory: '晚上赵曼心独自在家里。', timeJump: 'new_day',
+    });
+    expect(arrived.frames[0].role).toContain('black straight skirt');
+    expect(arrived.frames[0].role).not.toContain('bottomless');
+
+    const continued = run('翌日，赵曼心仍没穿裙子，独自在家。', [
+      { ...officeShot('P1'), tag: '1girl, medium shot, living room' },
+    ], yesterday);
+    expect(continued.frames[0].role).toContain('bottomless');
+    expect(continued.updates).toHaveLength(0);
+  });
+
+  it('日历切点分开当天与隔天；隔天正文新发生的服装变化仍从该处生效', () => {
+    const result = run('赵曼心坐在家中。\n翌日赵曼心来到公司。\n赵曼心换上灰色西装裤。', [
+      { ...officeShot('P1'), tag: '1girl, medium shot, living room' },
+      officeShot('P2'), officeShot('P3'),
+    ], yesterday, { updates: [{
+      name: worker, position: 'P3', mode: 'swap', slots: { bottom: { tag: 'grey suit trousers', status: 'on' } },
+    }] });
+    expect(result.frames.map(f => f.role)).toEqual([
+      expect.stringContaining('bottomless'), expect.stringContaining('black straight skirt'), expect.stringContaining('grey suit trousers'),
+    ]);
+    expect(result.frames[2].role).not.toContain('black straight skirt');
   });
 });

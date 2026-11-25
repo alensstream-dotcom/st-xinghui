@@ -1,7 +1,7 @@
 import { ageBand, FACE_IDENTITY, profileAge, RELATION_TAG, resolveVisualSubjects } from './visualIdentity';
 import type { ImageCharacterPrompt, ImageInsertion } from '@/autoTag/protocol';
 import type { CharTagEntry } from '@/state/charTags';
-import { dressStyle, type CharacterWardrobe, type SlotWearStatus, type WardrobeSlotKey } from '@/state/outfitState';
+import { dressStyle, ONEPIECE_GARMENT, type CharacterWardrobe, type SlotWearStatus, type WardrobeSlotKey } from '@/state/outfitState';
 import type { WorldAnchorConfig } from '@/state/worldAnchor';
 
 /** 角色提示依次使用当刻的固定外貌、可见衣物与导演描述。 */
@@ -234,6 +234,34 @@ function trimWardrobeAside(text: string, wardrobe: CharacterWardrobe | undefined
     wearing(clothing) && !/\b(?:is|was|are|were)$/i.test(withoutLead.slice(0, offset).trim()) ? '' : part);
 }
 
+/** 共享叙述和动作也复用已确认的下装名，避免把手中的包画成遮住另一件服装。 */
+function alignWornHem(text: string, wardrobe: CharacterWardrobe | undefined): string {
+  const bottom = wardrobe?.bottom;
+  if (!bottom && /\bdress\b/i.test(wardrobe?.top?.tag ?? '')) {
+    return text.replace(/\b(her|the) ((?:damp |wet )?)skirt(?: hem)?\b/gi, '$1 $2dress hem');
+  }
+  if (!bottom || bottom.status === 'off') return text;
+  if (/\bskirt\b/i.test(bottom.tag)) return text.replace(/\bdress hem\b/gi, 'skirt hem');
+  const garment = bottom.tag.match(/\b(?:trousers|pants|shorts|jeans)\b/i)?.[0];
+  return garment ? text.replace(/\b(her|the) ((?:damp |wet )?)(?:dress hem|skirt(?: hem)?)\b/gi, '$1 $2' + garment) : text;
+}
+
+/** 清理与当帧已确认的衣件相冲突的缺衣断言。保留动作和衣物在场的描写。 */
+function trimCoveredExposure(text: string, wardrobe: CharacterWardrobe | undefined): string {
+  if (!wardrobe) return text;
+  const upper = wardrobe.top?.status === 'on' || wardrobe.outer?.status === 'on';
+  const lower = wardrobe.bottom?.status === 'on'
+    || wardrobe.top?.status === 'on' && ONEPIECE_GARMENT.test(wardrobe.top.tag);
+  const words = [
+    ...(upper ? ['topless', 'bare-chested', 'without (?:a |her )?(?:top|shirt|blouse)'] : []),
+    ...(lower ? ['bottomless', 'without (?:a |her )?(?:skirt|pants|trousers|shorts)', '(?:with )?(?:her )?bare lower body'] : []),
+    ...(upper || lower ? ['(?:fully |completely )?(?:naked|nude)(?! (?:lining|tone|colou?r|fabric|shade|lipstick|stockings|heels))'] : []),
+  ];
+  if (!words.length) return text;
+  return text.replace(new RegExp('(?:\\s*,\\s*|\\s+and\\s+|\\s+)?\\b(?:' + words.join('|') + ')\\b', 'gi'), '')
+    .replace(/\s+([,.;!?])/g, '$1').trim();
+}
+
 export function stripLeakedAppearance(tags: string[], hasLibraryEntry: boolean): string[] {
   return tags.filter(tag => {
     const token = tag.trim();
@@ -283,10 +311,6 @@ const SLOT_NEGATIVES: Record<WardrobeSlotKey, string[]> = {
   innerBottom: ['panties', 'underwear'],
   legs: ['pantyhose', 'stockings', 'thighhighs', 'socks'],
 };
-
-/** 连身长袍/连衣裙：没有单独下装记录时，下装状态跟着上装走。 */
-const ONEPIECE_GARMENT =
-  /\b(dress|gown|kimono|yukata|hanfu|robe|cheongsam|qipao|nightgown|bodysuit|leotard|swimsuit|onesie|jumpsuit)\b/i;
 
 export interface CompiledWardrobe {
   positive: string[];
@@ -594,7 +618,9 @@ export function assembleImageCharacters(
       return male;
     }
 
-    const frameTags = dropLocalizedMarkers(splitTags(character.tag));
+    const wardrobe = wardrobes.get(character.name);
+    const frameTags = dropLocalizedMarkers(splitTags(character.tag))
+      .map(token => visualSubjects && !wardrobeOwnsTag(token, wardrobe) ? trimCoveredExposure(token, wardrobe) : token);
     const eyesClosed = frameTags.some(tag => /^closed eyes$/i.test(tag));
     const focus = [image.tag, image.nl, character.tag, character.nl].join(', ').toLowerCase();
     const frameBand = ageBand(character.frameAge);
@@ -607,15 +633,13 @@ export function assembleImageCharacters(
       .filter(t => !distant || !DISTANT_DETAIL.test(t) || focus.includes(t.toLowerCase()))
       .filter(tag => !eyesClosed || !/^(?:narrowed eyes|half-closed eyes|wide-eyed|open eyes)$/i.test(tag));
     const hasLibraryEntry = Boolean(entry);
-    const wardrobe = wardrobes.get(character.name);
     const top = wardrobe?.top;
     const fallbackStyle = visualSubjects && top && !top.style ? dressStyle(top.tag) : '';
     const visibleWardrobe = fallbackStyle && wardrobe && top ? { ...wardrobe, top: { ...top, style: fallbackStyle } } : wardrobe;
     const compiled = compileWardrobeForFrame(visibleWardrobe, character.wearState, upperOnly);
     const outfitTags = compiled.positive.flatMap(splitTags).filter(tag => !(upperOnly && LOWER_ONLY.test(tag)));
-    const dress = visualSubjects && /\bdress\b/i.test(top?.tag ?? '') && !wardrobe?.bottom;
-    const onDress = (text: string) => dress ? text.replace(/\b(?:her|the) skirt\b/gi, 'the dress hem') : text;
-    const directorTags = stripLeakedAppearance(frameTags.map(onDress), hasLibraryEntry)
+    const matchedClothes = visualSubjects ? frameTags.map(token => alignWornHem(token, wardrobe)) : frameTags;
+    const directorTags = stripLeakedAppearance(matchedClothes, hasLibraryEntry)
       .filter(tag => !wardrobeOwnsTag(tag, wardrobe));
 
     const visibleInCrop = (t: string) => !(upperOnly && (LEG_ONLY.test(t) || LOWER_ONLY.test(t)))
@@ -660,7 +684,7 @@ export function assembleImageCharacters(
     const result: ImageCharacterPrompt = {
       name: character.name,
       tag: visiblePositive.join(', '),
-      nl: image.nl && image.nl.trim() === character.nl.trim() ? '' : visualSubjects ? trimWardrobeAside(onDress(character.nl), wardrobe) : character.nl,
+      nl: image.nl && image.nl.trim() === character.nl.trim() ? '' : visualSubjects ? trimCoveredExposure(trimWardrobeAside(alignWornHem(character.nl, wardrobe), wardrobe), wardrobe) : character.nl,
     };
     if (mergedUc) result.uc = mergedUc;
     return result;
@@ -671,8 +695,10 @@ export function assembleImageCharacters(
     ? splitTags(tag).filter(t => !femaleIndexes.some(index => wardrobeOwnsTag(t, wardrobes.get(image.characters[index].name)))).join(', ')
     : tag;
   const soloWardrobe = image.characters.length === 1 ? wardrobes.get(image.characters[0].name) : undefined;
-  const dresses = image.characters.filter(c => /\bdress\b/i.test(wardrobes.get(c.name)?.top?.tag ?? '') && !wardrobes.get(c.name)?.bottom);
-  const linkedDress = dresses.length === 1 && femaleIndexes.length === 1;
-  const nl = visualSubjects ? trimWardrobeAside(linkedDress ? image.nl.replace(/\b(?:her|the) skirt\b/gi, 'the dress hem') : image.nl, soloWardrobe) : image.nl;
+  const soleFemaleWardrobe = femaleIndexes.length === 1 ? wardrobes.get(image.characters[femaleIndexes[0]].name) : undefined;
+  const nl = visualSubjects ? trimCoveredExposure(
+    trimWardrobeAside(alignWornHem(image.nl, soleFemaleWardrobe), soloWardrobe),
+    soleFemaleWardrobe,
+  ) : image.nl;
   return { ...image, tag: baseTag, nl, characters };
 }
