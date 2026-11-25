@@ -165,6 +165,49 @@ describe('assembleImageCharacters', () => {
     } as ImageInsertion;
   }
 
+  it('中景过滤平底鞋时保留 flat chest；全身景别只投影当前动作需要的微小特征', () => {
+    const profile = entry('甲', { body: 'tall female, flat chest, toned', extra: 'earrings, mole on neck', eyes: 'blue eyes, sanpaku' });
+    const beat = image({ tag: '1girl, medium shot', characters: [{ name: '甲', tag: 'holding sunglasses', nl: '' }] });
+    const state = new Map([['甲', wardrobe('甲', { shoes: { tag: 'black ballet flats', status: 'on' } })]]);
+    const assemble = () => assembleImageCharacters(beat, [profile], state).characters[0].tag;
+    expect(assemble()).toContain('flat chest');
+    expect(assemble()).not.toContain('ballet flats');
+    expect(assemble()).toContain('sanpaku');
+    beat.tag = '1girl, full shot';
+    expect(assemble()).toContain('flat chest');
+    expect(assemble()).toContain('holding sunglasses');
+    expect(assemble()).toContain('black ballet flats');
+    expect(assemble()).not.toMatch(/sanpaku|mole on neck/);
+    beat.nl = 'She points to the mole on her neck.';
+    beat.characters[0].tag = 'pointing, mole on neck';
+    expect(assemble()).toContain('mole on neck');
+  });
+
+  it('双手抓踝的整体姿态修正景别，普通沙发对话和刻意的局部特写保留原构图', () => {
+    const beat = image({ tag: '1girl, from side, medium shot, sofa', characters: [{ name: '甲', tag: 'grabbing own ankles, m legs', nl: '' }] });
+    const full = assembleImageCharacters(beat, []).tag;
+    expect(full).toBe('1girl, three-quarter view, full body, sofa');
+    expect(assembleImageCharacters({ ...beat, extent: 'detail', tag: '1girl, close-up, foot focus' }, []).tag).toContain('close-up');
+    beat.characters[0].tag = 'sitting';
+    expect(assembleImageCharacters(beat, []).tag).toBe(beat.tag);
+    expect(assembleImageCharacters({ ...beat, extent: 'whole' }, []).tag).toContain('full body');
+  });
+
+  it('正常穿风衣可见高领，内衣入账不上镜；敞开外套或脱掉毛衣时按层展开', () => {
+    const beat = image({ tag: '1girl, full body', characters: [{ name: '甲', tag: 'burgundy embroidered bra, holding spare bra', nl: '' }] });
+    const outfit = wardrobe('甲', { outer: { tag: 'beige trench coat', status: 'on' }, top: { tag: 'black turtleneck', status: 'on' },
+      innerTop: { tag: 'red bra', status: 'on' } });
+    const assemble = () => assembleImageCharacters(beat, [], new Map([['甲', outfit]])).characters[0].tag;
+    expect(assemble()).toMatch(/closed coat.*black turtleneck visible at collar/);
+    expect(assemble()).not.toMatch(/red bra|burgundy embroidered bra/);
+    expect(assemble()).toContain('holding spare bra');
+    outfit.outer!.status = 'half_top';
+    expect(assemble()).toContain('black turtleneck');
+    expect(assemble()).not.toMatch(/closed coat|red bra/);
+    outfit.top!.status = 'off';
+    expect(assemble()).toContain('red bra');
+  });
+
   it('短发高马尾不会被自身或同框角色的自动负面压掉；闭眼只覆盖本帧的睁眼表情', () => {
     const person = entry('许婷', { hair: 'black hair, short hair, high ponytail', eyes: 'emerald eyes, narrowed eyes' });
     const other = entry('乙', { hair: 'ponytail, curly hair' });

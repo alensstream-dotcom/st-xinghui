@@ -52,7 +52,7 @@ function dropLocalizedMarkers(tags: string[]): string[] {
 /** 只在全身/腿长镜头里才有意义的纯下身词：上半身构图写进去会让 NAI 硬塞一双腿。 */
 const LEG_ONLY = /\b(?:long legs?|short legs?|slender legs?|thick thighs?|bare legs?|shapely legs?|wide hips?)\b/i;
 /** 鞋子类词：半身构图拍不到脚，留着会被画成蜷脚塞进画面。 */
-const SHOE_WORD = /\b(?:flats?|heels?|high heels?|shoes?|boots?|sneakers?|sandals?|loafers?|pumps?|mary janes?|slippers?)\b/i;
+const SHOE_WORD = /\b(?:flats|flat shoes?|heels?|high heels?|shoes?|boots?|sneakers?|sandals?|loafers?|pumps?|mary janes?|slippers?)\b/i;
 const SHOES_HIDDEN_SHOT = /\b(?:cowboy shot|medium shot|upper body|close-up|face focus)\b/i;
 /** 下半身单品：纯上半身/面部特写里不该出现（否则会硬塞裙摆与丝袜进画面）。 */
 const LOWER_ONLY =
@@ -309,7 +309,12 @@ export function compileWardrobeForFrame(
 
   const outer = resolveSlot(wardrobe, wearState, 'outer');
   const shoes = resolveSlot(wardrobe, wearState, 'shoes');
-  const outerOpen = !outer || outer.status !== 'on';
+  const styledOpen = (slot: ResolvedSlot | null) =>
+    Boolean(slot && /\b(?:open[- ]front|open (?:coat|jacket|blazer)|worn open)\b/i.test(slot.tag));
+  const outerOpen = !outer || outer.status !== 'on' || styledOpen(outer);
+  const coat = outer && outer.status !== 'off' ? outer : top;
+  const closedCoat = coat?.status === 'on' && /\b(?:trench coat|overcoat)\b/i.test(coat.tag)
+    && !styledOpen(coat) && !/\b(?:open|unzipped|unbuttoned|sheer|transparent|cutout)\b/i.test(coat.tag);
   if (outer && outer.status !== 'off') {
     push(outer.tag);
     if (isHalfStatus(outer.status)) push(outer.halfTag);
@@ -322,6 +327,16 @@ export function compileWardrobeForFrame(
     push(top?.halfTag);
   } else if (top?.status === 'off') {
     negatives.push(...SLOT_NEGATIVES.top);
+  }
+
+  // 整齐穿着的风衣需要传达覆盖关系。已知高领打底时，只给镜头可见的领口。
+  if (closedCoat) {
+    push('closed coat');
+    const lining = coat === outer ? top : innerTop;
+    const collar = lining?.status === 'on' && splitTags(lining.tag).find(t => /\bturtleneck\b/i.test(t) && !/\b(?:bra|lingerie|bodystocking)\b/i.test(t));
+    if (collar && !/\b(?:high collar|high neck|zipped to chin)\b/i.test(coat.tag)) {
+      push(collar + ' visible at collar');
+    }
   }
 
   // 上身是否露出：外装不在原位，且这一帧确实是「上身」半脱（half_bottom 只掀裙摆时不算）。
@@ -434,6 +449,27 @@ function guardrailNegatives(world: WorldAnchorConfig | undefined, positive: stri
   });
 }
 
+const SHOT_SCALE = /^(?:medium shot|medium close-up|upper body|portrait|close[- ]?up|face focus|cowboy shot|full shot|full body|wide shot|long shot)$/i;
+const LOCAL_FOCUS = /^(?:lower body|foot focus|feet focus|ankle focus|hand focus|leg focus|thigh focus)$/i;
+const FULL_POSE = /\b(?:(?:the |straddle |middle |front |side )splits?|m[- ](?:shaped (?:split|pose)|legs)|grabbing (?:own|both|her own|his own) ankles)\b/i;
+const DISTANT_DETAIL = /^(?:sanpaku|long eyelashes|mole (?:on|under|beside) (?:neck|mouth|eye|lip|nose|chin))$/i;
+
+function fitShotToPose(image: ImageInsertion): string {
+  const tags = splitTags(image.tag);
+  const action = [image.tag, image.nl, ...image.characters.flatMap(c => [c.tag, c.nl])].join(', ');
+  const local = image.extent === 'detail' || (!image.extent && tags.some(t => LOCAL_FOCUS.test(t)));
+  if (local || (image.extent !== 'whole' && !FULL_POSE.test(action) && ![image.tag, ...image.characters.map(c => c.tag)].some(raw => splitTags(raw).some(t => /^splits$/i.test(t))))) return image.tag;
+  const scale = tags.some(t => /^(?:wide shot|long shot)$/i.test(t)) ? 'wide shot' : 'full body';
+  const index = tags.findIndex(t => SHOT_SCALE.test(t) || LOCAL_FOCUS.test(t));
+  const kept = tags.filter(t => !SHOT_SCALE.test(t) && !LOCAL_FOCUS.test(t));
+  kept.splice(index < 0 ? Math.min(1, kept.length) : index, 0, scale);
+  if (/\b(?:m[- ]legs|m-shaped split|straddle split|middle split)\b/i.test(action)) {
+    const side = kept.findIndex(t => /^from side$/i.test(t));
+    if (side >= 0) kept[side] = 'three-quarter view';
+  }
+  return kept.join(', ');
+}
+
 /**
  * 把导演挑出的这一格编译成最终发给 NAI 的角色块。
  *
@@ -447,8 +483,10 @@ export function assembleImageCharacters(
   wardrobes: Map<string, CharacterWardrobe> = new Map(),
   world?: WorldAnchorConfig,
 ): ImageInsertion {
-  const upperOnly = isUpperOnlyShot(image.tag);
-  const shoesHidden = SHOES_HIDDEN_SHOT.test(image.tag);
+  const tag = fitShotToPose(image);
+  const upperOnly = isUpperOnlyShot(tag);
+  const shoesHidden = SHOES_HIDDEN_SHOT.test(tag) && !/\b(?:feet|foot|ankle|shoe) focus\b/i.test(tag);
+  const distant = splitTags(tag).some(t => /^(?:full body|full shot|wide shot|long shot)$/i.test(t));
   const femaleIndexes: number[] = [];
   image.characters.forEach((character, index) => {
     const entry = entriesAtPos.find(item => item.name === character.name);
@@ -470,13 +508,23 @@ export function assembleImageCharacters(
 
     const frameTags = dropLocalizedMarkers(splitTags(character.tag));
     const eyesClosed = frameTags.some(tag => /^closed eyes$/i.test(tag));
+    const focus = [image.tag, image.nl, character.tag, character.nl].join(', ').toLowerCase();
     const fixedTags = buildFixedAppearanceTags(entry, character.omitFeatures)
+      .filter(t => !distant || !DISTANT_DETAIL.test(t) || focus.includes(t.toLowerCase()))
       .filter(tag => !eyesClosed || !/^(?:narrowed eyes|half-closed eyes|wide-eyed|open eyes)$/i.test(tag));
     const hasLibraryEntry = Boolean(entry);
-    const compiled = compileWardrobeForFrame(wardrobes.get(character.name), character.wearState, upperOnly);
+    const wardrobe = wardrobes.get(character.name);
+    const compiled = compileWardrobeForFrame(wardrobe, character.wearState, upperOnly);
     const outfitTags = compiled.positive.flatMap(splitTags).filter(tag => !(upperOnly && LOWER_ONLY.test(tag)));
     const directorTags = stripLeakedAppearance(frameTags, hasLibraryEntry)
-      .filter(tag => !wardrobes.has(character.name) || !STATIC_CLOTHING.test(tag));
+      .filter(tag => !wardrobe || !STATIC_CLOTHING.test(tag))
+      .filter(tag => {
+        if (!wardrobe || tag.includes('#') || ACTION_TOUCH_TAG.test(tag)) return true;
+        // 有相应层的账本时，静态内衣名称只能从可见槽输出。手持道具和互动仍由导演描述。
+        if (/\b(?:bra|brassiere|bralette)$/i.test(tag)) return !(wardrobe.outer || wardrobe.top || wardrobe.innerTop);
+        if (/\b(?:panties|briefs|thong)$/i.test(tag)) return !(wardrobe.bottom || wardrobe.innerBottom || ONEPIECE_GARMENT.test(wardrobe.top?.tag ?? ''));
+        return true;
+      });
 
     const mergedPositive = dedupeTags([...fixedTags, ...outfitTags, ...directorTags])
       .filter(tag => !(upperOnly && LEG_ONLY.test(tag)))
@@ -518,5 +566,5 @@ export function assembleImageCharacters(
     return result;
   });
 
-  return { ...image, characters };
+  return { ...image, tag, characters };
 }

@@ -43,6 +43,8 @@ export interface ImageCharacterPrompt {
 }
 
 export interface ImageInsertion {
+  /** 只用于构图编译。局部特写和全身姿态有冲突时由导演标明。 */
+  extent?: 'whole' | 'detail';
   /** 同一 P 段内有多个状态时才指定。 */
   step?: number;
   /** 模型选择的目标正文位置 ID。 */
@@ -339,7 +341,8 @@ export function parseImagePlan(
     const size = normalizeOrientation(entry.size ?? entry.orientation ?? entry.aspect);
     if (rules.femaleScenesOnly && !hasNaiFemaleSubject(tag, characters)) continue;
     const step = readWardrobeStep(entry.step);
-    images.push({ position, sourceLine, ...(step ? { step } : {}), tag, nl, negative, characters, size });
+    const extent = entry.extent === 'whole' || entry.extent === 'detail' ? entry.extent : undefined;
+    images.push({ position, sourceLine, ...(extent ? { extent } : {}), ...(step ? { step } : {}), tag, nl, negative, characters, size });
   }
 
   const limitedImages = images.slice(0, normalizedMax);

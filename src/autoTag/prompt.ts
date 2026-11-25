@@ -465,37 +465,39 @@ export interface UnifiedInput {
 
 /** 装备表规则（v3：装备描述永不删除，状态码 on/half/off 分离）。 */
 const WARDROBE_RULES = `② 装备表与跨楼规则
-- 装备表 = 装备指纹 + 状态码，常用槽 top/innerTop/bottom/innerBottom/legs。仅确有三层叠穿时 outer=外套、top=衬衫；确有单独脱鞋时 shoes=鞋、legs=袜。tag 记衣服视觉指纹，**永不改写**（脱掉再穿回靠它还原）。status：on 穿着 / half 半脱敞开撩起挂手臂 / off 已离开身体。
+- 装备表 = 装备指纹 + 状态码，常用槽 top/innerTop/bottom/innerBottom/legs。有外套就用 outer（风衣/西装外套），top=普通上衣（毛衣/衬衫），innerTop 只记贴身内衣；确有单独脱鞋时 shoes=鞋、legs=袜。tag 记衣服视觉指纹，**永不改写**（脱掉再穿回靠它还原）。status：on 穿着 / half 半脱敞开撩起挂手臂 / off 已离开身体。
 - 首出场、明确换装、隔天换装→{"mode":"replace"} 给整套槽位；只换一件用 mode:"swap" 只填该槽位的新指纹，其余照旧。同件穿脱→{"mode":"patch"} 只给变化槽位。**patch 里只写 {"status":"on"} 省略 tag 就是穿回原来那件**。
 - tag 只写「这件衣服长什么样」（颜色/面料/领口/袖长/长度版型），**不要写 buttoned、unbuttoned、zipped 这类本次穿法**——穿法归 status 与 halfTag。
 - 首次建表或换衣时，把每件已知衣物的主色直接写在本件名词前；优先卡和正文，未指定时按场景定一次。各层分别记色（如 ivory nightgown 与 black lace panties）。旧装备仅缺主色时可用 patch 在原 tag 首项前补色，保持原状态及半脱细节。不要借用另一件的颜色。
 - 撕裂、断肩带等持续损坏写在该件的可选 condition（如 "broken shoulder strap"）；修好才给 condition:""，换件用 swap。滑肩或提起下摆仍只写 halfTag。
+- 普通上衣可以在风衣敞开时可见，里面的内衣仍由上衣遮住。平常穿风衣按正文记录闭合或露出的衣领；不要从胸型、动作或画面裁切推断衣襟敞开、薄透或没穿内衣。只写实际可见层，未知内搭留空。
 - half 必须配 halfTag 写形态（"unbuttoned, open front" / "shirt lifted above chest" / "skirt lift" / "panties pulled aside"）。
 - 连身衣分上下：只解领口/敞开上身用 "half_top"（下身仍被长摆盖着），只掀裙摆/撩起下摆用 "half_bottom"（上身仍穿着）；拿不准就用 half 并在 halfTag 写清是领口还是裙摆。
 - 内搭只在正文明确写了「没穿内衣/里面什么都没有」时才填 innerTop:{"status":"off"}；正文没交代内搭就整个省略，不要猜，也别在 wearState 里补。
 - 连身服饰（道袍/汉服长衫/连身裙/旗袍/和服）没另穿下装时 bottom 留空，不凭空补短裙裤子丝袜；正文写了黑丝短裙照写，正文优先于世界观。
 - 古风内衣换等效词，禁 dudou/xieku/silk traditional underwear：肚兜→"red halterneck camisole, backless, tied at neck, chinese clothes"；中衣→"white inner robe, loose white kimono, open robe"；亵裤→"white silk shorts, loose shorts"；罗袜绣鞋→"white socks, traditional shoes"。
-- timeJump：same_day（换房间/室内到室外/短时过渡）时正文没换衣服就别发 replace，原样沿用或 patch 穿脱；正文明确换装或 new_day（隔天/睡醒次日/跨日/换装赴约）发 replace。**replace 一旦发出就按它执行**，不要求任何附加开关。
-- 换装位置：跨日或楼首换装省略 position，对本楼全部图片生效；**同楼中途换装（"进房间换上女仆装再出来"）必须写 position:"P10"**，只有这个位置之后的图片才穿新装，之前的图片仍是旧衣服。
+- timeJump：same_day（换房间/室内到室外/短时过渡）时正文没换衣服就别发 replace，原样沿用或 patch 穿脱；正文明确换装或 new_day（隔天/睡醒次日/跨日/换装赴约）发 replace。同日已有装备的角色真实换装时用发生位置 P（楼首就是 P1）；从玄关到客厅、坐下、镜头只拍毛衣均不算脱风衣。
+- 换装位置：跨日从楼首换装可省略 position；同日已有装备的换装和换单件须给 position；**同楼中途换装（"进房间换上女仆装再出来"）必须写 position:"P10"**，只有这个位置之后的图片才穿新装，之前的图片仍是旧衣服。
 - 换装时正文提到的套装配饰（项圈 leather collar、吊袜带 garter straps、发带、手套）直接写进对应槽位 tag（颈部/上身配饰进 top.tag，腿部配饰进 legs.tag），不要另起字段。
 - 阅读整楼（含最后一图之后）。在 wardrobeUpdates 记录每次真实变化及发生的 position，不论该处是否出图；只写变化的槽位，无变化给 []。镜头自动继承，无须重复 wearState。同 P 先脱后穿且要区分时，变化和图片可加 step:1、2 表示先后。隔衣接触、镜头裁切、回忆、愿望不改变现实穿法。
 - 判断隔天要看人物经历：连夜赶路、换地点、回家未换衣、明确仍穿昨日衣均继承；隔天重逢的实际出场者换符合身份及世界观的新套。中途换日用真正生效的 P。若下内搭仅滑至髋部，保留 half 与具体落点；裙摆放下只恢复裙摆。`;
 
-export const FRAME_CONTACT_RULE = '共享动作写清谁的手或道具接触谁的哪个部位，使两者同框。所有角色的 tag、标记和自然语言指向同一个落点；肩、胸、手腕、脚踝须按原文区分。可见饰物写在佩戴者身上（anklet 是脚链，ankle 是脚踝）。只脱一只鞋写哪只脚仍穿鞋；单格用动作完成时可见的状态。';
+export const FRAME_CONTACT_RULE = '共享动作写清谁的手或道具接触谁的哪个部位，使两者同框。所有角色的 tag、标记和自然语言指向同一个落点；肩、胸、手腕、脚踝须按原文区分。可见饰物写在佩戴者身上（anklet 是脚链，ankle 是脚踝）。只脱一只鞋写哪只脚仍穿鞋；连续动作只取选中 P 的一个已成立瞬间：从准备、接触、收势选一项。各人 tag 和英文共用这同一时刻。同时动作选一个视觉中心，配角只写此刻看得见的动作或反应；物品不能同时还在手上又已落地。';
 
 /** 镜头规则（选帧 / 机位 / 表情 / 标记 / 防偏见）。 */
 const SHOT_RULES = `③ 选帧与构图防线
 - 分级：**S 级**（平级互不让位）＝高张力挑逗/支配（勾项圈、抬下巴、贴耳压迫、解衣拉扯、壁咚、按墙、抓腕、膝枕挑逗、隔衣抚摸）与显式 NSFW/阶段跃迁（脱衣暴露、前戏、口交、乳交、手交、足交、舔阴、插入、后入、骑乘、中出、高潮余韵）；**A 级**＝强接触与情绪爆点（拥抱、牵手、泪目、羞愤、重要换装亮相、湿身、正式初登场）；**B 级**＝强氛围定格；**C 级跳过**（站桩对话、赶路转场、纯独白、动作未发生或已结束、同姿势重复帧）。
 - 必须从楼尾倒扫回开头通读全楼；S 级未覆盖完不许用 A/B 占名额；楼超 15～20 段且上限 ≥3 张时名额跨段分布。
 - 峰值帧：同一事件跨多个 P 编号选动作完全成立、张力最饱满那句，铺垫与收尾不算。一姿势一图：不重复高光各占 1 张，有余量才补同姿势第 2 张且换机位与景别。
-- 机位：pov（女主默认 looking at viewer）用于面对面直视、男主伸手触碰、身前侍奉、后背位俯视（pov, from behind, from above）；第三人称（from side / three-quarter view / from above）用于独处、多女角同框、侧面曲线、背后环抱。连续两张或跨楼同体位必须换机位与景别；**男主整个人或上半身入镜一律第三人称禁 pov**。高低差互动（一人站+一人坐/跪/躺）禁 from below / low angle，改 from side, eye-level。
+- 机位：pov（女主默认 looking at viewer）用于面对面直视、男主伸手触碰、身前侍奉、后背位俯视（pov, from behind, from above）；第三人称（from side / three-quarter view / from above）用于独处、多女角同框、侧面曲线、背后环抱。连续镜头只在完整表现当前动作时变化机位与景别；侧面会遮住左右肢体时优先正面或斜前方；**男主整个人或上半身入镜一律第三人称禁 pov**。高低差互动（一人站+一人坐/跪/躺）禁 from below / low angle，改 from side, eye-level。
+- 全身几何关系才是看点时给 images[].extent:"whole" 并选 full body 或 wide shot；明确只取某个触点给 extent:"detail"，其余省略。普通坐姿、走路或躺着对话依主动作构图。普通插图让每个人在同一视野只出现一次。
 - 景别装得下接触点：下身接触禁 upper body / close-up，只拍下半身用 lower body / thigh focus / foot focus 并配 omitFeatures 摘看不见的部位。Base.tag 顺序：女性人数词→机位/POV→单一景别→场景道具（一个场所，家具不算第二个）→环境光；共享核心互动由最清楚的一个字段描写。
 - 标记 source#/target#/mutual#<1～3 词英文动作>：谁施动写 source、谁承受写 target、对等才 mutual，绝不写反；有合适标记时成对绑定、两侧逐字相同，禁长句人名中文。Base 含 1boy 且他参与互动时，必须给男角色块（1boy, faceless male + 必要局部动作，不写外貌）并交代主动或承受方向。
 - 表情只从这些词挑：smile, grin, laughing, blush, embarrassed, frown, pout, surprised, crying, tears, angry, serious, sad, worried, scared, smug, seductive smile, expressionless, half-closed eyes, open mouth, clenched teeth, ahegao；视线只选 looking at viewer / at another / away / down / up / back / closed eyes；禁自造短语，女角表情与视线不许为空。
 - characters[].tag **禁写**：性别人数词、发色发型刘海词、瞳色眼型肤色词、体型词、任何服装词（写了也会被剥）；只写表情、视线、姿势动作、可见解剖部位、标记。omitFeatures 只放本帧看不见的**配饰**（眼镜、耳环、项链、发饰、帽子、手套），禁放 hair/eyes/skin/body。
 - 先在心中判清本 P 的施动者、承受者、使用部位、落点、动作是否已经发生。直接用自然英文描写镜头此刻，不输出分析或动作表。多人的共享关系一般在 Base.nl 写一次；个人姿势更清楚时写在对应角色 nl。其余角色只补自己的支撑点、朝向或可见反应。全员共用提示词预算：优先保留每位入镜者的身份和核心触点，省略镜头外衣物、重复近义词与剧情概述。没有新增画面信息时 nl 留空；同色身份锚点和用于消歧的称呼要保留。以中指指腹触碰写指腹贴在哪，不写独立挑衅手势。NL 关闭时在各人 tag 中保留必要的动作短语与归属。除非正文这格明确写了穿脱，否则不写衣服款式颜色。
 - ${FRAME_CONTACT_RULE}
-- 五条防偏见（命中就改）：①递交/收示枪刀写 "offering handgun on open palm" / "holding gun by barrel"，禁 pointing/aiming（威胁或战斗才可指向并写清谁指谁）；②强情绪物理化——按正文写泪水、发抖或攥紧衣物；禁用脸色修辞覆盖档案肤色，非刻意对视禁 looking at viewer、禁面无表情呆站；③双人互动双方闭合——男方必须写手部与身体落点（"hand on her hip" / "holding her wrists above her head"）并与女方闭合，双方无需从各自视角重述同一动作；④标记主宾不可写反；⑤光线时间对齐正文（白天 daylight，清晨 morning light，禁默认夜间霓虹）。`;
+- 五条防偏见（命中就改）：①递交/收示枪刀写 "offering handgun on open palm" / "holding gun by barrel"，禁 pointing/aiming（威胁或战斗才可指向并写清谁指谁）；②强情绪物理化——按正文写泪水、发抖或攥紧衣物；禁用脸色修辞覆盖档案肤色，非刻意对视禁 looking at viewer、禁面无表情呆站；③双人互动双方闭合——有肢体接触才按正文写施动者的手部与身体落点（"hand on her hip" / "holding her wrists above her head"）并与女方闭合，双方无需从各自视角重述同一动作；④标记主宾不可写反；⑤光线时间对齐正文（白天 daylight，清晨 morning light，禁默认夜间霓虹）。`;
 
 /** 输出纪律：单通道一次成型的最后一道闸。 */
 const OUTPUT_RULES = `④ 严格纯 JSON 输出

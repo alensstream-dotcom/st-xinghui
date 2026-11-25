@@ -355,7 +355,7 @@ async function runUnifiedPass(params: {
       image: assembleImageCharacters(shot, entries, wardrobe, world),
       frame: params.captureFrames ? captureFrame(shot, entries, wardrobe) : undefined,
     };
-  });
+  }, plan.timeJump);
   const assembledImages = sequence.frames.map(item => item.image);
   const frames = sequence.frames.flatMap(item => item.frame ?? []);
   const wardrobeUpdates = sequence.updates;

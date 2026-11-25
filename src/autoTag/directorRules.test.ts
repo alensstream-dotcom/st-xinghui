@@ -87,9 +87,10 @@ describe('单通道系统提示词', () => {
     expect(prompt).toContain('禁默认夜间霓虹');
   });
 
-  it('景别与机位规则保留（pov 与第三人称互斥、轮换）', () => {
+  it('机位轮换服从当前动作，连续动作取一个定格', () => {
     expect(prompt).toContain('pov（女主默认 looking at viewer）');
-    expect(prompt).toContain('连续两张或跨楼同体位必须换机位与景别');
+    expect(prompt).toContain('只在完整表现当前动作时变化机位与景别');
+    expect(prompt).toContain('一个已成立瞬间');
     expect(prompt).toContain('男主整个人或上半身入镜一律第三人称禁 pov');
   });
 

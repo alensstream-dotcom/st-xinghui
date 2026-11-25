@@ -126,3 +126,20 @@ describe('同件睡裙跨镜头的主色和断肩带', () => {
     expect(deriveWardrobes(chat).get('甲')?.top).toMatchObject({ tag: 'ivory nightgown, spaghetti straps', condition: 'broken strap', status: 'on' });
   });
 });
+
+it('同日无定位的外观复述保留已知槽；同日 P1 真换装、跨日新装均正常替换', () => {
+  for (const [day, position, keep] of [
+    ['same_day', undefined, true], ['same_day', 'P1', false], ['new_day', undefined, false],
+  ] as const) {
+    const plan = parseUnifiedPlan(JSON.stringify({ images: [{ ...image('P2'), extent: 'whole' }], timeJump: day,
+      wardrobeUpdates: [{ name: '甲', mode: 'replace', position, slots: { top: { tag: 'black sweater', status: 'on' } } }],
+    }), segments, 0, 1);
+    const result = compileWardrobeSequence(before, plan.wardrobeUpdates, plan.images, (shot, state) => {
+      expect(shot.extent).toBe('whole');
+      return state.get('甲')!;
+    }, plan.timeJump);
+    expect(result.frames[0].top?.tag).toBe(keep ? 'blue dress' : 'black sweater');
+    expect(Boolean(result.frames[0].innerBottom)).toBe(keep);
+    expect(result.updates).toHaveLength(keep ? 0 : 1);
+  }
+});

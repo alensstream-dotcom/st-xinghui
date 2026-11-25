@@ -5,6 +5,7 @@ import {
   WARDROBE_SLOT_KEYS,
   type CharacterWardrobe,
   type GarmentSlot,
+  type TimeJump,
   type WardrobeSlotKey,
   type WardrobeUpdate,
 } from '@/state/outfitState';
@@ -99,6 +100,7 @@ export function compileWardrobeSequence<T>(
   updates: WardrobeUpdate[],
   shots: ImageInsertion[],
   compile: (shot: ImageInsertion, wardrobe: Map<string, CharacterWardrobe>) => T,
+  timeJump?: TimeJump,
 ): { frames: T[]; updates: WardrobeUpdate[] } {
   const state = new Map(before);
   const persisted: WardrobeUpdate[] = [];
@@ -109,8 +111,15 @@ export function compileWardrobeSequence<T>(
 
   function apply(update: WardrobeUpdate): void {
     const slots = { ...update.slots };
-    if (update.mode === 'patch') {
-      const previous = state.get(update.name);
+    const previous = state.get(update.name);
+    let mode = update.mode;
+    // 同日未定位的整套描述只可补空槽。新导演用 P1 表示开场真的换衣；
+    // 已落盘的旧记录仍按原 mode 回放，修复后的事件和图片使用同一份结果。
+    if (timeJump === 'same_day' && previous && !update.position && mode !== 'patch') {
+      mode = 'patch';
+      for (const key of WARDROBE_SLOT_KEYS) if (previous[key]) delete slots[key];
+    }
+    if (mode === 'patch') {
       for (const key of WARDROBE_SLOT_KEYS) {
         const patch = slots[key];
         if (!patch) continue;
@@ -122,7 +131,7 @@ export function compileWardrobeSequence<T>(
       }
     }
     if (!Object.keys(slots).length) return;
-    const resolved: WardrobeUpdate = { ...update, slots };
+    const resolved: WardrobeUpdate = { ...update, mode, slots };
     applyWardrobeUpdate(state, resolved);
     persisted.push(resolved);
   }
