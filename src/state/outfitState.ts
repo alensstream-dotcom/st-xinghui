@@ -129,9 +129,9 @@ function normaliseSlot(raw: unknown, requireTag: boolean): GarmentSlot | null {
     : '';
   if (!status) return null;
   // replace 缺 tag 视为无效（没有衣服描述可存）；patch 缺 tag 合法，表示沿用旧指纹。
-  if (requireTag && !tag) return null;
   const offSide = record.offSide === 'left' || record.offSide === 'right' ? record.offSide : undefined;
   if (offSide) status = 'half';
+  if (requireTag && !tag && status !== 'off') return null;
   const halfTag = typeof record.halfTag === 'string' ? record.halfTag.trim().replace(/[\r\n]+/g, ' ') : '';
   const half = status === 'half' || status === 'half_top' || status === 'half_bottom';
   const reveal = half && (record.reveal === 'none' || record.reveal === 'layer') ? record.reveal : undefined;
@@ -248,7 +248,7 @@ export function applyWardrobeUpdate(
             ? { halfTag: patch.halfTag || previous?.halfTag }
             : {}),
         };
-        if (!next[key]?.tag && !(patch.status === 'off' && (key === 'innerTop' || key === 'innerBottom'))) delete next[key];
+        if (!next[key]?.tag && patch.status !== 'off') delete next[key];
       } else if (previous) {
         next[key] = { ...previous };
       }

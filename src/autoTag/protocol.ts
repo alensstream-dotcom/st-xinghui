@@ -56,6 +56,7 @@ export interface ImageInsertion {
   beat?: SceneBeat;
   visualPose?: string;
   sourceCue?: string;
+  clearLayers?: Array<{ name: string; region: 'top' | 'bottom' }>;
   singleFrame?: boolean;
   /** 模型选择的目标正文位置 ID。 */
   position: string;
@@ -396,20 +397,21 @@ export function parseImagePlan(
     const step = readWardrobeStep(entry.step);
     bindFrameContact(characters, entry.contact);
     const clause = storyClause(segments, position, entry.clause);
-    const text = source.get(position) ?? '';
-    const current = clause ? [storyClauses(text)[clause - 1] ?? ''] : storyClauses(text);
-    for (const character of characters) {
-      if (!character.frameAge) continue;
-      const ownAgeCue = current.some(part => frameAgeMatchesSource(character.frameAge!, part) && (part.includes(character.name)
-        || !characters.some(other => other.name !== character.name && part.includes(other.name))));
-      if (!ownAgeCue) delete character.frameAge;
-    }
     const beat = rules.selectBeats ? readSceneBeat(entry.beat) : undefined;
     const extent = entry.extent === 'whole' || entry.extent === 'detail' ? entry.extent : undefined;
     const image: ImageInsertion = { position, sourceLine, ...(step ? { step } : {}), ...(clause ? { clause } : {}),
       ...(extent ? { extent } : {}), ...(beat ? { beat } : {}), ...(entry.layout === 'sequence' ? { singleFrame: false } : {}),
       tag, nl, negative, characters, size };
-    images.push(rules.selectBeats ? groundStoryImage(image, entry, segments) : image);
+    const grounded = rules.selectBeats ? groundStoryImage(image, entry, segments) : image;
+    const parts = storyClauses(source.get(grounded.position) ?? '');
+    const current = grounded.clause ? [parts[grounded.clause - 1] ?? ''] : parts;
+    for (const character of grounded.characters) {
+      if (!character.frameAge) continue;
+      const ownAgeCue = current.some(part => frameAgeMatchesSource(character.frameAge!, part) && (part.includes(character.name)
+        || !grounded.characters.some(other => other.name !== character.name && part.includes(other.name))));
+      if (!ownAgeCue) delete character.frameAge;
+    }
+    images.push(grounded);
   }
 
   const limitedImages = selectStoryImages(images, normalizedMax, normalizedMin, rules.selectBeats);

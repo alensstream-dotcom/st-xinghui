@@ -358,7 +358,10 @@ async function runUnifiedPass(params: {
   }
   for (const change of plan.changes) change.name = canonicalName(change.name);
   for (const update of plan.wardrobeUpdates) update.name = canonicalName(update.name);
-  for (const shot of plan.images) for (const character of shot.characters) character.name = canonicalName(character.name);
+  for (const shot of plan.images) {
+    for (const character of shot.characters) character.name = canonicalName(character.name);
+    for (const layer of shot.clearLayers ?? []) layer.name = canonicalName(layer.name);
+  }
   if (params.captureFrames) {
     retainUnchangedTraits(plan.changes, params.entries, new Map(params.segments.map(segment => [segment.id, segment.text])));
     allocateNewProfileFaces(plan.changes, params.entries, world.presetId,

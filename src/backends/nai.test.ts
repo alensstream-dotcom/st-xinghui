@@ -973,4 +973,40 @@ describe('服装缺档和跨楼恢复的 NovelAI 4.5 请求', () => {
     ]);
     expect(result.frames[2].role).not.toContain('black straight skirt');
   });
+
+  it('同楼有明确的脱下动作，后续两帧的最终请求都不会重新出现原衣物或裙摆词', () => {
+    const before = new Map<string, CharacterWardrobe>([[worker, {
+      name: worker, top: { tag: 'white short-sleeved blouse', style: 'collared', status: 'on' },
+      bottom: { tag: 'blue denim shorts', status: 'on' },
+      shoes: { tag: 'white sneakers', status: 'on' },
+    }]]);
+    const frame = (position: string, angle: string) => ({
+      position, tag: '1girl, ' + angle + ', full body, balcony, night',
+      characters: [{ name: worker, tag: 'girl, kneeling, white short-sleeved blouse, blue denim shorts, skirt lifted' }],
+    });
+    const result = run('赵曼心站在阳台上。\n她脱下了衬衫和牛仔短裤。\n赵曼心俯下身拿起地上的袋子。\n赵曼心转过身捡起旁边的钥匙。', [
+      frame('P1', 'from side'), frame('P3', 'from behind'), frame('P4', 'three-quarter view'),
+    ], before);
+    expect(result.frames[0].role).toMatch(/white short-sleeved blouse.*blue denim shorts.*white sneakers/);
+    for (const frame of result.frames.slice(1)) {
+      expect(frame.role).not.toMatch(/white short-sleeved blouse|blue denim shorts|skirt lifted/);
+      expect(frame.role).toContain('white sneakers');
+    }
+  });
+
+  it('旧夹具镜头会先对齐正文，再用当帧真实接触消解挡住下部触点的衣物', () => {
+    const before = new Map<string, CharacterWardrobe>([[worker, {
+      name: worker, top: { tag: 'white collared blouse', status: 'on' },
+      bottom: { tag: 'blue denim shorts', status: 'on' },
+    }]]);
+    const result = run('赵曼心等待，夹子还没有夹住。\n塑料夹子夹住了贴在腰侧皮肤上的检测贴片。\n赵曼心收起夹具。', [
+      { position: 'P1', tag: '1girl, medium shot, balcony, clamps', nl: 'A small clamp clips her lower body.',
+        characters: [{ name: worker, tag: 'girl, kneeling, blue denim shorts, skirt lifted' }] },
+      { position: 'P3', tag: '1girl, medium shot, balcony', characters: [{ name: worker, tag: 'girl, standing' }] },
+    ], before);
+    expect(result.frames[0].role).not.toMatch(/blue denim shorts|skirt lifted/);
+    expect(result.frames[1].role).toContain('blue denim shorts');
+    expect(result.updates).toHaveLength(0);
+  });
+
 });

@@ -1,5 +1,7 @@
 import type { TargetSegment } from './clean';
 import type { ImageCharacterPrompt, ImageInsertion } from './protocol';
+import { affirmedCue, groundFrameAnchor } from './frameAnchor';
+import { readContactLayers } from './wardrobeProjection';
 import { storyClauses } from './storyMoment';
 
 const tags = (text: string) => text.split(',').map(tag => tag.trim()).filter(Boolean);
@@ -18,7 +20,7 @@ const PASSIVE_ACTION = /^(?:(?:he|the (?:man|boy))\s+)?(?:is |keeps |looks? |sta
 function readFocus(value: unknown, image: ImageInsertion, at: string) {
   if (!Array.isArray(value) || value.length !== 4 || value.some(part => typeof part !== 'string')) return;
   const [name, evidence, visible, coverage] = value.map(part => part.trim());
-  if (!image.characters.some(c => c.name === name) || evidence.length < 2 || !at.includes(evidence)
+  if (!image.characters.some(c => c.name === name) || evidence.length < 2 || !affirmedCue(at, evidence)
     || !/^[a-zA-Z][^<>#\r\n\u3400-\u9fff]{4,125}$/.test(visible)
     || !['feet', 'hands', 'faces', 'whole'].includes(coverage)) return;
   return { name, evidence, visible, coverage };
@@ -85,6 +87,7 @@ function applyViewpoint(image: ImageInsertion, raw: unknown, at: string): void {
 /** 旧导演也能用正文校验。新导演可提供准确的触发短句和镜头必须容纳的部位。 */
 export function groundStoryImage(image: ImageInsertion, raw: Record<string, unknown>, segments: TargetSegment[]): ImageInsertion {
   if (image.singleFrame === false) return image;
+  groundFrameAnchor(image, raw, segments);
   const index = segments.findIndex(segment => segment.id === image.position);
   const clauses = storyClauses(segments[index]?.text ?? '');
   const matched = clauses.flatMap((part, i) => !NON_ACTION.test(part) && readFocus(raw.focus, image, part) ? [i + 1] : []);
@@ -96,6 +99,7 @@ export function groundStoryImage(image: ImageInsertion, raw: Record<string, unkn
   const prefix = [...prior.slice(Math.max(sceneStart, index - 6)).flatMap(storyClauses).filter(part => !NON_ACTION.test(part)), at].join(' ');
   const future = [clauses.slice(until).join(' '), ...segments.slice(index + 1, index + 7).map(segment => segment.text)].join(' ');
   enforceVisibleState(image, prefix, future);
+  image.clearLayers = readContactLayers(raw.clearLayers, image, clauses.slice(0, until));
   applyViewpoint(image, raw.view, at);
 
   const point = image.clause ? clauses[image.clause - 1] : at;

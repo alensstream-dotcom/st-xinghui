@@ -210,6 +210,12 @@ function wardrobeOwnsTag(tag: string, wardrobe: CharacterWardrobe | undefined): 
   if (/^(?:bottomless|no panties|panties only)$/i.test(tag)) {
     return Boolean(wardrobe.bottom || wardrobe.innerBottom || ONEPIECE_GARMENT.test(wardrobe.top?.tag ?? ''));
   }
+  const wearModifier = /^(?:lifted|raised|open|unbuttoned|unzipped|removed|off|pulled (?:up|down)|hiked up)$/i;
+  const standaloneWear = tag.match(/^(skirt|shorts|pants|trousers|dress|blouse|shirt|jacket|coat|strap|sleeves?) (.+)$/i);
+  if (standaloneWear && wearModifier.test(standaloneWear[2])) {
+    const lower = /^(?:skirt|shorts|pants|trousers)$/i.test(standaloneWear[1]);
+    return lower ? Boolean(wardrobe.bottom || ONEPIECE_GARMENT.test(wardrobe.top?.tag ?? '')) : Boolean(wardrobe.top || wardrobe.outer);
+  }
   if (/^(?:nude|naked|fully nude|completely naked|clothing removed)$/i.test(tag)) {
     return Boolean(wardrobe.outer || wardrobe.top || wardrobe.bottom || wardrobe.innerTop || wardrobe.innerBottom);
   }
@@ -340,7 +346,7 @@ function resolveSlot(
   const status: SlotWearStatus = override?.status ?? base?.status ?? 'on';
   const tag = base?.tag ? [base.tag, base.style, base.condition].filter(Boolean).join(', ') : '';
   const halfTag = (override?.halfTag || base?.halfTag || '').trim();
-  if (!tag && !(status === 'off' && (key === 'innerTop' || key === 'innerBottom'))) return null;
+  if (!tag && status !== 'off') return null;
   return { tag, status, halfTag, reveal: override ? undefined : base?.reveal, offSide: override ? undefined : base?.offSide };
 }
 

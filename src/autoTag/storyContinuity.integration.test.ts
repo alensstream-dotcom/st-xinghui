@@ -343,3 +343,110 @@ describe('用户反馈的五组样本', () => {
     })[0]).toMatchObject(update.slots.top);
   });
 });
+
+describe('已发生的动作锚与持续穿着', () => {
+  const name = '赵曼心';
+  function planFor(story: string, images: object[], wardrobeUpdates: object[] = []) {
+    const segments = prepareTargetText(story, []).segments;
+    const plan = parseUnifiedPlan(JSON.stringify({ images, wardrobeUpdates }), segments, 0, 8,
+      { selectBeats: true, femaleScenesOnly: true });
+    return { segments, plan };
+  }
+  const picture = (position: string, extra = {}) => ({
+    position, tag: '1girl, medium shot, balcony, nighttime',
+    characters: [{ name, tag: 'girl, standing' }], ...extra,
+  });
+
+  it('旧提示词错标在等待段时，移动到下一段道具真正固定后的落点', () => {
+    const story = '赵曼心觉得夹子还没夹住，低头等待。\n突然金属夹子夹在皮带上，第三个塑料夹子夹住了下方的布条。\n她抬起头。';
+    const { plan } = planFor(story, [picture('P1', {
+      tag: '1girl, medium shot, balcony, clamps, chain', nl: 'The clips fasten the strap.',
+    })]);
+    const [image] = plan.images;
+    expect(image).toMatchObject({ position: 'P2', sourceLine: 1, clause: 2, sourceCue: '夹子夹住' });
+    const inserted = injectImageTags(story, plan.images);
+    expect(inserted.indexOf('<bbi_image>')).toBeGreaterThan(inserted.indexOf('下方的布条'));
+    expect(inserted.indexOf('<bbi_image>')).toBeLessThan(inserted.indexOf('她抬起头'));
+  });
+
+  it('只用肯定发生的原文修正 P，台词预告与隔日的同动作不能迁移插图', () => {
+    const story = '赵曼心说：“等我夹住布条就好。”\n赵曼心还没夹住布条。\n赵曼心用手夹住布条。\n翌日，赵曼心把盒子放到了桌上。';
+    const { plan } = planFor(story, [
+      picture('P1', { anchor: '夹住布条' }),
+      picture('P2', { anchor: '把盒子放到了桌上' }),
+    ]);
+    expect(plan.images.map(image => [image.position, image.sourceCue])).toEqual([
+      ['P3', '夹住布条'], ['P2', undefined],
+    ]);
+  });
+
+  it('连续段中代词与整套穿脱生效，冲突的裙摆词不会让外衣和短裤回来', () => {
+    const story = '赵曼心站在阳台上。\n她把衣服全脱光了。\n她跪下来，扶着栏杆。\n赵曼心把短裤放下。\n赵曼心穿回衬衫。';
+    const { segments, plan } = planFor(story, [
+      picture('P1'), picture('P3', { characters: [{ name, tag: 'girl, kneeling, blue denim shorts, white short-sleeved blouse, skirt lifted' }] }),
+      picture('P4'), picture('P5'),
+    ], [
+      { name, position: 'P2', mode: 'patch', slots: { top: { status: 'off' } } },
+      { name, position: 'P4', mode: 'patch', slots: { bottom: { status: 'on' } } },
+    ]);
+    const before = new Map<string, CharacterWardrobe>([[name, { name,
+      top: { tag: 'white short-sleeved blouse', style: 'collared', status: 'on' },
+      bottom: { tag: 'blue denim shorts', status: 'on' }, shoes: { tag: 'white sneakers', status: 'on' },
+    }]]);
+    const result = compileWardrobeSequence(before, plan.wardrobeUpdates, plan.images, (shot, wardrobe) => ({
+      caption: assembleImageCharacters(shot, [], wardrobe).characters[0].tag,
+      state: captureFrame(shot, [], wardrobe).wardrobes[0],
+    }), { segments, timeJump: 'same_day', world: 'modern' });
+    expect(result.frames[0].caption).toMatch(/white short-sleeved blouse.*blue denim shorts/);
+    for (const frame of result.frames.slice(1, 3)) {
+      expect(frame.state).toMatchObject({ top: { status: 'off' }, bottom: { status: 'off' }, shoes: { status: 'on' } });
+      expect(frame.caption).not.toMatch(/white short-sleeved blouse|blue denim shorts|skirt lifted/);
+    }
+    expect(result.frames[3].caption).toContain('white short-sleeved blouse');
+    expect(result.frames[3].state.bottom).toMatchObject({ status: 'off' });
+  });
+
+  it('另一名角色帮忙脱下衣服时，把事件记在衣服主人名下', () => {
+    const { segments, plan } = planFor('林牧帮忙脱下她的短裤。\n小赵姐坐下。', [picture('P2', {
+      tag: '1girl, 1boy, medium shot, balcony',
+      characters: [{ name, tag: 'girl, sitting' }, { name: '林牧', tag: '1boy, standing' }],
+    })]);
+    const before = new Map<string, CharacterWardrobe>([[name, { name,
+      top: { tag: 'white collared blouse', status: 'on' }, bottom: { tag: 'blue denim shorts', status: 'on' },
+    }]]);
+    const result = compileWardrobeSequence(before, plan.wardrobeUpdates, plan.images, (_shot, wardrobe) => wardrobe.get(name),
+      { segments, timeJump: 'same_day', world: 'modern' });
+    expect(result.updates.map(update => update.name)).toEqual([name]);
+    expect(result.frames[0]).toMatchObject({ bottom: { status: 'off' }, top: { status: 'on' } });
+  });
+
+  it('无款式档案也记录已发生的外衣脱下，后来出图不自动穿回或抹掉鞋子', () => {
+    const { segments, plan } = planFor('赵曼心脱下短裤和衬衫。\n赵曼心把取下的短裤叠好。', [picture('P2')]);
+    const result = compileWardrobeSequence(new Map(), plan.wardrobeUpdates, plan.images, (shot, wardrobe) => ({
+      image: assembleImageCharacters(shot, [], wardrobe), state: wardrobe.get(name),
+    }), { segments, timeJump: 'same_day', world: 'modern' });
+    expect(result.frames[0].state).toMatchObject({ top: { tag: '', status: 'off' }, bottom: { tag: '', status: 'off' } });
+    expect(result.frames[0].state?.shoes).toBeUndefined();
+    const extra = { bbiOutfitOps: makeWardrobeFloorDelta(result.updates, 0) };
+    expect(deriveWardrobes([{ name, mes: '', is_user: false, is_system: false, extra }]).get(name)?.bottom?.status).toBe('off');
+  });
+
+  it('直接接触所需的画面衣层仅作用于这帧，经过衣物的接触和下个镜头仍沿用实际服装', () => {
+    const story = '赵曼心把凉敷袋直接贴在腰侧。\n赵曼心隔着短裤按在腰侧。\n赵曼心起身。';
+    const { segments, plan } = planFor(story, [
+      picture('P1', { anchor: '直接贴在腰侧', clearLayers: [[name, 'bottom', '直接贴在腰侧']] }),
+      picture('P2', { anchor: '隔着短裤按在腰侧', clearLayers: [[name, 'bottom', '隔着短裤按在腰侧']] }),
+      picture('P3'),
+    ]);
+    const before = new Map<string, CharacterWardrobe>([[name, { name,
+      top: { tag: 'white short-sleeved blouse', status: 'on' }, bottom: { tag: 'blue denim shorts', status: 'on' },
+    }]]);
+    const result = compileWardrobeSequence(before, plan.wardrobeUpdates, plan.images,
+      (shot, wardrobe) => assembleImageCharacters(shot, [], wardrobe).characters[0].tag,
+      { segments, timeJump: 'same_day', world: 'modern' });
+    expect(result.frames[0]).toContain('white short-sleeved blouse');
+    expect(result.frames[0]).not.toContain('blue denim shorts');
+    expect(result.frames.slice(1)).toEqual([expect.stringContaining('blue denim shorts'), expect.stringContaining('blue denim shorts')]);
+    expect(result.updates).toHaveLength(0);
+  });
+});

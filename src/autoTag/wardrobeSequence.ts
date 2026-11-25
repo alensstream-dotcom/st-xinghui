@@ -1,5 +1,6 @@
 import type { TargetSegment } from './clean';
 import { isNaiMaleAppearance } from './naiStory';
+import { projectContactWardrobe } from './wardrobeProjection';
 import { verifyNewWear, wardrobeBaseline } from './wardrobeBaseline';
 import { compareStoryMoments } from './storyMoment';
 import { recoverExplicitWear, wardrobeEvidence } from './wardrobeEvidence';
@@ -113,7 +114,11 @@ export function compileWardrobeSequence<T>(
   const cast = [...new Set([...before.keys(), ...(narrative?.knownNames ?? []), ...updates.map(update => update.name),
     ...shots.flatMap(shot => shot.characters.map(c => c.name))])];
   const baseline = narrative ? wardrobeBaseline(narrative.segments, cast, narrative.world, narrative.previousStory, narrative.timeJump, shots) : undefined;
-  const recovered = narrative ? recoverExplicitWear(narrative.segments, cast, updates) : [];
+  const women = new Set(shots.flatMap(shot => shot.characters.filter(c => !narrative?.maleNames?.has(c.name)
+    && !isNaiMaleAppearance('', c.tag) && !/\bfaceless male\b/i.test(c.tag)).map(c => c.name)));
+  const soleWoman = women.size === 1 ? [...women][0] : undefined;
+  const depicted = new Set([...before.keys(), ...shots.flatMap(shot => shot.characters.map(c => c.name))]);
+  const recovered = narrative ? recoverExplicitWear(narrative.segments, cast, updates, depicted, soleWoman) : [];
   const backfilledSlots = new Set<WardrobeUpdate['slots']>();
   if (narrative) updates = updates.map(update => ({ ...update, slots: { ...update.slots } }));
   if (narrative?.timeJump === 'same_day') for (const update of updates) {
@@ -201,7 +206,7 @@ export function compileWardrobeSequence<T>(
     let mode = update.mode;
     let day: string | undefined;
     const backfilled = backfilledSlots.has(update.slots);
-    const evidence = narrative && !backfilled ? wardrobeEvidence(update, narrative.segments, cast, previous) : undefined;
+    const evidence = narrative && !backfilled ? wardrobeEvidence(update, narrative.segments, cast, previous, soleWoman) : undefined;
     if (narrative && evidence) {
       // 旧楼层会把外套写在 top、把单独鞋履写在 legs。对原件做 patch 时认回旧地址。
       if (mode === 'patch' && previous) {
@@ -301,13 +306,18 @@ export function compileWardrobeSequence<T>(
         const patch = slots[key];
         if (!patch) continue;
         if (previous?.[key]?.tag) slots[key] = { ...patch, tag: completeGarmentColor(previous[key].tag, patch.tag) };
-        else if (!patch.tag && !(patch.status === 'off' && (key === 'innerTop' || key === 'innerBottom'))) {
+        else if (!patch.tag && !(patch.status === 'off' && (evidence?.off(key) || key === 'innerTop' || key === 'innerBottom'))) {
           console.warn('[星绘] 穿脱未找到原衣物', update.name, key, update.position);
           delete slots[key];
         }
       }
     }
     if (!Object.keys(slots).length) return;
+    if (narrative && mode === 'patch' && previous && !Object.entries(slots).some(([key, slot]) => {
+      const old = previous[key as WardrobeSlotKey];
+      return !old || slot.tag !== old.tag || slot.status !== old.status || slot.condition !== undefined
+        || slot.halfTag !== undefined || slot.reveal !== undefined || slot.offSide !== undefined;
+    })) return;
     if (narrative && mode !== 'patch' && slots.top?.tag && !slots.top.style) {
       const style = dressStyle(slots.top.tag);
       if (style) slots.top = { ...slots.top, style };
@@ -326,7 +336,7 @@ export function compileWardrobeSequence<T>(
       resumeWardrobe(init, shot.tag);
       if (baseline && narrative && !narrative.maleNames?.has(character.name)
         && !isNaiMaleAppearance('', character.tag) && !/\bfaceless male\b/i.test(character.tag)) {
-        const evidence = wardrobeEvidence(init, narrative.segments, cast, state.get(character.name));
+        const evidence = wardrobeEvidence(init, narrative.segments, cast, state.get(character.name), soleWoman);
         const skip = new Set<'top' | 'bottom'>();
         for (const key of ['top', 'bottom'] as const) if (evidence.off(key)) skip.add(key);
         const known = state.get(character.name);
@@ -352,7 +362,7 @@ export function compileWardrobeSequence<T>(
       if (legacy) apply({ ...legacy, sourceLine: shot.sourceLine });
     }
     const characters = shot.characters.map(({ wearState, ...character }) => character);
-    frames[index] = compile({ ...shot, characters }, state);
+    frames[index] = compile({ ...shot, characters }, projectContactWardrobe(shot, state));
   }
   while (cursor < ordered.length) apply(ordered[cursor++]);
   return { frames, updates: persisted };
