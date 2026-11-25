@@ -5,7 +5,7 @@ import type { CharTagEntry, CharTagField } from '@/state/charTags';
 import { readBookMemory } from './bookMemory';
 import { cleanHistoryText } from './clean';
 import { defaultWorldAnchor, readWorldAnchor, worldAnchorBlock, type WorldAnchorConfig } from '@/state/worldAnchor';
-import { traitCandidateBlock } from '@/state/traitPool';
+import { allocateFaceDetails, traitCandidateBlock } from '@/state/traitPool';
 
 /** 重Roll 只覆盖这五个固定外貌字段;sex/outfit/fandom/raw/nl 不在其中。 */
 export const REROLL_FIELDS = ['hair', 'eyes', 'skin', 'body', 'extra'] as const;
@@ -42,7 +42,7 @@ const FIELD_LABELS: Record<RerolledField, string> = {
 };
 
 const REROLL_SYSTEM_PROMPT = `你是角色外貌设计师。你要为指定角色重新设计一套「固定外貌」,只输出一个 JSON 对象,不要 Markdown 代码块,不要解释:
-{"hair":"...","eyes":"...","skin":"...","body":"...","extra":"..."}
+{"hair":"...","eyes":"...","skin":"...","body":"...","extra":"...","faceOptions":["oval face","arched eyebrows"]}
 
 硬约束(违反任意一条即作废):
 1. 必须严格遵守正文与设定里已经写死的外貌、年龄段、身份、性格、世界观,不得违背任何一处原描写;正文写死的维度一个字都不许改。
@@ -51,7 +51,7 @@ const REROLL_SYSTEM_PROMPT = `你是角色外貌设计师。你要为指定角�
 4. hair 写标准 Danbooru 原子词,逗号分隔,一个词只管一件事:发色(black hair / brown hair / blonde hair / red hair / silver hair,必填)+ 长度(short hair / medium hair / long hair / very long hair)+ 直卷(straight hair / wavy hair / curly hair)+ 扎发(hair down / high ponytail / twin braids / side ponytail / low bun)+ 刘海(blunt bangs / parted bangs / side-swept bangs)。禁止 "medium chestnut brown hair" 这类长短语。
 5. eyes 必须瞳色 + 标准眼型,例如 "amber eyes, tsurime";skin 用 fair skin / pale skin / tan;body 写身高、体型与胸型。
 6. extra 必须是常驻标志特征 1～2 项(眼镜、首饰、发饰、痣、雀斑、虎牙、呆毛),不要写只属于某套衣服的配饰。
-7. 原型适配:运动体育系可 "tan, athletic, toned"+ 短发或高马尾;娇小可爱系可 "petite, slender, small breasts"+ tareme + bob/twintails/ahoge;成熟御姐/人妻系用 "mature female, tall, curvy"+ 大波浪/低马尾/盘发 + 成熟配饰,严禁给成熟角色套 petite / loli / twintails。
+7. 按正文、当前设定和用户偏好决定年龄感、性格与体态。温婉丰满的少妇可保留柔和眼型与丰满体形，再以发型轮廓、眉形和脸型与别人拉开。职业或已婚身份不能单独决定全部外貌。
 8. 现代写实世界观只用现实发色,不写额纹/异色瞳/尖耳;二次元、奇幻、游戏世界观才可用 white hair / silver hair / dark blue hair / multicolored hair / forehead mark / heterochromia / pointy ears。
 9. 用户偏好(hint)在不违背硬设定的前提下优先满足。
 10. 五个字段都不许为空;只输出 JSON。`;
@@ -193,5 +193,11 @@ export async function rerollCharacterAppearance(request: RerollRequest): Promise
   const channel = getTagGenChannel();
   const opts = { signal: request.signal, source: '重Roll形象' };
   const raw = channel ? await requestCompletion(channel, messages, opts) : await requestViaMainApi(messages, opts);
-  return parseRerolledAppearance(raw);
+  const parsed = extractJsonObject(raw);
+  const appearance = sanitizeAppearance(parsed);
+  if (!request.currentEntry?.fields.fandom) {
+    const world = request.world ?? readWorldAnchorOr(defaultWorldAnchor());
+    appearance.extra = allocateFaceDetails(appearance, parsed.faceOptions, request.otherEntries.filter(e => e.name !== name).map(e => e.fields), world.presetId);
+  }
+  return appearance;
 }

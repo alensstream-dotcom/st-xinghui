@@ -425,9 +425,10 @@ ${comicSizeRule}
 
 const ARCHIVE_RULES = `① 建档与世界观
 - 只给正式女角建档：有姓名，或本楼有重点/亲密剧情且会再出场的神秘女角。男性、纯背景龙套不建档；已在【角色固定外貌库】的人禁再输出 field:"new"，只有永久变化（剪发/染发/体型）才改对应 field。
+- 把角色本人的年龄与亲属称谓分开。角色卡或正文确认年龄时在 body 中保留 adult、teenager、child 或具体年龄，未知就省略。女儿、妹妹、晚辈、娇小都不能推出是小孩；母亲也不能推出年迈。已建档的人不因关系揭晓改年龄。
 - 匿名转真名：同楼揭晓→全楼直接用真名；跨楼揭晓→新档案 100% 照抄原匿名档案的 hair/eyes/skin/body/extra，禁重随机。全程匿名→用正文最稳定的指称。name 逐字照抄正文/档案，禁音译、加姓、去姓。
 - 同一人物优先采用档案原名；有歧义的称呼结合当前 P 上下文消歧。已知外貌不靠灯光、姿势或临时造型变更；确实染发或剪发时只改对应分面，保留未改变的颜色、长度等词。
-- 先定原型再补外貌：从正文取【年龄段+身份+性格+世界观】，定死不再改。运动系→tan, athletic, toned + short hair 或 high ponytail；娇小系→petite, slender, small breasts + tareme + bob cut/twintails；成熟/人妻系→mature female, tall, curvy, voluptuous + wavy hair 或 hair bun + semi-rimless eyewear/earrings/mole，禁给她们套 petite、loli、twintails、child。
+- 先读该人物自己的年龄、性格、身份和体态线索，卡与正文明写的优先。符合人设的温婉少妇可用 mature female、large breasts 和柔和眼型；飒爽、清瘦、丰腴等分别按人物决定。不同人可共享确凿的体征，同时在发型剪影、脸部轮廓、眉眼上区分；服色、耳环或小痣不能独自承担辨识度。新原创女角仅在建档时可用 faceOptions 提供两至四个符合该人设的备选眉形和轮廓；已确定的直接写进 extra。
 - hair 用逗号分隔的 Danbooru 原子词，四要素齐：发色（black/brown/blonde/red/silver hair，必填）、长度（short/medium/long/very long hair）+直卷（straight 可省）、扎发（hair down / high ponytail / twin braids / side ponytail / low bun）、刘海（blunt/parted/side-swept bangs、forehead）。禁生僻长短语（"medium chestnut brown hair"），少用 half updo。若造型有挑染，写清主发色和局部颜色（如 black hair, red streaks）；普通单色头发无需加挑染。旧档只有 streaked hair 时，仅在卡或正文明确挑染色后才用原字段补色，保留其他原词。
 - eyes = 瞳色+标准眼型（tsurime/tareme/jitome/sanpaku），如 "brown eyes, tareme"，禁 "sharp eyes"，不许留空。skin 写 fair/pale/tan。body 只写 2～3 词（curvy, large breasts / slender, medium breasts / petite, small breasts），禁堆 6～7 个形容词，正文没写极高别默认 "tall female"、"long legs"。extra 放常戴眼镜、常驻首饰、标志印记（mole under eye / fang / ahoge / choker / hairclip）；某套衣服的配饰写进装备 tag。同人必填 fandom "character name (copyright name)"，原创留空。
 - 正文没写的维度按世界观一次性补齐并定死：现代写实只用现实发色，禁奇幻发色/额纹/异色瞳/尖耳；二次元/奇幻才可用 white hair、heterochromia、forehead mark、pointy ears。
@@ -482,7 +483,7 @@ const WARDROBE_RULES = `② 装备表与跨楼规则
 - 阅读整楼（含最后一图之后）。在 wardrobeUpdates 记录每次真实变化及发生的 position，不论该处是否出图；只写变化的槽位，无变化给 []。镜头自动继承，无须重复 wearState。同 P 先脱后穿且要区分时，变化和图片可加 step:1、2 表示先后。隔衣接触、镜头裁切、回忆、愿望不改变现实穿法。
 - 判断隔天要看人物经历：连夜赶路、换地点、回家未换衣、明确仍穿昨日衣均继承；隔天重逢的实际出场者换符合身份及世界观的新套。中途换日用真正生效的 P。若下内搭仅滑至髋部，保留 half 与具体落点；裙摆放下只恢复裙摆。`;
 
-export const FRAME_CONTACT_RULE = '共享动作写清谁的手或道具接触谁的哪个部位，使两者同框。所有角色的 tag、标记和自然语言指向同一个落点；肩、胸、手腕、脚踝须按原文区分。可见饰物写在佩戴者身上（anklet 是脚链，ankle 是脚踝）。只脱一只鞋写哪只脚仍穿鞋；连续动作只取选中 P 的一个已成立瞬间：从准备、接触、收势选一项。各人 tag 和英文共用这同一时刻。同时动作选一个视觉中心，配角只写此刻看得见的动作或反应；物品不能同时还在手上又已落地。';
+export const FRAME_CONTACT_RULE = '共享动作写清谁的手或道具接触谁的哪个部位，使两者同框。所有角色的 tag、标记和自然语言指向同一个落点；肩、胸、手腕、脚踝须按原文区分。可见饰物写在佩戴者身上（anklet 是脚链，ankle 是脚踝）。只脱一只鞋写哪只脚仍穿鞋；连续动作只取选中 P 的一个已成立瞬间：从准备、接触、收势选一项。各人 tag 和英文共用这同一时刻。同时动作选一个视觉中心，配角只写此刻看得见的动作或反应；物品不能同时还在手上又已落地。同框同性人物在共享英文中以可见特征区分；亲属称谓可替换为 @{角色原名}，插件会转为该镜头的英文指称。不要用家庭关系代替年纪或身高。跨人接触且两人都有角色块时，用镜头可选 contact:[施动者原名,承受者原名,施动者英文接触短语,承受者英文落点或朝向]。四项描述同一拍，短语直接进各自角色词，tag/nl 无需重抄。单人、自触或画外人物省略。要写道具由谁握、触点属于谁、两人怎样朝向。擦别人嘴写 pressing the cloth to his mouth；亲脸颊写 her lips against the side of his cheek 和他侧脸的朝向；靠胸写清谁的脸颊贴谁的胸。正文没有回吻或互抱时不要加上。';
 
 /** 镜头规则（选帧 / 机位 / 表情 / 标记 / 防偏见）。 */
 const SHOT_RULES = `③ 选帧与构图防线
@@ -492,7 +493,7 @@ const SHOT_RULES = `③ 选帧与构图防线
 - 机位：pov（女主默认 looking at viewer）用于面对面直视、男主伸手触碰、身前侍奉、后背位俯视（pov, from behind, from above）；第三人称（from side / three-quarter view / from above）用于独处、多女角同框、侧面曲线、背后环抱。连续镜头只在完整表现当前动作时变化机位与景别；侧面会遮住左右肢体时优先正面或斜前方；**男主整个人或上半身入镜一律第三人称禁 pov**。高低差互动（一人站+一人坐/跪/躺）禁 from below / low angle，改 from side, eye-level。
 - 全身几何关系才是看点时给 images[].extent:"whole" 并选 full body 或 wide shot；明确只取某个触点给 extent:"detail"，其余省略。普通坐姿、走路或躺着对话依主动作构图。普通插图让每个人在同一视野只出现一次。
 - 景别装得下接触点：下身接触禁 upper body / close-up，只拍下半身用 lower body / thigh focus / foot focus 并配 omitFeatures 摘看不见的部位。Base.tag 顺序：女性人数词→机位/POV→单一景别→场景道具（一个场所，家具不算第二个）→环境光；共享核心互动由最清楚的一个字段描写。
-- 标记 source#/target#/mutual#<1～3 词英文动作>：谁施动写 source、谁承受写 target、对等才 mutual，绝不写反；有合适标记时成对绑定、两侧逐字相同，禁长句人名中文。Base 含 1boy 且他参与互动时，必须给男角色块（1boy, faceless male + 必要局部动作，不写外貌）并交代主动或承受方向。
+- 标记 source#/target#/mutual#<1～3 词英文动作>：谁施动写 source、谁承受写 target、对等才 mutual，绝不写反；有合适标记时成对绑定、两侧逐字相同，禁长句人名中文。Base 含 1boy 且他参与互动时，必须给男角色块（1boy + 必要局部动作；嘴角、脸颊或耳朵是落点时须入镜。衣领等入镜服饰遵循时代）并交代主动或承受方向。
 - 表情只从这些词挑：smile, grin, laughing, blush, embarrassed, frown, pout, surprised, crying, tears, angry, serious, sad, worried, scared, smug, seductive smile, expressionless, half-closed eyes, open mouth, clenched teeth, ahegao；视线只选 looking at viewer / at another / away / down / up / back / closed eyes；禁自造短语，女角表情与视线不许为空。
 - characters[].tag **禁写**：性别人数词、发色发型刘海词、瞳色眼型肤色词、体型词、任何服装词（写了也会被剥）；只写表情、视线、姿势动作、可见解剖部位、标记。omitFeatures 只放本帧看不见的**配饰**（眼镜、耳环、项链、发饰、帽子、手套），禁放 hair/eyes/skin/body。
 - 先在心中判清本 P 的施动者、承受者、使用部位、落点、动作是否已经发生。直接用自然英文描写镜头此刻，不输出分析或动作表。多人的共享关系一般在 Base.nl 写一次；个人姿势更清楚时写在对应角色 nl。其余角色只补自己的支撑点、朝向或可见反应。全员共用提示词预算：优先保留每位入镜者的身份和核心触点，省略镜头外衣物、重复近义词与剧情概述。没有新增画面信息时 nl 留空；同色身份锚点和用于消歧的称呼要保留。以中指指腹触碰写指腹贴在哪，不写独立挑衅手势。NL 关闭时在各人 tag 中保留必要的动作短语与归属。除非正文这格明确写了穿脱，否则不写衣服款式颜色。
@@ -581,7 +582,7 @@ export function unifiedSystemPrompt(
 首楼（世界观还没锁定时）在 worldPreset 填一次：modern / chinese_ancient / western_fantasy / retro_republic / urban_fantasy / scifi_cyberpunk；后续楼层不再输出该字段。
 
 输出结构（沿用字段名，无变化给 []）：
-{"images":[{"position":"P12","tag":"1girl, 1boy, from side, medium shot, indoors","nl":"${nlOn ? 'The man holds the woman’s wrists together above her head.' : ''}","size":"portrait","characters":[{"name":"温岚","tag":"half-closed eyes, looking up, target#wrist grab","nl":"${nlOn ? 'Her back rests against the wall.' : ''}"},{"name":"李斌","tag":"1boy, faceless male, source#wrist grab${nlOn ? '' : ', holding her wrists overhead'}","nl":""}]}],"worldPreset":"modern","timeJump":"same_day","changes":[{"name":"温岚","field":"new","position":"P2","reason":"首次出场","fields":{"sex":"1girl","hair":"long black hair, parted bangs","eyes":"brown eyes","skin":"fair skin","body":"slender","extra":"round eyewear"}}],"wardrobeUpdates":[{"name":"温岚","mode":"replace","position":"P2","slots":{"top":{"tag":"white cotton shirt","status":"on"},"bottom":{"tag":"navy pleated skirt","status":"on"}}},{"name":"温岚","mode":"patch","position":"P10","slots":{"top":{"status":"half","halfTag":"open collar"}}}]}
+{"images":[{"position":"P12","tag":"1girl, 1boy, from side, medium shot, indoors","nl":"${nlOn ? 'The man holds the woman’s wrists together above her head.' : ''}","size":"portrait","contact":["李斌","温岚","holding her wrists together overhead","both wrists above her head"],"characters":[{"name":"温岚","tag":"half-closed eyes, looking up, target#wrist grab","nl":"${nlOn ? 'Her back rests against the wall.' : ''}"},{"name":"李斌","tag":"1boy, source#wrist grab","nl":""}]}],"worldPreset":"modern","timeJump":"same_day","changes":[{"name":"温岚","field":"new","position":"P2","reason":"首次出场","faceOptions":["oval face","round face","straight eyebrows","arched eyebrows"],"fields":{"sex":"1girl","hair":"long black hair, parted bangs","eyes":"brown eyes","skin":"fair skin","body":"slender","extra":"round eyewear"}}],"wardrobeUpdates":[{"name":"温岚","mode":"replace","position":"P2","slots":{"top":{"tag":"white cotton shirt","status":"on"},"bottom":{"tag":"navy pleated skirt","status":"on"}}},{"name":"温岚","mode":"patch","position":"P10","slots":{"top":{"status":"half","halfTag":"open collar"}}}]}
 
 ${countRule}
 

@@ -9,6 +9,7 @@ export interface FrameContinuity {
   wardrobes: CharacterWardrobe[];
   position: string;
   promptHash?: string;
+  ages?: Record<string, string>;
 }
 
 export interface FloorContinuity {
@@ -24,7 +25,9 @@ export function captureFrame(
   wardrobes: Map<string, CharacterWardrobe>,
 ): FrameContinuity {
   const names = new Set(shot.characters.map(character => character.name));
+  const ages = Object.fromEntries(shot.characters.filter(c => typeof c.frameAge === 'string').map(c => [c.name, c.frameAge!]));
   return {
+    ...(Object.keys(ages).length ? { ages } : {}),
     position: shot.position,
     entries: entries.filter(entry => names.has(entry.name)).map(entry => ({ ...entry, history: [] })),
     wardrobes: [...names].flatMap(name => wardrobes.get(name) ?? []),

@@ -1,6 +1,7 @@
 import { reactive } from 'vue';
 
 import { getContext } from '@/st/context';
+import type { CharChange } from '@/autoTag/protocol';
 import type { CharTagEntry } from '@/state/charTags';
 import type { WorldPresetId } from '@/state/worldAnchor';
 
@@ -10,7 +11,7 @@ import type { WorldPresetId } from '@/state/worldAnchor';
  * 为什么要有它：模型自己「想」外貌时会偷懒——白/黑/紫发 + 大胸循环，越写越像同一个人。
  * 这里把「可选的封闭词条」摊开给用户看、让用户增删，再由代码 `Math.random()` 真随机抽
  * 几组完整候选包塞进提示词。模型只保留两项权力：正文写死的维度必须服从；正文没写的
- * 维度从抽出来的候选包里挑一组贴合人设的——不许再自己编。
+ * 维度按人设跨组选择；定档时再与同剧角色比对脸型与眉形。
  *
  * 存储：extensionSettings[TRAIT_POOL_KEY]（→ 服务器 settings.json，跨设备同步）。
  */
@@ -23,6 +24,8 @@ export type TraitCategoryKey =
   | 'bangs'
   | 'eyeColor'
   | 'eyeShape'
+  | 'faceShape'
+  | 'eyebrows'
   | 'skin'
   | 'breastSize'
   | 'bodyBuild'
@@ -61,6 +64,8 @@ export const TRAIT_CATEGORIES: TraitCategoryMeta[] = [
   { key: 'bangs', label: '刘海', group: 'hair' },
   { key: 'eyeColor', label: '瞳色', group: 'eyes' },
   { key: 'eyeShape', label: '眼型', group: 'eyes' },
+  { key: 'faceShape', label: '脸部轮廓', group: 'eyes' },
+  { key: 'eyebrows', label: '眉形', group: 'eyes' },
   { key: 'skin', label: '肤色', group: 'body' },
   { key: 'breastSize', label: '胸围', group: 'body' },
   { key: 'bodyBuild', label: '体型', group: 'body' },
@@ -154,6 +159,8 @@ const DEFAULTS: DefaultTable = {
     ['narrowed eyes', '狭长媚眼'],
     ['big eyes', '圆润大眼'],
   ],
+  faceShape: [['round face', '圆脸'], ['oval face', '鹅蛋脸'], ['angular face', '棱角分明'], ['heart-shaped face', '心形脸'], ['high cheekbones', '高颧骨']],
+  eyebrows: [['arched eyebrows', '弧形眉'], ['straight eyebrows', '平直眉'], ['thick eyebrows', '浓眉'], ['thin eyebrows', '细眉'], ['short eyebrows', '短眉']],
   skin: [
     ['pale skin', '冷白皮'],
     ['fair skin', '白皙'],
@@ -262,12 +269,17 @@ function normalizeItem(raw: unknown, category: TraitCategoryKey): TraitPoolItem 
 
 function normalizePool(raw: unknown): Record<TraitCategoryKey, TraitPoolItem[]> | null {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
-  const record = raw as Record<string, unknown>;
+  const saved = raw as Record<string, unknown>;
+  const record = saved.categories && typeof saved.categories === 'object' && !Array.isArray(saved.categories)
+    ? saved.categories as Record<string, unknown> : saved;
   const pool = emptyTraitPool();
   let filled = false;
   for (const category of TRAIT_CATEGORIES) {
     const list = record[category.key];
-    if (!Array.isArray(list)) continue;
+    if (!Array.isArray(list)) {
+      if (category.key === 'faceShape' || category.key === 'eyebrows') pool[category.key] = defaultTraitPool()[category.key];
+      continue;
+    }
     filled = true;
     const seen = new Set<string>();
     for (const item of list) {
@@ -401,8 +413,10 @@ function inventoryUsage(entries: CharTagEntry[]): Map<string, number> {
 /** 优先抽「用得最少」的：先算最小使用次数，再在该层里随机。 */
 function pick(items: TraitPoolItem[], usage: Map<string, number>, taken: Set<string>): TraitPoolItem | null {
   const fresh = items.filter(item => !taken.has(item.tag.toLowerCase()));
-  if (!fresh.length) return null;
-  const scored = fresh.map(item => ({ item, count: usage.get(item.tag.toLowerCase()) ?? 0 }));
+  if (!items.length) return null;
+  const scored = (fresh.length ? fresh : items).map(item => ({
+    item, count: Math.max(...item.tag.toLowerCase().split(/,\s*/).map(word => usage.get(word) ?? 0)),
+  }));
   const lowest = Math.min(...scored.map(entry => entry.count));
   const tier = scored.filter(entry => entry.count === lowest).map(entry => entry.item);
   return tier[Math.floor(Math.random() * tier.length)] ?? null;
@@ -425,24 +439,39 @@ export function rollTraitCandidates(
   const allowed = scopesForPreset(worldPreset);
   const usage = inventoryUsage(existingEntries);
   const taken = new Set<string>();
+  const draw = (key: TraitCategoryKey) => {
+    let items = enabledIn(pool, key, allowed);
+    // 年龄不是体态抽签项。只有原文、人物卡或用户指定才决定这一维。
+    if (key === 'bodyBuild') items = items.filter(item => !/^(?:mature female|adult|child|teenager|elderly)$/i.test(item.tag));
+    if (worldPreset === 'chinese_ancient' && key === 'hairColor') {
+      const historical = items.filter(item => /^(?:(?:dark |light )?brown|black|grey|white|auburn) hair$/i.test(item.tag)
+        || !DEFAULTS.hairColor.some(([tag]) => tag === item.tag));
+      if (historical.length) items = historical;
+    }
+    const item = pick(items, usage, taken);
+    if (item) {
+      // 同批后面的候选也计入占用；某一维词少时可复用，其他维继续抽。
+      taken.add(item.tag.toLowerCase());
+      for (const word of item.tag.toLowerCase().split(/,\s*/)) usage.set(word, (usage.get(word) ?? 0) + 1);
+    }
+    return item;
+  };
   const groups: TraitCandidate[] = [];
   const total = Math.max(1, Math.min(6, Math.floor(count)));
 
   for (let index = 0; index < total; index += 1) {
-    const hairColor = pick(enabledIn(pool, 'hairColor', allowed), usage, taken);
-    if (!hairColor) break;
-    taken.add(hairColor.tag.toLowerCase());
-    const hairLength = pick(enabledIn(pool, 'hairLength', allowed), usage, taken);
-    const hairTexture = pick(enabledIn(pool, 'hairTexture', allowed), usage, taken);
-    const hairStyle = pick(enabledIn(pool, 'hairStyle', allowed), usage, taken);
-    const bangs = pick(enabledIn(pool, 'bangs', allowed), usage, taken);
-    const eyeColor = pick(enabledIn(pool, 'eyeColor', allowed), usage, taken);
-    const eyeShape = pick(enabledIn(pool, 'eyeShape', allowed), usage, taken);
-    const skin = pick(enabledIn(pool, 'skin', allowed), usage, taken);
-    const breastSize = pick(enabledIn(pool, 'breastSize', allowed), usage, taken);
-    const bodyBuild = pick(enabledIn(pool, 'bodyBuild', allowed), usage, taken);
-    const faceFeature = pick(enabledIn(pool, 'faceFeature', allowed), usage, taken);
-    const accessory = pick(enabledIn(pool, 'accessory', allowed), usage, taken);
+    const hairColor = draw('hairColor');
+    const hairLength = draw('hairLength');
+    const hairTexture = draw('hairTexture');
+    const hairStyle = draw('hairStyle');
+    const bangs = draw('bangs');
+    const eyeColor = draw('eyeColor');
+    const eyeShape = draw('eyeShape');
+    const skin = draw('skin');
+    const breastSize = draw('breastSize');
+    const bodyBuild = draw('bodyBuild');
+    const faceFeature = draw('faceFeature');
+    const accessory = draw('accessory');
 
     const hairParts = [
       hairColor?.tag,
@@ -455,6 +484,7 @@ export function rollTraitCandidates(
     const bodyParts = [breastSize?.tag, bodyBuild?.tag].filter(Boolean) as string[];
     const extraParts = [faceFeature?.tag, accessory?.tag].filter(Boolean) as string[];
 
+    if (!hairParts.length && !eyeParts.length && !bodyParts.length && !skin && !extraParts.length) break;
     groups.push({
       hair: hairParts.join(', '),
       eyes: eyeParts.join(', '),
@@ -486,6 +516,54 @@ export function traitCandidateBlock(
   return [
     '【本次代码真随机抽卡候选池（新女角建档 / 重Roll 必用）】',
     formatTraitCandidates(rollTraitCandidates(worldPreset, existingEntries, count)),
-    '规则：正文写死的维度严格照正文；正文没写的维度，从上面候选包里挑一组贴合该角色年龄与身份的特征，不许自己另外编，尤其不许一律白/黑/紫发配大胸。',
+    ...FACE_AXES.map(key => (key === 'faceShape' ? '脸部轮廓' : '眉形') + '：' +
+      enabledIn(traitPool, key, scopesForPreset(worldPreset)).map(item => item.tag).join(' / ')),
+    '正文写死的维度严格照正文；空缺维度可跨候选按人设组合。温婉成熟女性可选柔和眼型、丰腴身形；成熟、婚姻状况或侍女身份本身不能代替性格与体态描写。新原创角色可用 faceOptions 给 2～4 个符合人设且正文允许的轮廓/眉形备选；已明确的特征写入 extra。匿名转真名、同人或要求相貌相同的人物省略 faceOptions。',
   ].join('\n');
+}
+const FACE_AXES = ['faceShape', 'eyebrows'] as const;
+type Look = Partial<TraitCandidate>;
+const words = (text = '') => text.toLowerCase().split(',').map(t => t.trim()).filter(Boolean);
+
+/** 优先区分发型、眼型或体态已相似的角色。两项仅从导演认可且用户启用的备选中补入。 */
+export function allocateFaceDetails(look: Look, options: unknown, others: Look[], preset: string): string {
+  if (!Array.isArray(options)) return look.extra ?? '';
+  const proposed = new Set(options.filter((item): item is string => typeof item === 'string').map(item => item.trim().toLowerCase()));
+  const extra = words(look.extra);
+  const similarities = others.map(other => {
+    const overlap = (field: keyof Look) => words(look[field]).filter(t => words(other[field]).includes(t)).length;
+    return { extra: words(other.extra), weight: 1 + overlap('hair') * 2 + overlap('eyes') + overlap('body') + overlap('skin') };
+  });
+  const added: string[] = [];
+  for (const axis of FACE_AXES) {
+    const fixed = [...extra, ...words(look.eyes), ...words(look.body)];
+    const described = axis === 'eyebrows' ? /\b(?:eyebrows?|brows?)\b/i : /\b(?:face|cheekbones|jawline)\b/i;
+    if (fixed.some(word => described.test(word)) || traitPool[axis].some(item => fixed.includes(item.tag.toLowerCase()))) continue;
+    const enabled = enabledIn(traitPool, axis, scopesForPreset(preset));
+    // 同占用时保留导演按人设给出的优先顺序。
+    const choices = [...proposed].flatMap(tag => enabled.find(item => item.tag.toLowerCase() === tag) ?? []);
+    const scores = choices.map(item => ({
+      item, cost: similarities.reduce((sum, other) => sum + (other.extra.includes(item.tag.toLowerCase()) ? other.weight : 0), 0),
+    }));
+    scores.sort((a, b) => a.cost - b.cost);
+    if (scores.length) added.push(scores[0].item.tag);
+  }
+  return [look.extra, ...added].filter(Boolean).join(', ');
+}
+
+export function allocateNewProfileFaces(changes: CharChange[], entries: CharTagEntry[], preset: string): void {
+  const assigned = new Map<string, Look>(entries.map(entry => [entry.name, entry.fields]));
+  const profiles = changes.filter(change => change.field === 'new' && change.value.startsWith('{'))
+    .sort((a, b) => Number(Boolean(a.faceOptions?.length)) - Number(Boolean(b.faceOptions?.length)) || a.sourceLine - b.sourceLine);
+  for (const profile of profiles) {
+    if (assigned.has(profile.name)) continue;
+    // parseImagePlan 只保留已归一化的建档 JSON，旧镜头复用的档案也由 JSON.stringify 构造。
+    const fields = JSON.parse(profile.value) as Look & { fandom?: string };
+    if (profile.faceOptions?.length && !fields.fandom) {
+      const extra = allocateFaceDetails(fields, profile.faceOptions, [...assigned.values()], preset);
+      if (extra !== (fields.extra ?? '')) profile.value = JSON.stringify({ ...fields, extra });
+      fields.extra = extra;
+    }
+    assigned.set(profile.name, fields);
+  }
 }

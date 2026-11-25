@@ -143,3 +143,15 @@ it('同日无定位的外观复述保留已知槽；同日 P1 真换装、跨日
     expect(result.updates).toHaveLength(keep ? 0 : 1);
   }
 });
+
+it('跨人擦拭按原名绑定持物者与嘴角，不依赖角色排列；错配的名字不污染其他人的动作', () => {
+  const characters = [{ name: '青年', tag: '1boy, faceless male, source#wiping mouth' },
+    { name: '贵妇', tag: 'wiping mouth, target#wiping mouth, sitting' }, { name: '旁人', tag: 'watching' }];
+  const contact = ['贵妇', '青年', 'pressing the handkerchief to his mouth', 'his cheek turned toward the cloth'];
+  const run = (link: string[]) => parseUnifiedPlan(JSON.stringify({ images: [{ ...image('P1'), characters, contact: link }] }), segments, 0, 1).images[0];
+  const result = assembleImageCharacters(run(contact), []).characters;
+  expect(result[0].tag).toBe('1boy, target#wiping mouth, his cheek turned toward the cloth');
+  expect(result[1].tag.split(', ')).toEqual(['source#wiping mouth', 'sitting', 'pressing the handkerchief to his mouth']);
+  expect(result[2].tag).toBe('watching');
+  expect(run(['错名', ...contact.slice(1)]).characters.map(c => c.tag)).toEqual(characters.map(c => c.tag));
+});

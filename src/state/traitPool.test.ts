@@ -6,6 +6,7 @@ vi.mock('@/st/context', () => ({ getContext: getContextMock }));
 
 import {
   addTraitItems,
+  hydrateTraitPool, saveTraitPool, allocateNewProfileFaces,
   defaultTraitPool,
   rollTraitCandidates,
   scopesForPreset,
@@ -16,6 +17,7 @@ import {
   TRAIT_CATEGORIES,
   type TraitCategoryKey,
 } from './traitPool';
+import type { CharChange } from '@/autoTag/protocol';
 import type { CharTagEntry } from '@/state/charTags';
 
 function clone(): Record<TraitCategoryKey, ReturnType<typeof defaultTraitPool>[TraitCategoryKey]> {
@@ -23,9 +25,9 @@ function clone(): Record<TraitCategoryKey, ReturnType<typeof defaultTraitPool>[T
 }
 
 describe('外貌随机池', () => {
-  it('12 类词池都有词条，且每类都能取到中文标签', () => {
+  it('14 类词池都有词条，且每类都能取到中文标签', () => {
     const pool = defaultTraitPool();
-    expect(TRAIT_CATEGORIES).toHaveLength(12);
+    expect(TRAIT_CATEGORIES).toHaveLength(14);
     for (const meta of TRAIT_CATEGORIES) {
       expect(pool[meta.key].length, meta.key).toBeGreaterThan(0);
       expect(pool[meta.key][0]?.label, meta.key).toBeTruthy();
@@ -87,4 +89,55 @@ describe('外貌随机池', () => {
     expect(block).toContain('候选甲：');
     expect(block).toContain('正文写死的维度严格照正文');
   });
+});
+it('按真实保存格式恢复禁用和自定义词，旧格式只补新增类别、保留主动清空的词池', () => {
+  const ctx = { extensionSettings: {} as Record<string, unknown>, saveSettingsDebounced: vi.fn() };
+  getContextMock.mockReturnValue(ctx);
+  try {
+    traitPool.hairColor[0].enabled = false;
+    addTraitItems('accessory', '自设', 'amber brooch');
+    saveTraitPool();
+    traitPool.hairColor[0].enabled = true;
+    traitPool.accessory = [];
+    hydrateTraitPool();
+    expect(traitPool.hairColor[0].enabled).toBe(false);
+    expect(traitPool.accessory.some(t => t.tag === 'amber brooch')).toBe(true);
+    ctx.extensionSettings.xinghui_trait_pool = { hairColor: [], skin: [] };
+    hydrateTraitPool();
+    expect(traitPool.hairColor).toEqual([]);
+    expect(traitPool.faceShape.length).toBeGreaterThan(0);
+  } finally {
+    getContextMock.mockReturnValue(undefined);
+    hydrateTraitPool();
+  }
+});
+
+it('同楼同人设也可分配不同脸型眉形；既有档案、指定外貌与同人受到保护', () => {
+  const design = { hair: 'long black hair, low bun', eyes: 'brown eyes', body: 'mature female, large breasts', extra: 'earrings' };
+  const make = (name: string, fields = design): CharChange => ({
+    name, field: 'new', position: 'P1', sourceLine: 0, reason: '', value: JSON.stringify(fields),
+    faceOptions: ['round face', 'oval face', 'thick eyebrows', 'arched eyebrows'],
+  });
+  const records = [make('甲'), make('乙'), make('丙', { ...design, extra: 'oval face, thin eyebrows' }), make('旧')];
+  const fandom = make('同人'); fandom.value = JSON.stringify({ ...design, fandom: 'character (series)' });
+  records.push(fandom);
+  allocateNewProfileFaces(records, [{ name: '旧', fields: design } as CharTagEntry], 'chinese_ancient');
+  const looks = records.map(c => JSON.parse(c.value));
+  expect(looks[0].extra).toContain('round face');
+  expect(looks[1].extra).toContain('oval face');
+  expect(looks[0].extra).toContain('thick eyebrows');
+  expect(looks[1].extra).toContain('arched eyebrows');
+  expect(looks[2].extra).toBe('oval face, thin eyebrows');
+  expect(looks[3]).toEqual(design);
+  expect(looks[4].extra).toBe(design.extra);
+  expect(looks.every(v => v.hair === design.hair && v.body === design.body)).toBe(true);
+});
+
+it('发色只有一种时仍按其他维度分别抽候选', () => {
+  const pool = clone();
+  pool.hairColor = [pool.hairColor[0]];
+  const looks = rollTraitCandidates('chinese_ancient', [], 3, pool);
+  expect(looks).toHaveLength(3);
+  expect(new Set(looks.map(v => v.eyes.split(', ')[1])).size).toBe(3);
+  expect(new Set(looks.map(v => v.body.split(', ')[0])).size).toBe(3);
 });

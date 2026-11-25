@@ -1,3 +1,5 @@
+import { retainUnchangedTraits } from './visualIdentity';
+import { reviewContinuity } from './continuityReview';
 import { runChannelWithRetries } from './channelRetry';
 import { requestCompletion, requestViaMainApi, type ChatMsg } from '@/api/client';
 import { readBookMemory } from '@/autoTag/bookMemory';
@@ -74,7 +76,7 @@ import {
   type WardrobeUpdate,
 } from '@/state/outfitState';
 import { captureFrame, FRAME_CONTINUITY_KEY, readFloorContinuity, type FrameContinuity, type FloorContinuity } from './frameContinuity';
-import { traitCandidateBlock } from '@/state/traitPool';
+import { allocateNewProfileFaces, traitCandidateBlock } from '@/state/traitPool';
 import { compileWardrobeSequence, completeGarmentColor } from '@/autoTag/wardrobeSequence';
 
 const processed = new Set<string>();
@@ -345,6 +347,26 @@ async function runUnifiedPass(params: {
   for (const change of plan.changes) change.name = canonicalName(change.name);
   for (const update of plan.wardrobeUpdates) update.name = canonicalName(update.name);
   for (const shot of plan.images) for (const character of shot.characters) character.name = canonicalName(character.name);
+  if (params.captureFrames) {
+    try {
+      // 复用导演看过的角色卡、世界书和相关前文。复核不需要重复导演规范或抽卡包。
+      const sources = messages.slice(1, -2).filter(m => m.role === 'system').map(m => m.content);
+      const materials = messages.at(-1)?.content ?? '';
+      const prior = materials.split('【上一楼及之前的上下文（只读参考，不要重写它的剧情）】')[1]?.split('【上一楼结尾装备表')[0] ?? '';
+      await reviewContinuity({ plan, before: wardrobesBefore, entries: params.entries, segments: params.segments,
+        retainedNames: new Set(params.reuseNew?.map(change => change.name)),
+        context: [...sources, input.memoryText, prior].join('\n'),
+        ask: notes => dispatchLlm(notes, params.channel, { signal: params.signal, source: '连续性复核(第 ' + params.floor + ' 楼)' }),
+      });
+    } catch (error) {
+      if (params.signal.aborted) throw error;
+      console.warn('[星绘] 连续性复核未完成', error);
+      toastr.warning('连续性复核未完成；本楼使用首次分析结果。', '星绘');
+    }
+    if (params.signal.aborted || getContext()?.getCurrentChatId?.() !== params.chatId) throw new DOMException('聊天已切换', 'AbortError');
+  }
+  retainUnchangedTraits(plan.changes, params.entries);
+  allocateNewProfileFaces(plan.changes, params.entries, world.presetId);
   const positionedOps = params.opsResolver(plan.changes);
   // 换装按 position 逐图生效：带 position 的 update 只对 sourceLine 不早于它的图片生效，
   // 省略 position 的从楼首起生效。这样「P10 进房间换女仆装」不会把 P2 那张旧衣裳的图
@@ -352,7 +374,7 @@ async function runUnifiedPass(params: {
   const sequence = compileWardrobeSequence(wardrobesBefore, plan.wardrobeUpdates, plan.images, (shot, wardrobe) => {
     const entries = entriesAtPosition(params.entries, positionedOps, shot.sourceLine, params.lockedNames);
     return {
-      image: assembleImageCharacters(shot, entries, wardrobe, world),
+      image: assembleImageCharacters(shot, entries, wardrobe, world, Boolean(params.captureFrames)),
       frame: params.captureFrames ? captureFrame(shot, entries, wardrobe) : undefined,
     };
   }, plan.timeJump);
@@ -678,10 +700,25 @@ async function runForFloor(floor: number, opts: RunOptions = {}): Promise<void> 
           return;
         }
         plan = parsed.plan;
-        if (plan && previousFrame) {
+        if (plan && slot && profile.naiCharPrompts && !profile.comic && !previousFrame) {
+          // 旧楼层可能没有快照。只回放能定位的服装事件；旧人物增量缺 P 时只采纳建档，避免拿楼尾造型覆盖较早镜头。
+          const stored = message.extra?.[FRAME_CONTINUITY_KEY] as Partial<FloorContinuity> | undefined;
+          const sameSource = !stored || (stored.sourceHash === signature && stored.swipe === (swipeId ?? 0));
+          const points = new Map(preparedTarget.segments.map(s => [s.id, s.sourceLine]));
+          const updates = sameSource && previousOutfitDelta?.swipe === (swipeId ?? 0)
+            ? previousOutfitDelta.updates.filter(u => !u.position || points.has(u.position)).map(u => ({
+              ...u, sourceLine: u.position ? points.get(u.position) : 0,
+            })) : [];
+          const births = sameSource && previousDelta?.swipe === (swipeId ?? 0)
+            ? previousDelta.ops.filter(op => op.kind === 'new').map(op => ({ op, sourceLine: 0 })) : [];
+          const stable = entriesAtPosition(baseline, births, 0, lockedNames);
+          const shots = plan.images.map(i => ({ ...i, characters: i.characters.map(({ wearState, ...c }) => c) }));
+          plan.images = compileWardrobeSequence(wardrobeBaseline, updates, shots,
+            (i, wardrobe) => assembleImageCharacters(i, stable, wardrobe, world)).frames;
+        } else if (plan && previousFrame) {
           const wardrobe = new Map(previousFrame.wardrobes.map(item => [item.name, item]));
           plan.images = plan.images.map(image => assembleImageCharacters({
-            ...image, characters: image.characters.map(({ wearState, ...character }) => character),
+            ...image, characters: image.characters.map(({ wearState, ...c }) => ({ ...c, frameAge: previousFrame.ages?.[c.name] })),
           }, previousEntries, wardrobe, world));
         }
       } catch (error) {

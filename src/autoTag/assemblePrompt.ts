@@ -1,3 +1,4 @@
+import { ageBand, RELATION_TAG, resolveVisualSubjects } from './visualIdentity';
 import type { ImageCharacterPrompt, ImageInsertion } from '@/autoTag/protocol';
 import type { CharTagEntry } from '@/state/charTags';
 import type { CharacterWardrobe, SlotWearStatus, WardrobeSlotKey } from '@/state/outfitState';
@@ -190,7 +191,17 @@ const EYE_SKIN_TAG = /\b(eyes|tsurime|tareme|jitome|sanpaku|pale skin|fair skin|
 const EYE_EXPRESSION_TAG = /^(?:closed eyes|half-closed eyes|wide-eyed|teary eyes|watery eyes|rolling eyes|empty eyes|narrowed eyes)$/i;
 const STATIC_BODY_TAG = /\b(tall female|petite|slender|curvy|voluptuous|flat chest|small breasts|medium breasts|large breasts|huge breasts|wide hips|long legs)\b/i;
 /** 这些词说明这一格正在发生接触（手在头发里、抓着衣领），属于动作，不算外貌声明。 */
-const STATIC_CLOTHING = /^(?:(?:white|black|red|blue|navy|green|pink|brown|grey|gray|yellow|purple|cotton|silk|long|short|pleated|leather|lace|wool|denim)\s+)*(?:dress|shirt|jacket|blouse|robe|skirt|coat|bra|panties|pants|jeans|shorts|stockings|boots|shoes)$/i;
+/** 以衣物名词判槽位，颜色与面料是开放词表。账本没有该层时仍容许导演提供该件衣物。 */
+function wardrobeOwnsTag(tag: string, wardrobe: CharacterWardrobe | undefined): boolean {
+  if (!wardrobe || tag.includes('#') || ACTION_TOUCH_TAG.test(tag)) return false;
+  if (/\b(?:bra|bralette|brassiere|bikini top)$/i.test(tag)) return Boolean(wardrobe.outer || wardrobe.top || wardrobe.innerTop);
+  if (/\b(?:panties|briefs|thong)$/i.test(tag)) return Boolean(wardrobe.bottom || wardrobe.innerBottom || ONEPIECE_GARMENT.test(wardrobe.top?.tag ?? ''));
+  if (/\b(?:shirt|tee|blouse|sweater|turtleneck|camisole|tank top|dress|nightgown|robe|coat|jacket|blazer|hoodie|cardigan|hanfu)$/i.test(tag)) return Boolean(wardrobe.outer || wardrobe.top);
+  if (/\b(?:skirt|pants|shorts|jeans|trousers)$/i.test(tag)) return Boolean(wardrobe.bottom || ONEPIECE_GARMENT.test(wardrobe.top?.tag ?? ''));
+  if (/\b(?:stockings|pantyhose|socks|thighhighs)$/i.test(tag)) return Boolean(wardrobe.legs);
+  if (SHOE_WORD.test(tag)) return Boolean(wardrobe.shoes || wardrobe.legs);
+  return false;
+}
 const ACTION_TOUCH_TAG = /\b(hand|hands|holding|touching|grabbing|pulling|lifting|unbuttoning|pressed|against|around|on her|on his)\b/i;
 
 export function stripLeakedAppearance(tags: string[], hasLibraryEntry: boolean): string[] {
@@ -482,7 +493,9 @@ export function assembleImageCharacters(
   entriesAtPos: CharTagEntry[],
   wardrobes: Map<string, CharacterWardrobe> = new Map(),
   world?: WorldAnchorConfig,
+  visualSubjects = true,
 ): ImageInsertion {
+  if (visualSubjects) image = resolveVisualSubjects(image, entriesAtPos);
   const tag = fitShotToPose(image);
   const upperOnly = isUpperOnlyShot(tag);
   const shoesHidden = SHOES_HIDDEN_SHOT.test(tag) && !/\b(?:feet|foot|ankle|shoe) focus\b/i.test(tag);
@@ -510,28 +523,25 @@ export function assembleImageCharacters(
     const eyesClosed = frameTags.some(tag => /^closed eyes$/i.test(tag));
     const focus = [image.tag, image.nl, character.tag, character.nl].join(', ').toLowerCase();
     const fixedTags = buildFixedAppearanceTags(entry, character.omitFeatures)
+      .filter(t => !visualSubjects || (!RELATION_TAG.test(t) && (!ageBand(t) || character.frameAge === undefined || ageBand(t) === ageBand(character.frameAge))))
       .filter(t => !distant || !DISTANT_DETAIL.test(t) || focus.includes(t.toLowerCase()))
       .filter(tag => !eyesClosed || !/^(?:narrowed eyes|half-closed eyes|wide-eyed|open eyes)$/i.test(tag));
+    if (character.frameAge && !fixedTags.some(t => ageBand(t) === ageBand(character.frameAge))) fixedTags.push(character.frameAge);
     const hasLibraryEntry = Boolean(entry);
     const wardrobe = wardrobes.get(character.name);
     const compiled = compileWardrobeForFrame(wardrobe, character.wearState, upperOnly);
     const outfitTags = compiled.positive.flatMap(splitTags).filter(tag => !(upperOnly && LOWER_ONLY.test(tag)));
     const directorTags = stripLeakedAppearance(frameTags, hasLibraryEntry)
-      .filter(tag => !wardrobe || !STATIC_CLOTHING.test(tag))
-      .filter(tag => {
-        if (!wardrobe || tag.includes('#') || ACTION_TOUCH_TAG.test(tag)) return true;
-        // 有相应层的账本时，静态内衣名称只能从可见槽输出。手持道具和互动仍由导演描述。
-        if (/\b(?:bra|brassiere|bralette)$/i.test(tag)) return !(wardrobe.outer || wardrobe.top || wardrobe.innerTop);
-        if (/\b(?:panties|briefs|thong)$/i.test(tag)) return !(wardrobe.bottom || wardrobe.innerBottom || ONEPIECE_GARMENT.test(wardrobe.top?.tag ?? ''));
-        return true;
-      });
+      .filter(tag => !wardrobeOwnsTag(tag, wardrobe));
 
-    const mergedPositive = dedupeTags([...fixedTags, ...outfitTags, ...directorTags])
-      .filter(tag => !(upperOnly && LEG_ONLY.test(tag)))
-      .filter(tag => !(upperOnly && LOWER_ONLY.test(tag)));
+    const visibleInCrop = (t: string) => !(upperOnly && (LEG_ONLY.test(t) || LOWER_ONLY.test(t)))
+      && !(shoesHidden && SHOE_WORD.test(t));
+    const mergedPositive = dedupeTags([
+      ...fixedTags.filter(visibleInCrop), ...outfitTags.filter(visibleInCrop),
+      ...directorTags.filter(t => DIRECTOR_MARKER.test(t) || ACTION_TOUCH_TAG.test(t) || visibleInCrop(t)),
+    ]);
     const singleShoeOff = mergedPositive.some(tag => /^one (?:shoe|slipper|sandal|boot) off$/i.test(tag));
     const visiblePositive = mergedPositive
-      .filter(tag => !shoesHidden || !SHOE_WORD.test(tag))
       .map(tag => singleShoeOff && /^barefoot$/i.test(tag) ? 'one bare foot' : tag);
 
     const ownTraits = visiblePositive.map(tag => ` ${tag.toLowerCase()} `);

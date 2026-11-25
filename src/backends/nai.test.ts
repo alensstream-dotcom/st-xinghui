@@ -1,3 +1,12 @@
+import { assembleImageCharacters } from '@/autoTag/assemblePrompt';
+import { reviewContinuity } from '@/autoTag/continuityReview';
+import { retainUnchangedTraits } from '@/autoTag/visualIdentity';
+import { prepareTargetText } from '@/autoTag/clean';
+import { parseUnifiedPlan } from '@/autoTag/protocol';
+import { compileWardrobeSequence } from '@/autoTag/wardrobeSequence';
+import { serializeImageTag, parseImageTagContent } from '@/st/imageTagRegex';
+import { emptyCharFields, type CharTagEntry } from '@/state/charTags';
+import type { CharacterWardrobe } from '@/state/outfitState';
 import { describe, expect, it } from 'vitest';
 
 import {
@@ -674,4 +683,68 @@ describe('内置画师串配方(只读、随版本更新、不进 settings)', ()
     expect(isBuiltinNaiArtist('art_abc')).toBe(false);
     expect(isBuiltinNaiArtist('')).toBe(false);
   });
+});
+
+describe('从正文位置、档案和服装事件到 NovelAI 实际请求', () => {
+  const person = (name: string, hair: string, body: string): CharTagEntry => ({
+    name, fields: { ...emptyCharFields(), hair, body, sex: '1girl', outfit: 'old wedding dress' },
+    raw: '', nl: '', source: 'manual', desc: '', history: [],
+  });
+  for (const band of ['adult', 'child', null] as const) {
+    it('尊重已知成年、确为孩子和年龄未知三种女儿：' + band, async () => {
+      const entries = [person('甲', 'black hair, low bun', 'mature female'), person('乙', 'black hair, side braid', 'flat chest')];
+      const before = new Map<string, CharacterWardrobe>([['乙', { name: '乙', outer: { tag: 'beige trench coat', status: 'on' },
+        top: { tag: 'black turtleneck', status: 'on' }, innerTop: { tag: 'red bra', status: 'on' } }]]);
+      const segments = prepareTargetText('母亲走到玄关。\n女儿握住她的手。\n她后来脱下风衣。', []).segments;
+      const plan = parseUnifiedPlan(JSON.stringify({ images: [{ position: 'P2', tag: '2girls, medium shot',
+        nl: 'The little girl holds her mother.', characters: [{ name: '乙', tag: 'daughter, little girl, purple cashmere sweater, embroidered lace bra, source#holding hands' },
+        { name: '甲', tag: 'target#holding hands' }] }], wardrobeUpdates: [
+          { name: '乙', mode: 'swap', position: 'P1', slots: { top: { tag: 'purple cashmere sweater', status: 'on' } } },
+          { name: '乙', mode: 'patch', position: 'P2', slots: { outer: { status: 'off' } } },
+        ] }), segments, 0, 2);
+      await reviewContinuity({ plan, before, entries, segments, context: '', ask: async () => JSON.stringify({
+        at: [null, 'P3'], ages: [band, 'adult'], fixes: [{ index: 0, nl: '@{乙} holds the hand of @{甲}.' }],
+      }) });
+      const result = compileWardrobeSequence(before, plan.wardrobeUpdates, plan.images, (shot, state) =>
+        assembleImageCharacters(shot, entries, state), plan.timeJump);
+      expect(result.updates.map(u => u.position)).toEqual(['P3']);
+      const saved = parseImageTagContent(serializeImageTag(result.frames[0]));
+      for (const model of ['nai-diffusion-4-5-full', 'nai-diffusion-5-full'] as const) {
+        const params = buildNaiParameters(nai({ model }), { prompt: saved.tag, nl: saved.nl, characters: saved.characters, seed: 12 });
+        const caption = (params.v4_prompt as { caption: { base_caption: string; char_captions: { char_caption: string }[] } }).caption;
+        const who = band === 'adult' ? 'woman' : band === 'child' ? 'child' : 'person';
+        expect(caption.base_caption).toContain('the ' + who + ' with a side braid holds the hand of the woman with a low bun');
+        const daughter = caption.char_captions[0].char_caption;
+        expect(daughter).toMatch(/flat chest.*beige trench coat.*black turtleneck visible at collar/);
+        expect(daughter).not.toMatch(/daughter|little girl|red bra|wedding dress|purple cashmere sweater|embroidered lace bra/);
+        if (band) expect(daughter.split(', ')).toContain(band);
+        else expect(daughter).not.toMatch(/adult|child/);
+      }
+    });
+  }
+  it('普通单人镜头没有二次请求，局部身份变化保留独立分面', async () => {
+    const segments = prepareTargetText('甲回头。', []).segments;
+    const plan = parseUnifiedPlan(JSON.stringify({ images: [{ position: 'P1', tag: '1girl', characters: [{ name: '甲', tag: 'looking back' }] }],
+      changes: [{ name: '甲', field: 'body', value: 'toned', position: 'P1' }, { name: '甲', field: 'hair', value: 'short hair', position: 'P1' }] }), segments, 0, 1);
+    const entries = [person('甲', 'long black hair', 'adult, flat chest')];
+    await reviewContinuity({ plan, before: new Map(), entries, segments, context: '', ask: () => { throw Error('意外的复核调用'); } });
+    retainUnchangedTraits(plan.changes, entries);
+    expect(plan.changes.map(c => c.value)).toEqual(['toned, adult, flat chest', 'black hair, short hair']);
+  });
+});
+
+it('末图之后漏记的脱衣可补回，重复事件只写一次；复核格式无效时原计划完整', async () => {
+  const segments = prepareTargetText('甲站起。\n她脱下外套。', []).segments;
+  const before = new Map<string, CharacterWardrobe>([['甲', { name: '甲', outer: { tag: 'beige trench coat', status: 'on' } }]]);
+  const plan = parseUnifiedPlan(JSON.stringify({ images: [{ position: 'P1', tag: '1girl', characters: [{ name: '甲', tag: 'standing' }] }] }), segments, 0, 1);
+  const input = { plan, before, entries: [], segments, context: '' };
+  const original = JSON.stringify(plan);
+  await expect(reviewContinuity({ ...input, ask: async () => '{"at":["P333"],"ages":[]}' })).rejects.toThrow();
+  expect(JSON.stringify(plan)).toBe(original);
+  const missing = { name: '甲', mode: 'patch', position: 'P2', slots: { outer: { status: 'off' } } };
+  await reviewContinuity({ ...input, ask: async () => JSON.stringify({ at: [], ages: [], missing: [missing, missing] }) });
+  const result = compileWardrobeSequence(before, plan.wardrobeUpdates, plan.images, (_shot, state) => state.get('甲')!.outer!.status, 'same_day');
+  expect(result.frames).toEqual(['on']);
+  expect(result.updates).toHaveLength(1);
+  expect(result.updates[0].slots.outer).toMatchObject({ tag: 'beige trench coat', status: 'off' });
 });

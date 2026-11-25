@@ -17,6 +17,8 @@ import type {
 import { normaliseWardrobeUpdate, readWardrobeStep, WARDROBE_SLOT_KEYS } from '@/state/outfitState';
 
 export interface ImageCharacterPrompt {
+  /** Verified only for this frame; never serialized as a profile update. */
+  frameAge?: string;
   name: string;
   tag: string;
   nl: string;
@@ -74,6 +76,8 @@ export interface ImagePlan {
 
 /** AI 输出的单条角色变更(宽松形状;解析后字段全部合法才保留)。 */
 export interface CharChange {
+  /** Only proposed for new originals, consumed before the profile is saved. */
+  faceOptions?: string[];
   name: string;
   /** 'new' = 建档;其余为字段名/整串/自然语言。 */
   field: CharTagHistoryField;
@@ -280,6 +284,34 @@ function sanitizeWearState(
   return out;
 }
 
+/** 在角色块仍有姓名时绑定同一个接触瞬间。旧导演或不完整关系沿用原角色块。 */
+function bindFrameContact(characters: ImageCharacterPrompt[], raw: unknown): void {
+  if (!Array.isArray(raw) || raw.length !== 4 || !raw.every(v => typeof v === 'string')) return;
+  const [from, to, action, response] = raw.map(v => v.trim());
+  if (!from || from === to || [action, response].some(cue =>
+    !/[a-z]/i.test(cue) || cue.length > 140 || /[<>#\r\n\u3400-\u9fff]/.test(cue))) return;
+  const actors = characters.filter(c => c.name === from);
+  const receivers = characters.filter(c => c.name === to);
+  if (actors.length !== 1 || receivers.length !== 1) return;
+  const actor = actors[0], receiver = receivers[0];
+  const tags = (c: ImageCharacterPrompt) => c.tag.split(',').map(t => t.trim()).filter(Boolean);
+  const actorTags = tags(actor), receiverTags = tags(receiver);
+  const reversed = actorTags.filter(t => t.startsWith('target#') && receiverTags.includes('source#' + t.slice(7)))
+    .map(t => t.slice(7));
+  function bind(character: ImageCharacterPrompt, cue: string, role: 'source' | 'target', parts: string[]) {
+    const opposite = role === 'source' ? 'target#' : 'source#';
+    const directed = parts.map(t => t.startsWith(opposite) && reversed.includes(t.slice(7)) ? role + '#' + t.slice(7) : t);
+    const actions = directed.filter(t => t.startsWith(role + '#')).map(t => t.slice(7).toLowerCase());
+    const ownFace = role === 'target' && /\bhis (?:own |left |right )?(?:cheek|mouth|lips?|ear|face|jaw)\b/i.test(cue);
+    const kept = directed.filter(t => !actions.includes(t.toLowerCase()) && !(ownFace && /^faceless male$/i.test(t)));
+    if (parts.some(t => /^faceless male$/i.test(t)) && ownFace && !kept.some(t => /^(?:1?boy|male)$/i.test(t))) kept.unshift('boy');
+    if (!kept.some(t => t.toLowerCase() === cue.toLowerCase())) kept.push(cue);
+    character.tag = kept.join(', ');
+  }
+  bind(actor, action, 'source', actorTags);
+  bind(receiver, response, 'target', receiverTags);
+}
+
 function sanitizePosition(value: unknown, index: number): string {
   const position = typeof value === 'string' ? value.trim().toUpperCase() : '';
   if (!position) throw new Error(`images[${index}].position 不能为空`);
@@ -337,6 +369,7 @@ export function parseImagePlan(
     const nl = sanitizeContent(entry.nl, 'nl', index);
     const negative = sanitizeContent(entry.negative ?? entry.negative_prompt, 'negative', index);
     const characters = sanitizeCharacters(entry.characters, index);
+    bindFrameContact(characters, entry.contact);
     // 兼容模型按习惯返回 orientation / aspect 键
     const size = normalizeOrientation(entry.size ?? entry.orientation ?? entry.aspect);
     if (rules.femaleScenesOnly && !hasNaiFemaleSubject(tag, characters)) continue;
@@ -479,7 +512,9 @@ function parseChanges(
     const nl = typeof o.nl === 'string' ? o.nl.trim() : '';
     const reason = typeof o.reason === 'string' ? o.reason.trim() : '';
     if (!value && !nl) continue;
-    out.push({ name, field, value, nl: nl || undefined, reason, position, sourceLine });
+    const faceOptions = field === 'new' && Array.isArray(o.faceOptions)
+      ? o.faceOptions.filter((v): v is string => typeof v === 'string' && v.length <= 64).slice(0, 8) : [];
+    out.push({ name, field, value, nl: nl || undefined, reason, position, sourceLine, ...(faceOptions.length ? { faceOptions } : {}) });
   }
   return out;
 }
