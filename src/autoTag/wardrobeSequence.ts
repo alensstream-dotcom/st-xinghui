@@ -1,6 +1,7 @@
 import type { ImageCharacterPrompt, ImageInsertion } from '@/autoTag/protocol';
 import {
   applyWardrobeUpdate,
+  normaliseWardrobeUpdate,
   WARDROBE_SLOT_KEYS,
   type CharacterWardrobe,
   type GarmentSlot,
@@ -71,6 +72,21 @@ export function wardrobesAfterFloor(
   return wardrobes;
 }
 
+// 旧记录只允许给原样的第一项衣物词加主色，不能从内搭、配饰或其他槽借色。
+const HUE = /^(?:(?:light|dark|pale|deep|dusty|pastel) )?(?:black|white|red|blue|navy|green|pink|brown|gr[ae]y|yellow|purple|ivory|cream|beige|orange|teal|burgundy|silver|gold|violet|lavender|maroon|khaki)$/i;
+const UNCOLORED_GARMENT = /^(?:(?:plain|loose|casual|lounge|cropped|low-rise|high-waisted|fitted|oversized|pleated|lace|denim|silk|satin|cotton|linen|knit|leather|long|short|sleeveless|frayed|spaghetti-strap) )*(?:nightgown|camisole|tank top|shirt|t-shirt|top|blouse|shorts|skirt|dress|robe|coat|jacket|jeans|trousers|pants|bra|panties|stockings|socks|shoes|slippers)$/i;
+
+export function completeGarmentColor(original: string, proposed?: string): string {
+  if (!proposed) return original;
+  const [item, ...details] = original.split(',').map(part => part.trim());
+  const candidate = proposed.split(',')[0].trim();
+  if (!UNCOLORED_GARMENT.test(item) || !candidate.toLowerCase().endsWith(' ' + item.toLowerCase())) return original;
+  // A later tag may already specify this item's color (e.g. "nightgown, white").
+  if (details.some(detail => detail.split(/[ -]+/).some(word => HUE.test(word)))) return original;
+  const hue = candidate.slice(0, -item.length).trim();
+  return HUE.test(hue) ? [hue + ' ' + item, ...details].join(', ') : original;
+}
+
 type Moment = { sourceLine: number; step?: number };
 
 export function compareMoments(a: Moment, b: Moment): number {
@@ -98,7 +114,7 @@ export function compileWardrobeSequence<T>(
       for (const key of WARDROBE_SLOT_KEYS) {
         const patch = slots[key];
         if (!patch) continue;
-        if (previous?.[key]?.tag) slots[key] = { ...patch, tag: previous[key].tag };
+        if (previous?.[key]?.tag) slots[key] = { ...patch, tag: completeGarmentColor(previous[key].tag, patch.tag) };
         else if (!patch.tag && !(patch.status === 'off' && (key === 'innerTop' || key === 'innerBottom'))) {
           console.warn('[星绘] 穿脱未找到原衣物', update.name, key, update.position);
           delete slots[key];
@@ -120,7 +136,8 @@ export function compileWardrobeSequence<T>(
         if (update.name !== character.name || compareMoments(update, shot) !== 0) continue;
         for (const key of WARDROBE_SLOT_KEYS) if (update.slots[key]) delete slots[key];
       }
-      apply({ name: character.name, mode: 'patch', slots, position: shot.position, sourceLine: shot.sourceLine, step: shot.step });
+      const legacy = normaliseWardrobeUpdate({ name: character.name, mode: 'patch', slots, position: shot.position, step: shot.step });
+      if (legacy) apply({ ...legacy, sourceLine: shot.sourceLine });
     }
     const characters = shot.characters.map(({ wearState, ...character }) => character);
     frames[index] = compile({ ...shot, characters }, state);

@@ -165,6 +165,22 @@ describe('assembleImageCharacters', () => {
     } as ImageInsertion;
   }
 
+  it('短发高马尾不会被自身或同框角色的自动负面压掉；闭眼只覆盖本帧的睁眼表情', () => {
+    const person = entry('许婷', { hair: 'black hair, short hair, high ponytail', eyes: 'emerald eyes, narrowed eyes' });
+    const other = entry('乙', { hair: 'ponytail, curly hair' });
+    const frame = image({ tag: '2girls, full body', characters: [
+      { name: '许婷', tag: 'closed eyes, one slipper off, barefoot', nl: '', uc: 'camera' },
+      { name: '乙', tag: 'smile', nl: '' },
+    ] });
+    const first = assembleImageCharacters(frame, [person, other]).characters[0];
+    expect(first.uc?.split(', ')).not.toContain('ponytail');
+    expect(first.uc?.split(', ')).toEqual(expect.arrayContaining(['camera', 'very long hair', 'curly hair']));
+    expect(first.tag.split(', ')).toEqual(expect.arrayContaining(['high ponytail', 'closed eyes', 'emerald eyes', 'one bare foot']));
+    expect(first.tag).not.toMatch(/narrowed eyes|barefoot/);
+    frame.characters[0].tag = 'smile, barefoot';
+    expect(assembleImageCharacters(frame, [person, other]).characters[0].tag).toMatch(/narrowed eyes.*barefoot/);
+  });
+
   it('固定外貌在前、装备居中、导演动作在后；导演偷塞的身份词被剥掉', () => {
     const wardrobes = new Map<string, CharacterWardrobe>([
       ['温岚', wardrobe('温岚', { top: { tag: 'white cotton blouse, long sleeves', status: 'on' } })],

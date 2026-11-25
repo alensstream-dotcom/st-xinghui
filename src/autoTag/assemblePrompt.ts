@@ -271,7 +271,7 @@ function resolveSlot(
   const override = wearState?.[key];
   if (!base && !override) return null;
   const status: SlotWearStatus = override?.status ?? base?.status ?? 'on';
-  const tag = (base?.tag ?? '').trim();
+  const tag = base?.tag ? [base.tag, base.condition].filter(Boolean).join(', ') : '';
   const halfTag = (override?.halfTag || base?.halfTag || '').trim();
   if (!tag && !(status === 'off' && (key === 'innerTop' || key === 'innerBottom'))) return null;
   return { tag, status, ...(halfTag ? { halfTag } : {}) };
@@ -468,35 +468,41 @@ export function assembleImageCharacters(
       return male;
     }
 
-    const fixedTags = buildFixedAppearanceTags(entry, character.omitFeatures);
+    const frameTags = dropLocalizedMarkers(splitTags(character.tag));
+    const eyesClosed = frameTags.some(tag => /^closed eyes$/i.test(tag));
+    const fixedTags = buildFixedAppearanceTags(entry, character.omitFeatures)
+      .filter(tag => !eyesClosed || !/^(?:narrowed eyes|half-closed eyes|wide-eyed|open eyes)$/i.test(tag));
     const hasLibraryEntry = Boolean(entry);
     const compiled = compileWardrobeForFrame(wardrobes.get(character.name), character.wearState, upperOnly);
     const outfitTags = compiled.positive.flatMap(splitTags).filter(tag => !(upperOnly && LOWER_ONLY.test(tag)));
-    const directorTags = stripLeakedAppearance(dropLocalizedMarkers(splitTags(character.tag)), hasLibraryEntry)
+    const directorTags = stripLeakedAppearance(frameTags, hasLibraryEntry)
       .filter(tag => !wardrobes.has(character.name) || !STATIC_CLOTHING.test(tag));
 
     const mergedPositive = dedupeTags([...fixedTags, ...outfitTags, ...directorTags])
       .filter(tag => !(upperOnly && LEG_ONLY.test(tag)))
       .filter(tag => !(upperOnly && LOWER_ONLY.test(tag)));
-    const visiblePositive = shoesHidden ? mergedPositive.filter(tag => !SHOE_WORD.test(tag)) : mergedPositive;
+    const singleShoeOff = mergedPositive.some(tag => /^one (?:shoe|slipper|sandal|boot) off$/i.test(tag));
+    const visiblePositive = mergedPositive
+      .filter(tag => !shoesHidden || !SHOE_WORD.test(tag))
+      .map(tag => singleShoeOff && /^barefoot$/i.test(tag) ? 'one bare foot' : tag);
 
+    const ownTraits = visiblePositive.map(tag => ` ${tag.toLowerCase()} `);
+    const affirms = (trait: string) => ownTraits.some(tag => tag.includes(` ${trait.toLowerCase()} `));
     const negativeParts = [
       ...splitTags(character.uc ?? ''),
       ...compiled.negatives,
-      ...buildSelfAntiDriftNegative(entry),
+      ...buildSelfAntiDriftNegative(entry).filter(tag => !affirms(tag)),
       ...guardrailNegatives(world, visiblePositive),
       ...(heightGap ? PROPORTION_GUARDRAILS : []),
     ];
 
     if (femaleIndexes.length >= 2) {
-      const ownLower = new Set(visiblePositive.map(tag => tag.toLowerCase()));
       for (const otherIndex of femaleIndexes) {
         if (otherIndex === index) continue;
         const other = image.characters[otherIndex];
         const otherEntry = entriesAtPos.find(item => item.name === other.name);
         for (const feature of extractDistinctiveFeatures(otherEntry)) {
-          const word = feature.toLowerCase();
-          if (ownLower.has(word) || [...ownLower].some(tag => (' ' + tag + ' ').includes(' ' + word + ' '))) continue;
+          if (affirms(feature)) continue;
           negativeParts.push(feature);
         }
       }

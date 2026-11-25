@@ -14,6 +14,7 @@ import { beginGeneration, clearGeneration, consumeGeneration } from '@/autoTag/g
 import {
   autoTagProfile,
   buildAutoTagMessages,
+  FRAME_CONTACT_RULE,
   buildUnifiedMessages,
   type UnifiedInput,
 } from '@/autoTag/prompt';
@@ -64,6 +65,7 @@ import { getTagGenChannel, isCurrentChatExcluded, settings, type ApiChannel } fr
 import { applyDetectedWorldPreset, readWorldAnchor, type WorldAnchorConfig } from '@/state/worldAnchor';
 import {
   BBI_OUTFIT_EXTRA_KEY,
+  WARDROBE_SLOT_KEYS,
   buildWardrobeText,
   makeWardrobeFloorDelta,
   readWardrobeFloorDelta,
@@ -73,7 +75,7 @@ import {
 } from '@/state/outfitState';
 import { captureFrame, FRAME_CONTINUITY_KEY, readFloorContinuity, type FrameContinuity, type FloorContinuity } from './frameContinuity';
 import { traitCandidateBlock } from '@/state/traitPool';
-import { compileWardrobeSequence } from '@/autoTag/wardrobeSequence';
+import { compileWardrobeSequence, completeGarmentColor } from '@/autoTag/wardrobeSequence';
 
 const processed = new Set<string>();
 const running = new Map<string, AbortController>();
@@ -320,7 +322,13 @@ async function runUnifiedPass(params: {
     if (update.mode !== 'replace') continue;
     const matches = params.reuseOutfits?.filter(prior => prior.mode === 'replace' && prior.name === update.name
       && prior.position === update.position && prior.step === update.step);
-    if (matches?.length === 1) update.slots = matches[0].slots;
+    if (matches?.length !== 1) continue;
+    const restored = { ...matches[0].slots };
+    for (const key of WARDROBE_SLOT_KEYS) {
+      const slot = restored[key];
+      if (slot?.tag) restored[key] = { ...slot, tag: completeGarmentColor(slot.tag, update.slots[key]?.tag) };
+    }
+    update.slots = restored;
   }
   const canonical = new Map<string, Set<string>>();
   const nameKey = (name: string) => name.normalize('NFKC').trim().toLowerCase();
@@ -544,6 +552,7 @@ async function runForFloor(floor: number, opts: RunOptions = {}): Promise<void> 
         anchors.text,
         slot ? [
           buildSlotTaskNote(rawSource, slot.seq),
+          ...(profile.naiCharPrompts ? [FRAME_CONTACT_RULE] : []),
           ...(previousFrame ? [
             '当前镜头在 ' + previousFrame.position + '。本格的外貌和衣物由插件按原镜头补齐，角色 tag 只写动作表情；英文只补此刻可见的信息。共享关系写一次。',
             buildWardrobeText(new Map(previousFrame.wardrobes.map(item => [item.name, item]))),

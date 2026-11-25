@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { assembleImageCharacters, compileWardrobeForFrame } from './assemblePrompt';
 import { captureFrame, readFloorContinuity } from './frameContinuity';
 import { parseUnifiedPlan } from './protocol';
-import { compileWardrobeSequence } from './wardrobeSequence';
+import { compileWardrobeSequence, completeGarmentColor } from './wardrobeSequence';
 import { deriveWardrobes, makeWardrobeFloorDelta, type CharacterWardrobe } from '@/state/outfitState';
 import { prepareTargetText } from './clean';
 import { unifiedSystemPrompt } from './prompt';
@@ -88,5 +88,41 @@ describe('0.3.24 剧情连续性', () => {
       expect(Boolean(shot.nl)).toBe(nl);
       expect(shot.characters[1].nl).toBe('');
     }
+  });
+});
+
+describe('同件睡裙跨镜头的主色和断肩带', () => {
+  it('只给原件补主色，保留细节，不从黑蕾丝内搭借色或重染', () => {
+    expect(completeGarmentColor('nightgown, spaghetti straps', 'ivory nightgown')).toBe('ivory nightgown, spaghetti straps');
+    for (const prior of ['white nightgown', 'nightgown, white', 'cobalt nightgown']) {
+      expect(completeGarmentColor(prior, 'black ' + prior)).toBe(prior);
+    }
+    expect(completeGarmentColor('nightgown', 'black lace panties')).toBe('nightgown');
+    expect(completeGarmentColor('nightgown', 'nightgown, black lace panties')).toBe('nightgown');
+  });
+
+  it('断肩带随衣物跨镜头和楼层；滑肩、掀裙、脱下、修复独立生效', () => {
+    const initial = { name: '甲', mode: 'replace', slots: {
+      top: { tag: 'nightgown, spaghetti straps', status: 'on' },
+      innerBottom: { tag: 'black lace panties', status: 'on' },
+    } };
+    const changes = [
+      { status: 'half_top', tag: 'ivory nightgown', halfTag: 'broken strap, slipping down' },
+      { status: 'half_bottom', halfTag: 'skirt lift' }, { status: 'off' }, { status: 'on' },
+      { status: 'on', condition: '' },
+    ];
+    const result = replay({ images: changes.map((_, i) => image('P2', i + 1)), wardrobeUpdates: [
+      initial, ...changes.map((top, i) => ({ name: '甲', mode: 'patch', position: 'P2', step: i + 1, slots: { top } })),
+    ] });
+    const tags = result.frames.map(frame => frame.tag);
+    expect(tags[0]).toMatch(/ivory nightgown.*broken strap.*slipping down/);
+    expect(tags[1]).toMatch(/ivory nightgown.*broken strap.*skirt lift.*black lace panties/);
+    expect(tags[1]).not.toContain('slipping down');
+    expect(tags[2]).not.toMatch(/nightgown|broken strap/);
+    expect(tags[3]).toContain('broken strap');
+    expect(tags[4]).not.toContain('broken strap');
+    const chat = [{ mes: '', name: 'AI', is_user: false, is_system: false,
+      extra: { bbiOutfitOps: makeWardrobeFloorDelta(result.updates.slice(0, -1), 0) } }];
+    expect(deriveWardrobes(chat).get('甲')?.top).toMatchObject({ tag: 'ivory nightgown, spaghetti straps', condition: 'broken strap', status: 'on' });
   });
 });

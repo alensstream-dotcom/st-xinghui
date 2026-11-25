@@ -648,7 +648,7 @@ const editingWardrobe = computed<CharacterWardrobe | null>(() => {
 const STATUS_CN: Record<GarmentSlot['status'], string> = { on: '穿着', half: '半脱', half_top: '上身半开', half_bottom: '下摆提起', off: '已脱' };
 
 function slotLabel(key: WardrobeSlotKey, slot: GarmentSlot): string {
-  return `${WARDROBE_SLOT_LABELS[key]}[${slot.tag}|${STATUS_CN[slot.status]}${slot.halfTag ? `(${slot.halfTag})` : ''}]`;
+  return `${WARDROBE_SLOT_LABELS[key]}[${[slot.tag, slot.condition].filter(Boolean).join(', ')}|${STATUS_CN[slot.status]}${slot.halfTag ? `(${slot.halfTag})` : ''}]`;
 }
 
 const editingSlotRows = computed(() =>
@@ -1043,7 +1043,7 @@ function sourceLabel(entry: CharTagEntry): string {
               <div v-for="row in editingSlotRows" :key="row.key" class="bbi-outfit-row">
                 <span class="bbi-outfit-layer">{{ row.label }}</span>
                 <span v-if="row.slot" class="bbi-outfit-tag">
-                  {{ row.slot.tag }}
+                  {{ [row.slot.tag, row.slot.condition].filter(Boolean).join(', ') }}
                   <span class="bbi-outfit-status" :class="`is-${row.slot.status}`">{{ STATUS_CN[row.slot.status] }}</span>
                   <span v-if="row.slot.halfTag" class="bbi-outfit-half">({{ row.slot.halfTag }})</span>
                 </span>
