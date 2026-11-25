@@ -1,4 +1,4 @@
-import { ageBand, RELATION_TAG, resolveVisualSubjects } from './visualIdentity';
+import { ageBand, profileAge, RELATION_TAG, resolveVisualSubjects } from './visualIdentity';
 import type { ImageCharacterPrompt, ImageInsertion } from '@/autoTag/protocol';
 import type { CharTagEntry } from '@/state/charTags';
 import type { CharacterWardrobe, SlotWearStatus, WardrobeSlotKey } from '@/state/outfitState';
@@ -194,6 +194,7 @@ const STATIC_BODY_TAG = /\b(tall female|petite|slender|curvy|voluptuous|flat che
 /** 以衣物名词判槽位，颜色与面料是开放词表。账本没有该层时仍容许导演提供该件衣物。 */
 function wardrobeOwnsTag(tag: string, wardrobe: CharacterWardrobe | undefined): boolean {
   if (!wardrobe || tag.includes('#') || ACTION_TOUCH_TAG.test(tag)) return false;
+  if (/\b(?:underwear|lingerie)$/i.test(tag)) return Boolean(wardrobe.outer || wardrobe.top || wardrobe.bottom || wardrobe.innerTop || wardrobe.innerBottom);
   if (/\b(?:bra|bralette|brassiere|bikini top)$/i.test(tag)) return Boolean(wardrobe.outer || wardrobe.top || wardrobe.innerTop);
   if (/\b(?:panties|briefs|thong)$/i.test(tag)) return Boolean(wardrobe.bottom || wardrobe.innerBottom || ONEPIECE_GARMENT.test(wardrobe.top?.tag ?? ''));
   if (/\b(?:shirt|tee|blouse|sweater|turtleneck|camisole|tank top|dress|nightgown|robe|coat|jacket|blazer|hoodie|cardigan|hanfu)$/i.test(tag)) return Boolean(wardrobe.outer || wardrobe.top);
@@ -203,6 +204,15 @@ function wardrobeOwnsTag(tag: string, wardrobe: CharacterWardrobe | undefined): 
   return false;
 }
 const ACTION_TOUCH_TAG = /\b(hand|hands|holding|touching|grabbing|pulling|lifting|unbuttoning|pressed|against|around|on her|on his)\b/i;
+
+/** 补充性着装从句交给本格衣层，保留道具归属、动作和相邻的独立句。 */
+function trimWardrobeAside(text: string, wardrobe: CharacterWardrobe | undefined): string {
+  if (!wardrobe || !text) return text;
+  const wearing = (clothing: string) => wardrobeOwnsTag(clothing.trim(), wardrobe);
+  const withoutLead = text.replace(/^(?:wearing|dressed in) ([^,.;!?]+),\s*/i, (part, clothing: string) => wearing(clothing) ? '' : part);
+  return withoutLead.replace(/,?\s+(?:while wearing|wearing|dressed in) ([^,.;!?]+)(?=[,.;!?]|$)/gi, (part, clothing: string, offset: number) =>
+    wearing(clothing) && !/\b(?:is|was|are|were)$/i.test(withoutLead.slice(0, offset).trim()) ? '' : part);
+}
 
 export function stripLeakedAppearance(tags: string[], hasLibraryEntry: boolean): string[] {
   return tags.filter(tag => {
@@ -267,6 +277,7 @@ interface ResolvedSlot {
   tag: string;
   status: SlotWearStatus;
   halfTag?: string;
+  reveal?: 'none' | 'layer';
 }
 
 /**
@@ -285,7 +296,7 @@ function resolveSlot(
   const tag = base?.tag ? [base.tag, base.condition].filter(Boolean).join(', ') : '';
   const halfTag = (override?.halfTag || base?.halfTag || '').trim();
   if (!tag && !(status === 'off' && (key === 'innerTop' || key === 'innerBottom'))) return null;
-  return { tag, status, ...(halfTag ? { halfTag } : {}) };
+  return { tag, status, halfTag, reveal: override ? undefined : base?.reveal };
 }
 
 /**
@@ -316,14 +327,13 @@ export function compileWardrobeForFrame(
   // 连身衣（道袍/汉服/连身裙/旗袍/和服）：只有上装一条记录，但上下可能分别半脱。
   // half_top=只解领口（上身露、下身还被长摆盖着），half_bottom=只掀裙摆（下身露、上身还穿着）。
   const isOnePiece = Boolean(top?.tag && ONEPIECE_GARMENT.test(top.tag));
-  const topHalfSide = top ? halfSide(top.status, top.halfTag, isOnePiece) : 'none';
 
   const outer = resolveSlot(wardrobe, wearState, 'outer');
   const shoes = resolveSlot(wardrobe, wearState, 'shoes');
   const styledOpen = (slot: ResolvedSlot | null) =>
     Boolean(slot && /\b(?:open[- ]front|open (?:coat|jacket|blazer)|worn open)\b/i.test(slot.tag));
-  const outerOpen = !outer || outer.status !== 'on' || styledOpen(outer);
-  const coat = outer && outer.status !== 'off' ? outer : top;
+  const outerOpen = canSeeNextLayer(outer, 'top') || styledOpen(outer);
+  const coat = outer?.status === 'on' ? outer : top;
   const closedCoat = coat?.status === 'on' && /\b(?:trench coat|overcoat)\b/i.test(coat.tag)
     && !styledOpen(coat) && !/\b(?:open|unzipped|unbuttoned|sheer|transparent|cutout)\b/i.test(coat.tag);
   if (outer && outer.status !== 'off') {
@@ -351,7 +361,7 @@ export function compileWardrobeForFrame(
   }
 
   // 上身是否露出：外装不在原位，且这一帧确实是「上身」半脱（half_bottom 只掀裙摆时不算）。
-  const upperOpen = !top || top.status === 'off' || topHalfSide === 'top' || topHalfSide === 'both';
+  const upperOpen = canSeeNextLayer(top, 'top', isOnePiece);
 
   // 只有「确实有上装或内衣记录，且外装不在原位」时才判定露出：完全没有装备记录时
   // 不该替模型断言她裸着（首次出场还没建表，那一格由正文与导演的 outfit 决定）。
@@ -373,10 +383,10 @@ export function compileWardrobeForFrame(
 
   // 下装（连身衣没有 bottom 记录时，状态跟着上装，但只有下身半脱/全脱才判露出）
   const bottom: ResolvedSlot | null =
-    bottomRaw ?? (isOnePiece && top ? { tag: '', status: top.status, halfTag: top.halfTag } : null);
+    bottomRaw ?? (isOnePiece && top ? { ...top, tag: '' } : null);
   const bottomStatus = bottom?.status ?? null;
-  const hemOpen = !isOnePiece || top?.status === 'off' || topHalfSide === 'bottom' || topHalfSide === 'both';
-  const lowerOpen = hemOpen && bottomStatus !== 'on';
+  const hemOpen = !isOnePiece || canSeeNextLayer(top, 'bottom', true);
+  const lowerOpen = hemOpen && (bottomRaw ? canSeeNextLayer(bottomRaw, 'bottom') : true);
 
   if (hemOpen && bottom?.tag && bottomStatus === 'on') {
     push(bottom.tag);
@@ -420,6 +430,19 @@ function finishWardrobe(positive: string[], negatives: string[]): CompiledWardro
   return { positive: dedupeTags(positive), negatives: dedupeTags(safe) };
 }
 
+/** 意图明确的敞开与真正露出下摆才透过一层；滑落半边、卷袖、开一颗扣子仍会遮住内搭。 */
+function canSeeNextLayer(slot: ResolvedSlot | null, region: 'top' | 'bottom', onePiece = false): boolean {
+  if (!slot || slot.status === 'off') return true;
+  if (slot.status === 'on' || slot.reveal === 'none') return false;
+  const side = halfSide(slot.status, slot.halfTag, onePiece);
+  if (side !== 'both' && side !== region) return false;
+  if (slot.reveal === 'layer') return true;
+  const wear = slot.halfTag ?? '';
+  return region === 'top'
+    ? /\b(?:open front|front open|fully unbuttoned|fully unzipped|lifted above (?:the )?chest|pulled (?:down below|up above) (?:her |his |the )?(?:bust|chest)|revealing (?:her |his |the )?(?:bra|camisole|shirt))\b/i.test(wear)
+    : /\b(?:(?:skirt|dress|robe|hem) (?:lift|lifted|raised|hiked up)|(?:above|over) (?:her |his |the )?hips|revealing (?:her |his |the )?panties)\b/i.test(wear);
+}
+
 /** 半脱状态（含连身衣的上下半脱）。 */
 export function isHalfStatus(status: string | null | undefined): boolean {
   return status === 'half' || status === 'half_top' || status === 'half_bottom';
@@ -461,7 +484,7 @@ function guardrailNegatives(world: WorldAnchorConfig | undefined, positive: stri
 }
 
 const SHOT_SCALE = /^(?:medium shot|medium close-up|upper body|portrait|close[- ]?up|face focus|cowboy shot|full shot|full body|wide shot|long shot)$/i;
-const LOCAL_FOCUS = /^(?:lower body|foot focus|feet focus|ankle focus|hand focus|leg focus|thigh focus)$/i;
+const LOCAL_FOCUS = /^(?:lower body|foot focus|feet focus|ankle focus|hand focus|leg focus|thigh focus|face focus|upper body focus)$/i;
 const FULL_POSE = /\b(?:(?:the |straddle |middle |front |side )splits?|m[- ](?:shaped (?:split|pose)|legs)|grabbing (?:own|both|her own|his own) ankles)\b/i;
 const DISTANT_DETAIL = /^(?:sanpaku|long eyelashes|mole (?:on|under|beside) (?:neck|mouth|eye|lip|nose|chin))$/i;
 
@@ -496,7 +519,7 @@ export function assembleImageCharacters(
   visualSubjects = true,
 ): ImageInsertion {
   if (visualSubjects) image = resolveVisualSubjects(image, entriesAtPos);
-  const tag = fitShotToPose(image);
+  const tag = visualSubjects ? fitShotToPose(image) : image.tag;
   const upperOnly = isUpperOnlyShot(tag);
   const shoesHidden = SHOES_HIDDEN_SHOT.test(tag) && !/\b(?:feet|foot|ankle|shoe) focus\b/i.test(tag);
   const distant = splitTags(tag).some(t => /^(?:full body|full shot|wide shot|long shot)$/i.test(t));
@@ -522,11 +545,15 @@ export function assembleImageCharacters(
     const frameTags = dropLocalizedMarkers(splitTags(character.tag));
     const eyesClosed = frameTags.some(tag => /^closed eyes$/i.test(tag));
     const focus = [image.tag, image.nl, character.tag, character.nl].join(', ').toLowerCase();
+    const frameBand = ageBand(character.frameAge);
+    const archivedBand = ageBand(profileAge(entry));
+    const differentAge = frameBand && archivedBand && frameBand !== archivedBand;
     const fixedTags = buildFixedAppearanceTags(entry, character.omitFeatures)
-      .filter(t => !visualSubjects || (!RELATION_TAG.test(t) && (!ageBand(t) || character.frameAge === undefined || ageBand(t) === ageBand(character.frameAge))))
+      .filter(t => !visualSubjects || (!RELATION_TAG.test(t)
+        && (!frameBand || !ageBand(t) || ageBand(t) === frameBand)))
+      .filter(t => !differentAge || !STATIC_BODY_TAG.test(t))
       .filter(t => !distant || !DISTANT_DETAIL.test(t) || focus.includes(t.toLowerCase()))
       .filter(tag => !eyesClosed || !/^(?:narrowed eyes|half-closed eyes|wide-eyed|open eyes)$/i.test(tag));
-    if (character.frameAge && !fixedTags.some(t => ageBand(t) === ageBand(character.frameAge))) fixedTags.push(character.frameAge);
     const hasLibraryEntry = Boolean(entry);
     const wardrobe = wardrobes.get(character.name);
     const compiled = compileWardrobeForFrame(wardrobe, character.wearState, upperOnly);
@@ -549,7 +576,7 @@ export function assembleImageCharacters(
     const negativeParts = [
       ...splitTags(character.uc ?? ''),
       ...compiled.negatives,
-      ...buildSelfAntiDriftNegative(entry).filter(tag => !affirms(tag)),
+      ...(differentAge ? [] : buildSelfAntiDriftNegative(entry).filter(tag => !affirms(tag))),
       ...guardrailNegatives(world, visiblePositive),
       ...(heightGap ? PROPORTION_GUARDRAILS : []),
     ];
@@ -570,11 +597,17 @@ export function assembleImageCharacters(
     const result: ImageCharacterPrompt = {
       name: character.name,
       tag: visiblePositive.join(', '),
-      nl: image.nl && image.nl.trim() === character.nl.trim() ? '' : character.nl,
+      nl: image.nl && image.nl.trim() === character.nl.trim() ? '' : visualSubjects ? trimWardrobeAside(character.nl, wardrobe) : character.nl,
     };
     if (mergedUc) result.uc = mergedUc;
     return result;
   });
 
-  return { ...image, tag, characters };
+  const allCostumesKnown = femaleIndexes.length && femaleIndexes.every(index => wardrobes.has(image.characters[index].name));
+  const baseTag = visualSubjects && allCostumesKnown
+    ? splitTags(tag).filter(t => !femaleIndexes.some(index => wardrobeOwnsTag(t, wardrobes.get(image.characters[index].name)))).join(', ')
+    : tag;
+  const soloWardrobe = image.characters.length === 1 ? wardrobes.get(image.characters[0].name) : undefined;
+  const nl = visualSubjects ? trimWardrobeAside(image.nl, soloWardrobe) : image.nl;
+  return { ...image, tag: baseTag, nl, characters };
 }

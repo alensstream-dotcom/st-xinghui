@@ -1,5 +1,5 @@
 import { retainUnchangedTraits } from './visualIdentity';
-import { reviewContinuity } from './continuityReview';
+import { wardrobeEvidence } from './wardrobeEvidence';
 import { runChannelWithRetries } from './channelRetry';
 import { requestCompletion, requestViaMainApi, type ChatMsg } from '@/api/client';
 import { readBookMemory } from '@/autoTag/bookMemory';
@@ -16,7 +16,7 @@ import { beginGeneration, clearGeneration, consumeGeneration } from '@/autoTag/g
 import {
   autoTagProfile,
   buildAutoTagMessages,
-  FRAME_CONTACT_RULE,
+  CONTACT_PROMPT,
   buildUnifiedMessages,
   type UnifiedInput,
 } from '@/autoTag/prompt';
@@ -67,7 +67,6 @@ import { getTagGenChannel, isCurrentChatExcluded, settings, type ApiChannel } fr
 import { applyDetectedWorldPreset, readWorldAnchor, type WorldAnchorConfig } from '@/state/worldAnchor';
 import {
   BBI_OUTFIT_EXTRA_KEY,
-  WARDROBE_SLOT_KEYS,
   buildWardrobeText,
   makeWardrobeFloorDelta,
   readWardrobeFloorDelta,
@@ -77,7 +76,7 @@ import {
 } from '@/state/outfitState';
 import { captureFrame, FRAME_CONTINUITY_KEY, readFloorContinuity, type FrameContinuity, type FloorContinuity } from './frameContinuity';
 import { allocateNewProfileFaces, traitCandidateBlock } from '@/state/traitPool';
-import { compileWardrobeSequence, completeGarmentColor } from '@/autoTag/wardrobeSequence';
+import { compileWardrobeSequence } from '@/autoTag/wardrobeSequence';
 
 const processed = new Set<string>();
 const running = new Map<string, AbortController>();
@@ -321,16 +320,11 @@ async function runUnifiedPass(params: {
     else plan.changes.push(prior);
   }
   for (const update of plan.wardrobeUpdates) {
-    if (update.mode !== 'replace') continue;
+    if (update.mode !== 'replace' || wardrobesBefore.has(update.name)
+      || wardrobeEvidence(update, params.segments, plan.timeJump).motion) continue;
     const matches = params.reuseOutfits?.filter(prior => prior.mode === 'replace' && prior.name === update.name
       && prior.position === update.position && prior.step === update.step);
-    if (matches?.length !== 1) continue;
-    const restored = { ...matches[0].slots };
-    for (const key of WARDROBE_SLOT_KEYS) {
-      const slot = restored[key];
-      if (slot?.tag) restored[key] = { ...slot, tag: completeGarmentColor(slot.tag, update.slots[key]?.tag) };
-    }
-    update.slots = restored;
+    if (matches?.length === 1) update.slots = matches[0].slots;
   }
   const canonical = new Map<string, Set<string>>();
   const nameKey = (name: string) => name.normalize('NFKC').trim().toLowerCase();
@@ -348,25 +342,9 @@ async function runUnifiedPass(params: {
   for (const update of plan.wardrobeUpdates) update.name = canonicalName(update.name);
   for (const shot of plan.images) for (const character of shot.characters) character.name = canonicalName(character.name);
   if (params.captureFrames) {
-    try {
-      // 复用导演看过的角色卡、世界书和相关前文。复核不需要重复导演规范或抽卡包。
-      const sources = messages.slice(1, -2).filter(m => m.role === 'system').map(m => m.content);
-      const materials = messages.at(-1)?.content ?? '';
-      const prior = materials.split('【上一楼及之前的上下文（只读参考，不要重写它的剧情）】')[1]?.split('【上一楼结尾装备表')[0] ?? '';
-      await reviewContinuity({ plan, before: wardrobesBefore, entries: params.entries, segments: params.segments,
-        retainedNames: new Set(params.reuseNew?.map(change => change.name)),
-        context: [...sources, input.memoryText, prior].join('\n'),
-        ask: notes => dispatchLlm(notes, params.channel, { signal: params.signal, source: '连续性复核(第 ' + params.floor + ' 楼)' }),
-      });
-    } catch (error) {
-      if (params.signal.aborted) throw error;
-      console.warn('[星绘] 连续性复核未完成', error);
-      toastr.warning('连续性复核未完成；本楼使用首次分析结果。', '星绘');
-    }
-    if (params.signal.aborted || getContext()?.getCurrentChatId?.() !== params.chatId) throw new DOMException('聊天已切换', 'AbortError');
+    retainUnchangedTraits(plan.changes, params.entries, new Map(params.segments.map(segment => [segment.id, segment.text])));
+    allocateNewProfileFaces(plan.changes, params.entries, world.presetId);
   }
-  retainUnchangedTraits(plan.changes, params.entries);
-  allocateNewProfileFaces(plan.changes, params.entries, world.presetId);
   const positionedOps = params.opsResolver(plan.changes);
   // 换装按 position 逐图生效：带 position 的 update 只对 sourceLine 不早于它的图片生效，
   // 省略 position 的从楼首起生效。这样「P10 进房间换女仆装」不会把 P2 那张旧衣裳的图
@@ -374,10 +352,11 @@ async function runUnifiedPass(params: {
   const sequence = compileWardrobeSequence(wardrobesBefore, plan.wardrobeUpdates, plan.images, (shot, wardrobe) => {
     const entries = entriesAtPosition(params.entries, positionedOps, shot.sourceLine, params.lockedNames);
     return {
-      image: assembleImageCharacters(shot, entries, wardrobe, world, Boolean(params.captureFrames)),
+      image: assembleImageCharacters(shot, entries, wardrobe, world, params.captureFrames),
       frame: params.captureFrames ? captureFrame(shot, entries, wardrobe) : undefined,
     };
-  }, plan.timeJump);
+  }, params.captureFrames ? { segments: params.segments, timeJump: plan.timeJump,
+    knownNames: [...knownNames, ...plan.changes.map(change => change.name)] } : undefined);
   const assembledImages = sequence.frames.map(item => item.image);
   const frames = sequence.frames.flatMap(item => item.frame ?? []);
   const wardrobeUpdates = sequence.updates;
@@ -574,7 +553,7 @@ async function runForFloor(floor: number, opts: RunOptions = {}): Promise<void> 
         anchors.text,
         slot ? [
           buildSlotTaskNote(rawSource, slot.seq),
-          ...(profile.naiCharPrompts ? [FRAME_CONTACT_RULE] : []),
+          ...(profile.naiCharPrompts && !profile.comic ? [CONTACT_PROMPT] : []),
           ...(previousFrame ? [
             '当前镜头在 ' + previousFrame.position + '。本格的外貌和衣物由插件按原镜头补齐，角色 tag 只写动作表情；英文只补此刻可见的信息。共享关系写一次。',
             buildWardrobeText(new Map(previousFrame.wardrobes.map(item => [item.name, item]))),
@@ -718,7 +697,9 @@ async function runForFloor(floor: number, opts: RunOptions = {}): Promise<void> 
         } else if (plan && previousFrame) {
           const wardrobe = new Map(previousFrame.wardrobes.map(item => [item.name, item]));
           plan.images = plan.images.map(image => assembleImageCharacters({
-            ...image, characters: image.characters.map(({ wearState, ...c }) => ({ ...c, frameAge: previousFrame.ages?.[c.name] })),
+            ...image, characters: image.characters.map(({ wearState, ...character }) => ({
+              ...character, frameAge: previousFrame.ages?.[character.name.toLowerCase()],
+            })),
           }, previousEntries, wardrobe, world));
         }
       } catch (error) {

@@ -1,13 +1,11 @@
+import { describe, expect, it } from 'vitest';
 import { assembleImageCharacters } from '@/autoTag/assemblePrompt';
-import { reviewContinuity } from '@/autoTag/continuityReview';
-import { retainUnchangedTraits } from '@/autoTag/visualIdentity';
 import { prepareTargetText } from '@/autoTag/clean';
 import { parseUnifiedPlan } from '@/autoTag/protocol';
 import { compileWardrobeSequence } from '@/autoTag/wardrobeSequence';
-import { serializeImageTag, parseImageTagContent } from '@/st/imageTagRegex';
 import { emptyCharFields, type CharTagEntry } from '@/state/charTags';
-import type { CharacterWardrobe } from '@/state/outfitState';
-import { describe, expect, it } from 'vitest';
+import { type CharacterWardrobe } from '@/state/outfitState';
+import { parseImageTagContent, parseImageTags, serializeImageTag } from '@/st/imageTagRegex';
 
 import {
   applyVibes,
@@ -685,66 +683,78 @@ describe('内置画师串配方(只读、随版本更新、不进 settings)', ()
   });
 });
 
-describe('从正文位置、档案和服装事件到 NovelAI 实际请求', () => {
+describe('镜头编译后的 NovelAI 请求', () => {
   const person = (name: string, hair: string, body: string): CharTagEntry => ({
-    name, fields: { ...emptyCharFields(), hair, body, sex: '1girl', outfit: 'old wedding dress' },
-    raw: '', nl: '', source: 'manual', desc: '', history: [],
+    name, source: 'ai', desc: '', raw: '', nl: '', history: [],
+    fields: { ...emptyCharFields(), sex: '1girl', hair, body },
   });
-  for (const band of ['adult', 'child', null] as const) {
-    it('尊重已知成年、确为孩子和年龄未知三种女儿：' + band, async () => {
-      const entries = [person('甲', 'black hair, low bun', 'mature female'), person('乙', 'black hair, side braid', 'flat chest')];
-      const before = new Map<string, CharacterWardrobe>([['乙', { name: '乙', outer: { tag: 'beige trench coat', status: 'on' },
-        top: { tag: 'black turtleneck', status: 'on' }, innerTop: { tag: 'red bra', status: 'on' } }]]);
-      const segments = prepareTargetText('母亲走到玄关。\n女儿握住她的手。\n她后来脱下风衣。', []).segments;
-      const plan = parseUnifiedPlan(JSON.stringify({ images: [{ position: 'P2', tag: '2girls, medium shot',
-        nl: 'The little girl holds her mother.', characters: [{ name: '乙', tag: 'daughter, little girl, purple cashmere sweater, embroidered lace bra, source#holding hands' },
-        { name: '甲', tag: 'target#holding hands' }] }], wardrobeUpdates: [
-          { name: '乙', mode: 'swap', position: 'P1', slots: { top: { tag: 'purple cashmere sweater', status: 'on' } } },
-          { name: '乙', mode: 'patch', position: 'P2', slots: { outer: { status: 'off' } } },
-        ] }), segments, 0, 2);
-      await reviewContinuity({ plan, before, entries, segments, context: '', ask: async () => JSON.stringify({
-        at: [null, 'P3'], ages: [band, 'adult'], fixes: [{ index: 0, nl: '@{乙} holds the hand of @{甲}.' }],
-      }) });
-      const result = compileWardrobeSequence(before, plan.wardrobeUpdates, plan.images, (shot, state) =>
-        assembleImageCharacters(shot, entries, state), plan.timeJump);
-      expect(result.updates.map(u => u.position)).toEqual(['P3']);
-      const saved = parseImageTagContent(serializeImageTag(result.frames[0]));
-      for (const model of ['nai-diffusion-4-5-full', 'nai-diffusion-5-full'] as const) {
-        const params = buildNaiParameters(nai({ model }), { prompt: saved.tag, nl: saved.nl, characters: saved.characters, seed: 12 });
-        const caption = (params.v4_prompt as { caption: { base_caption: string; char_captions: { char_caption: string }[] } }).caption;
-        const who = band === 'adult' ? 'woman' : band === 'child' ? 'child' : 'person';
-        expect(caption.base_caption).toContain('the ' + who + ' with a side braid holds the hand of the woman with a low bun');
-        const daughter = caption.char_captions[0].char_caption;
-        expect(daughter).toMatch(/flat chest.*beige trench coat.*black turtleneck visible at collar/);
-        expect(daughter).not.toMatch(/daughter|little girl|red bra|wedding dress|purple cashmere sweater|embroidered lace bra/);
-        if (band) expect(daughter.split(', ')).toContain(band);
-        else expect(daughter).not.toMatch(/adult|child/);
-      }
+  const entries = [person('段明星', 'brown hair, low bun', 'mature female, curvy'),
+    person('段兰', 'black hair, parted bangs', 'adult, flat chest')];
+  const before = new Map<string, CharacterWardrobe>([['段兰', {
+    name: '段兰', outer: { tag: 'beige trench coat', status: 'on' }, top: { tag: 'white shirt', status: 'on' },
+    innerTop: { tag: 'red bra', status: 'on' }, shoes: { tag: 'black boots', status: 'on' },
+  }]]);
+  function compile(text: string, images: object[]) {
+    const segments = prepareTargetText(text, []).segments;
+    const plan = parseUnifiedPlan(JSON.stringify({ timeJump: 'same_day', images }), segments, 0, 4, { femaleScenesOnly: true });
+    return compileWardrobeSequence(before, plan.wardrobeUpdates, plan.images, (shot, state) => assembleImageCharacters(shot, entries, state), {
+      segments, timeJump: plan.timeJump,
+    }).frames;
+  }
+  function payload(image: ReturnType<typeof compile>[number], model: NaiModel) {
+    const content = parseImageTagContent(parseImageTags(serializeImageTag(image))[0]);
+    const params = buildNaiParameters(nai({ model }), {
+      prompt: content.tag, nl: content.nl, characters: content.characters, seed: 7,
+    });
+    return (params.v4_prompt as {
+      caption: { base_caption: string; char_captions: Array<{ char_caption: string }> };
+    }).caption;
+  }
+
+  for (const model of ['nai-diffusion-4-5-full', 'nai-diffusion-5-full'] as const) {
+    it(model + ' 收到可见衣层、正确的动作两端和成年女儿', () => {
+      const [shot] = compile('段兰是段明星的女儿。段兰伸手用帕子轻擦段明星的嘴角。', [{
+        position: 'P1', tag: '2girls, medium shot, indoors',
+        nl: 'The little girl extends her arm toward her mother.',
+        contact: ['段兰', '段明星', 'pressing a cloth to her mouth', 'turning her mouth toward the cloth in the other woman’s hand'],
+        characters: [
+          { name: '段兰', tag: '@段兰, daughter, little girl, wiping mouth, target#wiping mouth, red bra, black boots',
+            nl: 'Wearing a red bra, she extends her right arm.' },
+          { name: '段明星', tag: 'mother, source#wiping mouth, sitting' },
+        ],
+      }]);
+      const sent = payload(shot, model);
+      expect(sent.base_caption).toMatch(/woman with black hair.*woman with brown hair/);
+      const [daughter, mother] = sent.char_captions.map(c => c.char_caption);
+      expect(daughter).toMatch(/adult, flat chest.*beige trench coat.*source#wiping mouth.*pressing a cloth to her mouth/);
+      expect(daughter.split(', ')).not.toContain('wiping mouth');
+      expect(daughter).not.toMatch(/daughter|little girl|red bra|black boots|@段兰/);
+      expect(mother).toMatch(/target#wiping mouth.*turning her mouth toward the cloth/);
     });
   }
-  it('普通单人镜头没有二次请求，局部身份变化保留独立分面', async () => {
-    const segments = prepareTargetText('甲回头。', []).segments;
-    const plan = parseUnifiedPlan(JSON.stringify({ images: [{ position: 'P1', tag: '1girl', characters: [{ name: '甲', tag: 'looking back' }] }],
-      changes: [{ name: '甲', field: 'body', value: 'toned', position: 'P1' }, { name: '甲', field: 'hair', value: 'short hair', position: 'P1' }] }), segments, 0, 1);
-    const entries = [person('甲', 'long black hair', 'adult, flat chest')];
-    await reviewContinuity({ plan, before: new Map(), entries, segments, context: '', ask: () => { throw Error('意外的复核调用'); } });
-    retainUnchangedTraits(plan.changes, entries);
-    expect(plan.changes.map(c => c.value)).toEqual(['toned, adult, flat chest', 'black hair, short hair']);
-  });
-});
 
-it('末图之后漏记的脱衣可补回，重复事件只写一次；复核格式无效时原计划完整', async () => {
-  const segments = prepareTargetText('甲站起。\n她脱下外套。', []).segments;
-  const before = new Map<string, CharacterWardrobe>([['甲', { name: '甲', outer: { tag: 'beige trench coat', status: 'on' } }]]);
-  const plan = parseUnifiedPlan(JSON.stringify({ images: [{ position: 'P1', tag: '1girl', characters: [{ name: '甲', tag: 'standing' }] }] }), segments, 0, 1);
-  const input = { plan, before, entries: [], segments, context: '' };
-  const original = JSON.stringify(plan);
-  await expect(reviewContinuity({ ...input, ask: async () => '{"at":["P333"],"ages":[]}' })).rejects.toThrow();
-  expect(JSON.stringify(plan)).toBe(original);
-  const missing = { name: '甲', mode: 'patch', position: 'P2', slots: { outer: { status: 'off' } } };
-  await reviewContinuity({ ...input, ask: async () => JSON.stringify({ at: [], ages: [], missing: [missing, missing] }) });
-  const result = compileWardrobeSequence(before, plan.wardrobeUpdates, plan.images, (_shot, state) => state.get('甲')!.outer!.status, 'same_day');
-  expect(result.frames).toEqual(['on']);
-  expect(result.updates).toHaveLength(1);
-  expect(result.updates[0].slots.outer).toMatchObject({ tag: 'beige trench coat', status: 'off' });
+  it('明确的童年镜头只调整该帧年龄，后面重逢仍取成年档案', () => {
+    const [past, present] = compile('回忆中，段兰十岁时和段明星一起看花。\n成年后的段兰再次回来。', [
+      { position: 'P1', tag: '2girls, medium shot', characters: [{ name: '段兰', tag: 'daughter, standing', age: 'child' }] },
+      { position: 'P2', tag: '1girl, medium shot', characters: [{ name: '段兰', tag: 'standing' }] },
+    ]);
+    expect(past.characters[0].tag).toContain('child');
+    expect(past.characters[0].tag).not.toMatch(/adult|flat chest/);
+    expect(present.characters[0].tag).toMatch(/adult, flat chest/);
+  });
+
+  it('跨度大的动作才扩景，局部意图、名额、画幅方向和章节顺序保留', () => {
+    const [wide, detail] = compile('段兰抓住自己的两个脚踝。\n她举起墨镜。', [
+      { position: 'P1', size: 'landscape', tag: '1girl, from side, medium shot',
+        extent: 'whole', characters: [{ name: '段兰', tag: 'grabbing own ankles' }] },
+      { position: 'P2', size: 'portrait', tag: '1girl, close-up, hand focus',
+        extent: 'detail', characters: [{ name: '段兰', tag: 'holding sunglasses' }] },
+    ]);
+    expect(wide.tag).toContain('full body');
+    expect(wide.tag).not.toContain('medium shot');
+    expect(wide.size).toBe('landscape');
+    expect(detail.tag).toContain('close-up, hand focus');
+    expect(detail.characters[0].tag).toContain('holding sunglasses');
+    expect(detail.position).toBe('P2');
+  });
 });

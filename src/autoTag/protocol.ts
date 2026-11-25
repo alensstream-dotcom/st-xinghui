@@ -14,11 +14,10 @@ import type {
   WardrobeSlotKey,
   WardrobeUpdate,
 } from '@/state/outfitState';
+import { hasAgeCue } from './visualIdentity';
 import { normaliseWardrobeUpdate, readWardrobeStep, WARDROBE_SLOT_KEYS } from '@/state/outfitState';
 
 export interface ImageCharacterPrompt {
-  /** Verified only for this frame; never serialized as a profile update. */
-  frameAge?: string;
   name: string;
   tag: string;
   nl: string;
@@ -41,14 +40,15 @@ export interface ImageCharacterPrompt {
    * 同一楼里第 1 张全穿、第 2 张半敞、第 3 张全脱、第 4 张再穿回，靠它逐帧表达；
    * 缺省的槽位一律沿用装备表的状态。装备描述本身不在这里写——它来自账本，写多了会打架。
    */
+  /** 正文在这一帧明确写出的年龄阶段，例如童年回忆。 */
+  frameAge?: string;
   wearState?: Partial<Record<WardrobeSlotKey, { status: SlotWearStatus; halfTag?: string }>>;
 }
 
 export interface ImageInsertion {
-  /** 只用于构图编译。局部特写和全身姿态有冲突时由导演标明。 */
-  extent?: 'whole' | 'detail';
   /** 同一 P 段内有多个状态时才指定。 */
   step?: number;
+  extent?: 'whole' | 'detail';
   /** 模型选择的目标正文位置 ID。 */
   position: string;
   /** 位置 ID 对应的原始物理行(0-based，仅插件内部使用)。 */
@@ -76,8 +76,6 @@ export interface ImagePlan {
 
 /** AI 输出的单条角色变更(宽松形状;解析后字段全部合法才保留)。 */
 export interface CharChange {
-  /** Only proposed for new originals, consumed before the profile is saved. */
-  faceOptions?: string[];
   name: string;
   /** 'new' = 建档;其余为字段名/整串/自然语言。 */
   field: CharTagHistoryField;
@@ -92,6 +90,7 @@ export interface CharChange {
   position: string;
   /** position 对应的原始物理行(0-based,仅插件内部使用)。 */
   sourceLine: number;
+  faceOptions?: string[];
 }
 
 const HISTORY_FIELDS: ReadonlySet<string> = new Set([
@@ -213,11 +212,13 @@ function sanitizeCharacters(value: unknown, imageIndex: number): ImageCharacterP
       const uc = sanitizeOptionalContent(item.uc, `characters[${index}].uc`, imageIndex);
       const omitFeatures = sanitizeOmitFeatures(item.omitFeatures);
       const wearState = sanitizeWearState(item.wearState);
+      const frameAge = typeof item.age === 'string' && /^(?:adult|teenager|child|elderly adult)$/.test(item.age) ? item.age : undefined;
       if (name && tag) {
         characters.push({
           name,
           tag,
           nl,
+          ...(frameAge ? { frameAge } : {}),
           ...(uc ? { uc } : {}),
           ...(omitFeatures.length ? { omitFeatures } : {}),
           ...(Object.keys(wearState).length ? { wearState } : {}),
@@ -289,7 +290,7 @@ function bindFrameContact(characters: ImageCharacterPrompt[], raw: unknown): voi
   if (!Array.isArray(raw) || raw.length !== 4 || !raw.every(v => typeof v === 'string')) return;
   const [from, to, action, response] = raw.map(v => v.trim());
   if (!from || from === to || [action, response].some(cue =>
-    !/[a-z]/i.test(cue) || cue.length > 140 || /[<>#\r\n\u3400-\u9fff]/.test(cue))) return;
+    !/[a-z]/i.test(cue) || cue.length > 140 || /[<>#\r\n\u3400-\u9fff]/.test(cue.replace(/@\{[^{}\n]+\}/g, '')))) return;
   const actors = characters.filter(c => c.name === from);
   const receivers = characters.filter(c => c.name === to);
   if (actors.length !== 1 || receivers.length !== 1) return;
@@ -350,7 +351,7 @@ export function parseImagePlan(
     Math.max(0, Math.floor(Number(minImages)) || 0),
   );
   const positions = new Map(segments.map(segment => [segment.id, segment.sourceLine]));
-
+  const ageCues = new Map(segments.map(segment => [segment.id, hasAgeCue(segment.text)]));
   const images: ImageInsertion[] = [];
   for (let index = 0; index < rawImages.length; index += 1) {
     const item = rawImages[index];
@@ -369,13 +370,14 @@ export function parseImagePlan(
     const nl = sanitizeContent(entry.nl, 'nl', index);
     const negative = sanitizeContent(entry.negative ?? entry.negative_prompt, 'negative', index);
     const characters = sanitizeCharacters(entry.characters, index);
-    bindFrameContact(characters, entry.contact);
     // 兼容模型按习惯返回 orientation / aspect 键
     const size = normalizeOrientation(entry.size ?? entry.orientation ?? entry.aspect);
     if (rules.femaleScenesOnly && !hasNaiFemaleSubject(tag, characters)) continue;
     const step = readWardrobeStep(entry.step);
+    bindFrameContact(characters, entry.contact);
+    if (!ageCues.get(position)) for (const character of characters) delete character.frameAge;
     const extent = entry.extent === 'whole' || entry.extent === 'detail' ? entry.extent : undefined;
-    images.push({ position, sourceLine, ...(extent ? { extent } : {}), ...(step ? { step } : {}), tag, nl, negative, characters, size });
+    images.push({ position, sourceLine, ...(step ? { step } : {}), ...(extent ? { extent } : {}), tag, nl, negative, characters, size });
   }
 
   const limitedImages = images.slice(0, normalizedMax);

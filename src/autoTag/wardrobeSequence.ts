@@ -1,11 +1,13 @@
+import type { TargetSegment } from './clean';
+import { recoverExplicitWear, wardrobeEvidence } from './wardrobeEvidence';
 import type { ImageCharacterPrompt, ImageInsertion } from '@/autoTag/protocol';
 import {
   applyWardrobeUpdate,
   normaliseWardrobeUpdate,
+  type TimeJump,
   WARDROBE_SLOT_KEYS,
   type CharacterWardrobe,
   type GarmentSlot,
-  type TimeJump,
   type WardrobeSlotKey,
   type WardrobeUpdate,
 } from '@/state/outfitState';
@@ -100,24 +102,76 @@ export function compileWardrobeSequence<T>(
   updates: WardrobeUpdate[],
   shots: ImageInsertion[],
   compile: (shot: ImageInsertion, wardrobe: Map<string, CharacterWardrobe>) => T,
-  timeJump?: TimeJump,
+  narrative?: { segments: TargetSegment[]; timeJump: TimeJump; knownNames?: string[] },
 ): { frames: T[]; updates: WardrobeUpdate[] } {
   const state = new Map(before);
   const persisted: WardrobeUpdate[] = [];
   const frames: T[] = new Array(shots.length);
-  const ordered = updates.map(update => ({ ...update, sourceLine: update.position ? (update.sourceLine ?? 0) : -1 })).sort(compareMoments);
   const order = shots.map((shot, index) => ({ shot, index })).sort((a, b) => compareMoments(a.shot, b.shot));
+  const cast = [...new Set([...before.keys(), ...(narrative?.knownNames ?? []), ...updates.map(update => update.name),
+    ...shots.flatMap(shot => shot.characters.map(c => c.name))])];
+  const recovered = narrative ? recoverExplicitWear(narrative.segments, cast, updates) : [];
+  const ordered = [...updates, ...recovered].map(update => ({
+    ...update, sourceLine: update.position ? (update.sourceLine ?? 0) : -1,
+  })).sort(compareMoments);
   let cursor = 0;
 
   function apply(update: WardrobeUpdate): void {
     const slots = { ...update.slots };
     const previous = state.get(update.name);
     let mode = update.mode;
-    // 同日未定位的整套描述只可补空槽。新导演用 P1 表示开场真的换衣；
-    // 已落盘的旧记录仍按原 mode 回放，修复后的事件和图片使用同一份结果。
-    if (timeJump === 'same_day' && previous && !update.position && mode !== 'patch') {
-      mode = 'patch';
-      for (const key of WARDROBE_SLOT_KEYS) if (previous[key]) delete slots[key];
+    if (narrative) {
+      // 旧楼层会把外套写在 top、把单独鞋履写在 legs。对原件做 patch 时认回旧地址。
+      if (mode === 'patch' && previous) {
+        if (slots.outer && !previous.outer && !slots.top && !slots.outer.tag
+          && /\b(?:coat|jacket|blazer|cloak|cardigan)\b/i.test(previous.top?.tag ?? '')) {
+          slots.top = slots.outer;
+          delete slots.outer;
+        }
+        if (slots.shoes && !previous.shoes && !slots.legs && !slots.shoes.tag
+          && /\b(?:shoes?|boots?|sneakers?|heels?|slippers?|sandals?|loafers?)\b/i.test(previous.legs?.tag ?? '')
+          && !/\b(?:socks?|stockings?|thighhighs|pantyhose)\b/i.test(previous.legs?.tag ?? '')) {
+          slots.legs = slots.shoes;
+          delete slots.shoes;
+        }
+      }
+      const evidence = wardrobeEvidence(update, narrative.segments, narrative.timeJump, cast, previous);
+      if (mode === 'patch') {
+        for (const key of WARDROBE_SLOT_KEYS) {
+          const request = slots[key];
+          if (!request) continue;
+          const old = previous?.[key];
+          const statusCue = request.status === 'on' ? evidence.on(key) : request.status === 'off' ? evidence.off(key) : evidence.half(key);
+          if (!statusCue && !(evidence.condition(key) && request.condition !== undefined && request.status === old?.status)) {
+            delete slots[key];
+          } else if (request.condition !== undefined && !evidence.condition(key)) {
+            const { condition: _unsupported, ...wear } = request;
+            slots[key] = wear;
+          }
+        }
+      }
+      if (previous && mode !== 'patch' && !evidence.date && !evidence.whole) {
+        if (!evidence.replacement) {
+          // 补漏或补旧档缺失的主色。不会因为更换景别而替换已记录的衣物、穿法或鞋袜。
+          for (const key of WARDROBE_SLOT_KEYS) {
+            const old = previous[key], requested = slots[key];
+            if (!requested) continue;
+            if (!old && evidence.motion && requested.tag) continue;
+            const tag = old ? completeGarmentColor(old.tag, requested.tag) : undefined;
+            if (old && tag && tag !== old.tag && evidence.motion) slots[key] = { ...old, tag };
+            else delete slots[key];
+          }
+          mode = 'patch';
+        } else {
+          // 单件变化只改发生变化的槽位，不能让没列出的袜鞋和内搭消失。
+          mode = 'swap';
+          if (evidence.replacementSlots.length) for (const key of WARDROBE_SLOT_KEYS) {
+            if (!evidence.replacementSlots.includes(key)
+              && !(key === 'top' && !previous.outer && evidence.replacementSlots.includes('outer'))
+              && !(key === 'legs' && !previous.shoes && evidence.replacementSlots.includes('shoes'))) delete slots[key];
+          }
+        }
+      }
     }
     if (mode === 'patch') {
       for (const key of WARDROBE_SLOT_KEYS) {
@@ -145,6 +199,7 @@ export function compileWardrobeSequence<T>(
         if (update.name !== character.name || compareMoments(update, shot) !== 0) continue;
         for (const key of WARDROBE_SLOT_KEYS) if (update.slots[key]) delete slots[key];
       }
+      // 旧导演的镜头意见要和新事件过同一条正文检查，才能影响后续镜头。
       const legacy = normaliseWardrobeUpdate({ name: character.name, mode: 'patch', slots, position: shot.position, step: shot.step });
       if (legacy) apply({ ...legacy, sourceLine: shot.sourceLine });
     }

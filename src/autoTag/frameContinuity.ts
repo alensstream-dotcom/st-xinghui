@@ -25,7 +25,7 @@ export function captureFrame(
   wardrobes: Map<string, CharacterWardrobe>,
 ): FrameContinuity {
   const names = new Set(shot.characters.map(character => character.name));
-  const ages = Object.fromEntries(shot.characters.filter(c => typeof c.frameAge === 'string').map(c => [c.name, c.frameAge!]));
+  const ages = Object.fromEntries(shot.characters.filter(c => c.frameAge).map(c => [c.name.toLowerCase(), c.frameAge!]));
   return {
     ...(Object.keys(ages).length ? { ages } : {}),
     position: shot.position,

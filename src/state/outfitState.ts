@@ -38,7 +38,9 @@ export interface GarmentSlot {
   status: SlotWearStatus;
   /** 半脱时的具体动作词（"unbuttoned, open front" / "skirt lift"）。 */
   halfTag?: string;
-  /** 衣物本身的持续状况，如断肩带。空串表示已修复。 */
+  /** 半开时实际能否看到下一层；未指定时识别旧记录中明确的敞开/露出措辞。 */
+  reveal?: 'none' | 'layer';
+  /** 持续附着在这件衣物上的状态，空串表示清除。 */
   condition?: string;
 }
 
@@ -111,14 +113,15 @@ function normaliseSlot(raw: unknown, requireTag: boolean): GarmentSlot | null {
   if (requireTag && !tag) return null;
   const halfTag = typeof record.halfTag === 'string' ? record.halfTag.trim().replace(/[\r\n]+/g, ' ') : '';
   const half = status === 'half' || status === 'half_top' || status === 'half_bottom';
-  const parts = half ? halfTag.split(',').map(part => part.trim()).filter(Boolean) : [];
-  // 旧账本可能把断带和滑肩合写在 halfTag；只迁移明确的物理损坏。
+  const reveal = half && (record.reveal === 'none' || record.reveal === 'layer') ? record.reveal : undefined;
   const damage = /^(?:broken|snapped|torn) (?:shoulder |spaghetti )?straps?$/i;
+  const parts = half ? halfTag.split(',').map(part => part.trim()).filter(Boolean) : [];
   const wear = parts.filter(part => !damage.test(part)).join(', ');
   const condition = typeof record.condition === 'string'
     ? record.condition.trim().replace(/\s+/g, ' ').slice(0, 90)
     : parts.filter(part => damage.test(part)).join(', ') || undefined;
-  return { tag, status, ...(wear ? { halfTag: wear } : {}), ...(condition !== undefined ? { condition } : {}) };
+  return { tag, status, ...(wear ? { halfTag: wear } : {}), ...(reveal ? { reveal } : {}),
+    ...(condition !== undefined ? { condition } : {}) };
 }
 
 export function normaliseWardrobe(raw: unknown): CharacterWardrobe | null {
@@ -207,6 +210,7 @@ export function applyWardrobeUpdate(
           tag: patch.tag || previous?.tag || '',
           status: patch.status,
           condition: patch.condition ?? (update.mode === 'patch' ? previous?.condition : undefined),
+          reveal: patch.reveal ?? (update.mode === 'patch' && patch.status === previous?.status && !patch.halfTag ? previous?.reveal : undefined),
           ...(patch.status !== 'on' && patch.status !== 'off' && (patch.halfTag || (update.mode !== 'swap' && patch.status === previous?.status && previous?.halfTag))
             ? { halfTag: patch.halfTag || previous?.halfTag }
             : {}),
@@ -247,7 +251,8 @@ function describeSlot(label: string, slot: GarmentSlot | undefined): string | nu
   if (!slot) return null;
   const statusText = slot.status === 'half_top' ? '上身半开' : slot.status === 'half_bottom' ? '下摆提起' : slot.status === 'on' ? '穿着' : slot.status === 'off' ? '已脱' : '半脱';
   const detail = slot.halfTag ? `(${slot.halfTag})` : '';
-  return `${label}[${[slot.tag || '款式未知', slot.condition].filter(Boolean).join(', ')}|${statusText}${detail}]`;
+  const visibility = slot.reveal === 'layer' ? ' 内层明确可见' : slot.reveal === 'none' ? ' 内层遮住' : '';
+  return `${label}[${[slot.tag || '款式未知', slot.condition].filter(Boolean).join(', ')}|${statusText}${detail}${visibility}]`;
 }
 
 /** 喂给提示词的装备表文本。 */

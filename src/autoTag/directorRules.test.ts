@@ -46,22 +46,15 @@ describe('单通道系统提示词', () => {
     expect(prompt).toContain('平级互不让位');
   });
 
-  it('装备表三条确定性规则写清楚（穿回只回 on / half 必配 halfTag / 连身不补下装）', () => {
-    expect(prompt).toContain('穿回原来那件');
-    expect(prompt).toContain('half 必须配 halfTag');
-    expect(prompt).toContain('连身服饰');
-    expect(prompt).toContain('肚兜→"red halterneck camisole');
-    expect(prompt).toContain('永不改写');
-  });
-
-  it('同日可在正文明确换装时 replace、隔天主动 replace，且不再要求任何附加开关', () => {
-    expect(prompt).toContain('same_day');
-    expect(prompt).toContain('正文明确换装');
-    expect(prompt).toContain('new_day');
-    // 二级开关陷阱已删：模型只要发了 replace 就照做。
-    expect(prompt).not.toContain('explicitChange');
-    expect(prompt).toContain('同楼中途换装');
-    expect(prompt).toContain('position:"P10"');
+  it('只落有依据的位置，确认穿脱与遮挡的区别', () => {
+    expect(prompt).toContain('每次变化写实际发生的 P');
+    expect(prompt).toContain('明确整套更换或首次设定用 replace');
+    expect(prompt).toContain('换单件用 swap');
+    expect(prompt).toContain('只卷袖');
+    expect(prompt).toContain('reveal:"none"');
+    expect(prompt).toContain('确实露出下一层');
+    expect(prompt).toContain('发生在末图之后也记录');
+    expect(prompt).toContain('回家、原文仍穿同套时继承');
   });
 
   it('导演禁写清单包含人数、发色、瞳色、体型与服装词', () => {
@@ -87,10 +80,9 @@ describe('单通道系统提示词', () => {
     expect(prompt).toContain('禁默认夜间霓虹');
   });
 
-  it('机位轮换服从当前动作，连续动作取一个定格', () => {
+  it('景别与机位规则保留（pov 与第三人称互斥、轮换）', () => {
     expect(prompt).toContain('pov（女主默认 looking at viewer）');
-    expect(prompt).toContain('只在完整表现当前动作时变化机位与景别');
-    expect(prompt).toContain('一个已成立瞬间');
+    expect(prompt).toContain('连续两张或跨楼同体位必须换机位与景别');
     expect(prompt).toContain('男主整个人或上半身入镜一律第三人称禁 pov');
   });
 

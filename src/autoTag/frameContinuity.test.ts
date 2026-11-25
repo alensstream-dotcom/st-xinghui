@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { assembleImageCharacters, compileWardrobeForFrame } from './assemblePrompt';
 import { captureFrame, readFloorContinuity } from './frameContinuity';
 import { parseUnifiedPlan } from './protocol';
-import { compileWardrobeSequence, completeGarmentColor } from './wardrobeSequence';
+import { compileWardrobeSequence } from './wardrobeSequence';
 import { deriveWardrobes, makeWardrobeFloorDelta, type CharacterWardrobe } from '@/state/outfitState';
 import { prepareTargetText } from './clean';
 import { unifiedSystemPrompt } from './prompt';
@@ -29,7 +29,7 @@ describe('0.3.24 剧情连续性', () => {
     const result = replay({
       images: [image('P3'), image('P2', 1), image('P1')],
       wardrobeUpdates: [
-        { name: '甲', position: 'P2', step: 1, mode: 'patch', slots: { top: { status: 'half_top', tag: 'red dress', halfTag: 'open collar' } } },
+        { name: '甲', position: 'P2', step: 1, mode: 'patch', slots: { top: { status: 'half_top', tag: 'red dress', halfTag: 'open collar', reveal: 'layer' } } },
         { name: '甲', position: 'P2', step: 2, mode: 'patch', slots: { top: { status: 'on' } } },
       ],
     });
@@ -91,67 +91,93 @@ describe('0.3.24 剧情连续性', () => {
   });
 });
 
-describe('同件睡裙跨镜头的主色和断肩带', () => {
-  it('只给原件补主色，保留细节，不从黑蕾丝内搭借色或重染', () => {
-    expect(completeGarmentColor('nightgown, spaghetti straps', 'ivory nightgown')).toBe('ivory nightgown, spaghetti straps');
-    for (const prior of ['white nightgown', 'nightgown, white', 'cobalt nightgown']) {
-      expect(completeGarmentColor(prior, 'black ' + prior)).toBe(prior);
+describe('从正文到跨楼服装记录', () => {
+  const start: CharacterWardrobe = {
+    name: '甲', outer: { tag: 'beige trench coat', status: 'on' }, top: { tag: 'white shirt', status: 'on' },
+    innerTop: { tag: 'navy camisole', status: 'on' }, shoes: { tag: 'brown boots', status: 'on' },
+  };
+  const replayStory = (story: string, raw: object) => {
+    const segments = prepareTargetText(story, []).segments;
+    const plan = parseUnifiedPlan(JSON.stringify(raw), segments, 0, 8);
+    return compileWardrobeSequence(new Map([['甲', start]]), plan.wardrobeUpdates, plan.images, (shot, state) => ({
+      image: assembleImageCharacters(shot, [], state),
+      snapshot: captureFrame(shot, [], state),
+    }), { segments, timeJump: plan.timeJump, knownNames: plan.changes.map(c => c.name) });
+  };
+  const slot = (name: string, position: string, mode: string, slots: object) => ({ name, position, mode, slots });
+
+  it('挡下移步换装、想象脱衣和认错角色，只回放后面的实际变化', () => {
+    const result = replayStory('甲回到客厅。\n甲想脱下外套，暂时没动。\n乙脱下了外套。\n甲脱下外套。\n甲换上灰色衬衫。', {
+      images: [image('P5'), image('P2'), image('P1'), image('P3'), image('P4')],
+      wardrobeUpdates: [
+        slot('甲', 'P1', 'replace', { top: { tag: 'red dress', status: 'on' } }),
+        slot('甲', 'P2', 'patch', { outer: { status: 'off' } }),
+        slot('甲', 'P3', 'patch', { outer: { status: 'off' } }),
+        slot('甲', 'P4', 'patch', { outer: { status: 'off' }, top: { status: 'off' } }),
+        slot('甲', 'P5', 'replace', { top: { tag: 'grey shirt', status: 'on' }, innerTop: { tag: 'red bra', status: 'on' } }),
+      ],
+      changes: [{ name: '乙', field: 'new', position: 'P3', fields: { hair: 'black hair' } }],
+    });
+    expect(result.frames.map(f => f.image.position)).toEqual(['P5', 'P2', 'P1', 'P3', 'P4']);
+    expect(result.updates.map(u => u.position)).toEqual(['P4', 'P5']);
+    expect(result.frames[0].snapshot.wardrobes[0]).toMatchObject({
+      outer: { status: 'off' }, top: { tag: 'grey shirt', status: 'on' },
+      shoes: start.shoes, innerTop: start.innerTop,
+    });
+    for (const frame of result.frames.slice(1, 4)) {
+      expect(frame.snapshot.wardrobes[0]).toEqual(start);
     }
-    expect(completeGarmentColor('nightgown', 'black lace panties')).toBe('nightgown');
-    expect(completeGarmentColor('nightgown', 'nightgown, black lace panties')).toBe('nightgown');
+    expect(result.frames[4].image.characters[0].tag).toContain('white shirt');
   });
 
-  it('断肩带随衣物跨镜头和楼层；滑肩、掀裙、脱下、修复独立生效', () => {
-    const initial = { name: '甲', mode: 'replace', slots: {
-      top: { tag: 'nightgown, spaghetti straps', status: 'on' },
-      innerBottom: { tag: 'black lace panties', status: 'on' },
-    } };
-    const changes = [
-      { status: 'half_top', tag: 'ivory nightgown', halfTag: 'broken strap, slipping down' },
-      { status: 'half_bottom', halfTag: 'skirt lift' }, { status: 'off' }, { status: 'on' },
-      { status: 'on', condition: '' },
-    ];
-    const result = replay({ images: changes.map((_, i) => image('P2', i + 1)), wardrobeUpdates: [
-      initial, ...changes.map((top, i) => ({ name: '甲', mode: 'patch', position: 'P2', step: i + 1, slots: { top } })),
-    ] });
-    const tags = result.frames.map(frame => frame.tag);
-    expect(tags[0]).toMatch(/ivory nightgown.*broken strap.*slipping down/);
-    expect(tags[1]).toMatch(/ivory nightgown.*broken strap.*skirt lift.*black lace panties/);
-    expect(tags[1]).not.toContain('slipping down');
-    expect(tags[2]).not.toMatch(/nightgown|broken strap/);
-    expect(tags[3]).toContain('broken strap');
-    expect(tags[4]).not.toContain('broken strap');
-    const chat = [{ mes: '', name: 'AI', is_user: false, is_system: false,
-      extra: { bbiOutfitOps: makeWardrobeFloorDelta(result.updates.slice(0, -1), 0) } }];
-    expect(deriveWardrobes(chat).get('甲')?.top).toMatchObject({ tag: 'ivory nightgown, spaghetti straps', condition: 'broken strap', status: 'on' });
+  it('卷袖和解一粒扣子不透出下一层，明写露出才显示，末图之后扣回继承到下一楼', () => {
+    const result = replayStory('甲解开风衣。\n甲卷起衬衫袖口并松开衬衫第一颗扣子。\n甲把衬衫下摆提到胸上，露出贴身背心。\n甲把衬衫放下，重新扣好。', {
+      images: [image('P1'), image('P2'), image('P3')],
+      wardrobeUpdates: [
+        slot('甲', 'P1', 'patch', { outer: { status: 'half', halfTag: 'open front', reveal: 'layer' } }),
+        slot('甲', 'P2', 'patch', { top: { status: 'half', halfTag: 'rolled sleeves, collar ajar', reveal: 'none' } }),
+        slot('甲', 'P3', 'patch', { top: { status: 'half', halfTag: 'shirt lifted above chest', reveal: 'layer' } }),
+        slot('甲', 'P4', 'patch', { top: { status: 'on' } }),
+      ],
+    });
+    expect(result.frames.map(f => f.image.characters[0].tag.includes('navy camisole'))).toEqual([false, false, true]);
+    expect(result.frames[1].image.characters[0].tag).toContain('rolled sleeves');
+    const log = [{ name: '甲', mode: 'replace' as const, slots: { ...start } }, ...result.updates];
+    const chat = [{ mes: '', name: 'AI', is_system: false, is_user: false, extra: { bbiOutfitOps: makeWardrobeFloorDelta(log, 0) } }];
+    expect(deriveWardrobes(chat).get('甲')).toMatchObject({ top: { tag: 'white shirt', status: 'on' }, outer: { status: 'half' } });
+    expect(compileWardrobeForFrame(deriveWardrobes(chat).get('甲')).positive.join(', ')).not.toContain('navy camisole');
   });
-});
 
-it('同日无定位的外观复述保留已知槽；同日 P1 真换装、跨日新装均正常替换', () => {
-  for (const [day, position, keep] of [
-    ['same_day', undefined, true], ['same_day', 'P1', false], ['new_day', undefined, false],
-  ] as const) {
-    const plan = parseUnifiedPlan(JSON.stringify({ images: [{ ...image('P2'), extent: 'whole' }], timeJump: day,
-      wardrobeUpdates: [{ name: '甲', mode: 'replace', position, slots: { top: { tag: 'black sweater', status: 'on' } } }],
-    }), segments, 0, 1);
-    const result = compileWardrobeSequence(before, plan.wardrobeUpdates, plan.images, (shot, state) => {
-      expect(shot.extent).toBe('whole');
-      return state.get('甲')!;
-    }, plan.timeJump);
-    expect(result.frames[0].top?.tag).toBe(keep ? 'blue dress' : 'black sweater');
-    expect(Boolean(result.frames[0].innerBottom)).toBe(keep);
-    expect(result.updates).toHaveLength(keep ? 0 : 1);
-  }
-});
+  it('时间跳转只从明确的下一天位置起，明确穿昨日那套时仍继承', () => {
+    const event = (position: string) => slot('甲', position, 'replace', { top: { tag: 'olive dress', status: 'on' } });
+    const raw = { images: [image('P1'), image('P3')], timeJump: 'new_day', wardrobeUpdates: [event('P1'), event('P3')] };
+    const a = replayStory('甲离开客厅。\n次日清晨。\n甲在庭院走来。', raw);
+    expect(a.updates.map(u => u.position)).toEqual(['P3']);
+    expect(a.frames[0].snapshot.wardrobes[0]).toEqual(start);
+    expect(a.frames[1].snapshot.wardrobes[0].top?.tag).toBe('olive dress');
+    const b = replayStory('甲离开客厅。\n次日清晨。\n甲依旧穿着昨日的那件衣服。', raw);
+    expect(b.updates).toHaveLength(0);
+  });
 
-it('跨人擦拭按原名绑定持物者与嘴角，不依赖角色排列；错配的名字不污染其他人的动作', () => {
-  const characters = [{ name: '青年', tag: '1boy, faceless male, source#wiping mouth' },
-    { name: '贵妇', tag: 'wiping mouth, target#wiping mouth, sitting' }, { name: '旁人', tag: 'watching' }];
-  const contact = ['贵妇', '青年', 'pressing the handkerchief to his mouth', 'his cheek turned toward the cloth'];
-  const run = (link: string[]) => parseUnifiedPlan(JSON.stringify({ images: [{ ...image('P1'), characters, contact: link }] }), segments, 0, 1).images[0];
-  const result = assembleImageCharacters(run(contact), []).characters;
-  expect(result[0].tag).toBe('1boy, target#wiping mouth, his cheek turned toward the cloth');
-  expect(result[1].tag.split(', ')).toEqual(['source#wiping mouth', 'sitting', 'pressing the handkerchief to his mouth']);
-  expect(result[2].tag).toBe('watching');
-  expect(run(['错名', ...contact.slice(1)]).characters.map(c => c.tag)).toEqual(characters.map(c => c.tag));
+  it('补录导演遗漏的点名脱外套，并按旧楼层实际存放位置回放', () => {
+    const state: CharacterWardrobe = { name: '甲', top: { tag: 'beige trench coat', status: 'on' } };
+    const segments = prepareTargetText('甲脱下外套。\n甲端起杯子。\n甲穿回外套。', []).segments;
+    const plan = parseUnifiedPlan(JSON.stringify({ images: [image('P2')] }), segments, 0, 2);
+    const result = compileWardrobeSequence(new Map([['甲', state]]), plan.wardrobeUpdates, plan.images,
+      (_shot, wardrobe) => wardrobe.get('甲')?.top, { segments, timeJump: 'same_day' });
+    expect(result.frames[0]).toMatchObject({ tag: 'beige trench coat', status: 'off' });
+    expect(deriveWardrobes([{ mes: '', is_user: false, is_system: false, name: 'AI', extra: { bbiOutfitOps: makeWardrobeFloorDelta(result.updates, 0) } }])
+      .get('甲')?.top).toMatchObject({ tag: 'beige trench coat', status: 'on' });
+  });
+
+  it('持续损坏与穿法分开，放下领口保留损坏，修好才清除', () => {
+    const raw = { images: [image('P1'), image('P2'), image('P3')], wardrobeUpdates: [
+      slot('甲', 'P1', 'patch', { top: { status: 'on', condition: 'torn sleeve' } }),
+      slot('甲', 'P2', 'patch', { top: { status: 'half_top', halfTag: 'collar ajar', reveal: 'none' } }),
+      slot('甲', 'P3', 'patch', { top: { status: 'half_top', condition: '' } }),
+    ] };
+    const result = replayStory('甲扯破了衬衫。\n甲解开衬衫领口。\n甲缝好了衬衫。', raw);
+    expect(result.frames.map(f => f.snapshot.wardrobes[0].top?.condition)).toEqual(['torn sleeve', 'torn sleeve', '']);
+    expect(result.frames[2].snapshot.wardrobes[0].top).toMatchObject({ halfTag: 'collar ajar', reveal: 'none' });
+  });
 });
