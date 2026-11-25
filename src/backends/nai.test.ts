@@ -3,6 +3,7 @@ import { assembleImageCharacters } from '@/autoTag/assemblePrompt';
 import { prepareTargetText } from '@/autoTag/clean';
 import { parseUnifiedPlan } from '@/autoTag/protocol';
 import { compileWardrobeSequence } from '@/autoTag/wardrobeSequence';
+import { compactGeneratedScene } from '@/autoTag/sceneCompaction';
 import { emptyCharFields, type CharTagEntry } from '@/state/charTags';
 import { type CharacterWardrobe } from '@/state/outfitState';
 import { parseImageTagContent, parseImageTags, serializeImageTag } from '@/st/imageTagRegex';
@@ -694,10 +695,10 @@ describe('镜头编译后的 NovelAI 请求', () => {
     name: '段兰', outer: { tag: 'beige trench coat', status: 'on' }, top: { tag: 'white shirt', status: 'on' },
     innerTop: { tag: 'red bra', status: 'on' }, shoes: { tag: 'black boots', status: 'on' },
   }]]);
-  function compile(text: string, images: object[]) {
+  function compile(text: string, images: object[], wardrobeUpdates: object[] = []) {
     const segments = prepareTargetText(text, []).segments;
-    const plan = parseUnifiedPlan(JSON.stringify({ timeJump: 'same_day', images }), segments, 0, 4, { femaleScenesOnly: true });
-    return compileWardrobeSequence(before, plan.wardrobeUpdates, plan.images, (shot, state) => assembleImageCharacters(shot, entries, state), {
+    const plan = parseUnifiedPlan(JSON.stringify({ timeJump: 'same_day', images, wardrobeUpdates }), segments, 0, 4, { femaleScenesOnly: true, selectBeats: true });
+    return compileWardrobeSequence(before, plan.wardrobeUpdates, plan.images, (shot, state) => compactGeneratedScene(assembleImageCharacters(shot, entries, state)), {
       segments, timeJump: plan.timeJump,
     }).frames;
   }
@@ -712,6 +713,21 @@ describe('镜头编译后的 NovelAI 请求', () => {
   }
 
   for (const model of ['nai-diffusion-4-5-full', 'nai-diffusion-5-full'] as const) {
+    it(model + ' 同段前后请求分别呈现闭合及敞开的外套，只漏出下一层', () => {
+      const frame = (clause: number) => ({
+        position: 'P1', clause, tag: '1girl, medium shot, indoors',
+        characters: [{ name: '段兰', tag: 'standing, red bra' }],
+      });
+      const shots = compile('段兰进门，段兰敞开风衣。', [frame(1), frame(2)], [
+        { name: '段兰', position: 'P1', clause: 2, mode: 'patch',
+          slots: { outer: { status: 'half_top', reveal: 'layer', halfTag: 'open front' } } },
+      ]).map(shot => payload(shot, model).char_captions[0].char_caption);
+      expect(shots[0]).toContain('beige trench coat, closed coat');
+      expect(shots[0]).not.toMatch(/white shirt|red bra/);
+      expect(shots[1]).toContain('beige trench coat, open front, white shirt');
+      expect(shots[1]).not.toMatch(/closed coat|red bra/);
+    });
+
     it(model + ' 收到可见衣层、正确的动作两端和成年女儿', () => {
       const [shot] = compile('段兰是段明星的女儿。段兰伸手用帕子轻擦段明星的嘴角。', [{
         position: 'P1', tag: '2girls, medium shot, indoors',

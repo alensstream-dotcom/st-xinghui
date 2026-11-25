@@ -42,6 +42,8 @@ export interface GarmentSlot {
   reveal?: 'none' | 'layer';
   /** 持续附着在这件衣物上的状态，空串表示清除。 */
   condition?: string;
+  /** 鞋履只离脚一侧。half 继续兼容旧记录。 */
+  offSide?: 'left' | 'right';
 }
 
 /** patch 可以只给状态（穿回原件），tag 由运行期从旧账本取回。 */
@@ -65,6 +67,9 @@ export interface WardrobeUpdate {
   name: string;
   mode: 'replace' | 'patch' | 'swap';
   step?: number;
+  clause?: number;
+  /** 正文直接描写已经穿着的不同衣物，用于没有写换装过程的情况。 */
+  observed?: boolean;
   slots: Partial<Record<WardrobeSlotKey, GarmentPatch>>;
   /** 这次换装从哪个 P 编号开始生效；省略表示从楼首生效。 */
   position?: string;
@@ -105,12 +110,14 @@ function normaliseSlot(raw: unknown, requireTag: boolean): GarmentSlot | null {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
   const record = raw as Record<string, unknown>;
   const tag = typeof record.tag === 'string' ? stripTransientWear(record.tag.trim().replace(/[\r\n]+/g, ' ')) : '';
-  const status = typeof record.status === 'string' && STATUSES.includes(record.status as SlotWearStatus)
+  let status: SlotWearStatus | '' = typeof record.status === 'string' && STATUSES.includes(record.status as SlotWearStatus)
     ? (record.status as SlotWearStatus)
     : '';
   if (!status) return null;
   // replace 缺 tag 视为无效（没有衣服描述可存）；patch 缺 tag 合法，表示沿用旧指纹。
   if (requireTag && !tag) return null;
+  const offSide = record.offSide === 'left' || record.offSide === 'right' ? record.offSide : undefined;
+  if (offSide) status = 'half';
   const halfTag = typeof record.halfTag === 'string' ? record.halfTag.trim().replace(/[\r\n]+/g, ' ') : '';
   const half = status === 'half' || status === 'half_top' || status === 'half_bottom';
   const reveal = half && (record.reveal === 'none' || record.reveal === 'layer') ? record.reveal : undefined;
@@ -120,7 +127,7 @@ function normaliseSlot(raw: unknown, requireTag: boolean): GarmentSlot | null {
   const condition = typeof record.condition === 'string'
     ? record.condition.trim().replace(/\s+/g, ' ').slice(0, 90)
     : parts.filter(part => damage.test(part)).join(', ') || undefined;
-  return { tag, status, ...(wear ? { halfTag: wear } : {}), ...(reveal ? { reveal } : {}),
+  return { tag, status, ...(offSide ? { offSide } : {}), ...(wear ? { halfTag: wear } : {}), ...(reveal ? { reveal } : {}),
     ...(condition !== undefined ? { condition } : {}) };
 }
 
@@ -152,13 +159,17 @@ export function normaliseWardrobeUpdate(raw: unknown): WardrobeUpdate | null {
   if (!rawSlots || typeof rawSlots !== 'object' || Array.isArray(rawSlots)) return null;
   const slots: Partial<Record<WardrobeSlotKey, GarmentSlot>> = {};
   for (const key of WARDROBE_SLOT_KEYS) {
-    const slot = normaliseSlot((rawSlots as Record<string, unknown>)[key], mode !== 'patch' && key !== 'innerTop' && key !== 'innerBottom');
+    const rawSlot = (rawSlots as Record<string, unknown>)[key];
+    const slot = normaliseSlot(rawSlot, mode !== 'patch' && key !== 'innerTop' && key !== 'innerBottom');
+    if (slot && key !== 'shoes' && key !== 'legs') delete slot.offSide;
     if (slot && (mode === 'patch' || slot.tag || slot.status === 'off')) slots[key] = slot;
   }
   if (!Object.keys(slots).length) return null;
   const position = typeof record.position === 'string' ? record.position.trim().slice(0, 16) : '';
   const step = readWardrobeStep(record.step);
-  return { name, mode, slots, ...(step ? { step } : {}), ...(position ? { position } : {}) };
+  const clause = readWardrobeStep(record.clause);
+  return { name, mode, slots, ...(step ? { step } : {}), ...(clause ? { clause } : {}),
+    ...(record.observed === true ? { observed: true } : {}), ...(position ? { position } : {}) };
 }
 
 /**
@@ -209,6 +220,8 @@ export function applyWardrobeUpdate(
         next[key] = {
           tag: patch.tag || previous?.tag || '',
           status: patch.status,
+          ...(patch.offSide ? { offSide: patch.offSide } : update.mode === 'patch' && patch.status === 'half'
+            && !patch.halfTag && previous?.offSide ? { offSide: previous.offSide } : {}),
           condition: patch.condition ?? (update.mode === 'patch' ? previous?.condition : undefined),
           reveal: patch.reveal ?? (update.mode === 'patch' && patch.status === previous?.status && !patch.halfTag ? previous?.reveal : undefined),
           ...(patch.status !== 'on' && patch.status !== 'off' && (patch.halfTag || (update.mode !== 'swap' && patch.status === previous?.status && previous?.halfTag))
@@ -251,8 +264,9 @@ function describeSlot(label: string, slot: GarmentSlot | undefined): string | nu
   if (!slot) return null;
   const statusText = slot.status === 'half_top' ? '上身半开' : slot.status === 'half_bottom' ? '下摆提起' : slot.status === 'on' ? '穿着' : slot.status === 'off' ? '已脱' : '半脱';
   const detail = slot.halfTag ? `(${slot.halfTag})` : '';
+  const shoeSide = slot.offSide === 'left' ? ' 左脚未穿' : slot.offSide === 'right' ? ' 右脚未穿' : '';
   const visibility = slot.reveal === 'layer' ? ' 内层明确可见' : slot.reveal === 'none' ? ' 内层遮住' : '';
-  return `${label}[${[slot.tag || '款式未知', slot.condition].filter(Boolean).join(', ')}|${statusText}${detail}${visibility}]`;
+  return `${label}[${[slot.tag || '款式未知', slot.condition].filter(Boolean).join(', ')}|${statusText}${detail}${visibility}${shoeSide}]`;
 }
 
 /** 喂给提示词的装备表文本。 */

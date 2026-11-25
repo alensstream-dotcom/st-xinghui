@@ -14,6 +14,8 @@ import type {
   WardrobeSlotKey,
   WardrobeUpdate,
 } from '@/state/outfitState';
+import { compareStoryMoments, storyClause, storyClauses } from './storyMoment';
+import { readSceneBeat, selectStoryImages, type SceneBeat } from './sceneSelection';
 import { hasAgeCue } from './visualIdentity';
 import { normaliseWardrobeUpdate, readWardrobeStep, WARDROBE_SLOT_KEYS } from '@/state/outfitState';
 
@@ -49,6 +51,9 @@ export interface ImageInsertion {
   /** 同一 P 段内有多个状态时才指定。 */
   step?: number;
   extent?: 'whole' | 'detail';
+  clause?: number;
+  beat?: SceneBeat;
+  singleFrame?: boolean;
   /** 模型选择的目标正文位置 ID。 */
   position: string;
   /** 位置 ID 对应的原始物理行(0-based，仅插件内部使用)。 */
@@ -91,6 +96,7 @@ export interface CharChange {
   /** position 对应的原始物理行(0-based,仅插件内部使用)。 */
   sourceLine: number;
   faceOptions?: string[];
+  clause?: number;
 }
 
 const HISTORY_FIELDS: ReadonlySet<string> = new Set([
@@ -287,30 +293,41 @@ function sanitizeWearState(
 
 /** 在角色块仍有姓名时绑定同一个接触瞬间。旧导演或不完整关系沿用原角色块。 */
 function bindFrameContact(characters: ImageCharacterPrompt[], raw: unknown): void {
-  if (!Array.isArray(raw) || raw.length !== 4 || !raw.every(v => typeof v === 'string')) return;
-  const [from, to, action, response] = raw.map(v => v.trim());
-  if (!from || from === to || [action, response].some(cue =>
-    !/[a-z]/i.test(cue) || cue.length > 140 || /[<>#\r\n\u3400-\u9fff]/.test(cue.replace(/@\{[^{}\n]+\}/g, '')))) return;
-  const actors = characters.filter(c => c.name === from);
-  const receivers = characters.filter(c => c.name === to);
-  if (actors.length !== 1 || receivers.length !== 1) return;
-  const actor = actors[0], receiver = receivers[0];
-  const tags = (c: ImageCharacterPrompt) => c.tag.split(',').map(t => t.trim()).filter(Boolean);
-  const actorTags = tags(actor), receiverTags = tags(receiver);
-  const reversed = actorTags.filter(t => t.startsWith('target#') && receiverTags.includes('source#' + t.slice(7)))
-    .map(t => t.slice(7));
-  function bind(character: ImageCharacterPrompt, cue: string, role: 'source' | 'target', parts: string[]) {
-    const opposite = role === 'source' ? 'target#' : 'source#';
-    const directed = parts.map(t => t.startsWith(opposite) && reversed.includes(t.slice(7)) ? role + '#' + t.slice(7) : t);
-    const actions = directed.filter(t => t.startsWith(role + '#')).map(t => t.slice(7).toLowerCase());
-    const ownFace = role === 'target' && /\bhis (?:own |left |right )?(?:cheek|mouth|lips?|ear|face|jaw)\b/i.test(cue);
-    const kept = directed.filter(t => !actions.includes(t.toLowerCase()) && !(ownFace && /^faceless male$/i.test(t)));
-    if (parts.some(t => /^faceless male$/i.test(t)) && ownFace && !kept.some(t => /^(?:1?boy|male)$/i.test(t))) kept.unshift('boy');
-    if (!kept.some(t => t.toLowerCase() === cue.toLowerCase())) kept.push(cue);
-    character.tag = kept.join(', ');
+  if (!Array.isArray(raw)) return;
+  const contacts = Array.isArray(raw[0]) ? raw.slice(0, 3) : [raw];
+  const nameKey = (v: string) => v.normalize('NFKC').trim().toLowerCase();
+  for (const contact of contacts) {
+    if (!Array.isArray(contact) || contact.length < 4 || contact.length > 5 || !contact.every(v => typeof v === 'string')) continue;
+    const [from, to, action, response, key] = contact.map(v => v.trim());
+    if (!from || nameKey(from) === nameKey(to) || [action, response].some(cue =>
+      !/[a-z]/i.test(cue) || cue.length > 140 || /[<>#\r\n\u3400-\u9fff]/.test(cue.replace(/@\{[^{}\n]+\}/g, '')))) continue;
+    const actors = characters.filter(c => nameKey(c.name) === nameKey(from));
+    const receivers = characters.filter(c => nameKey(c.name) === nameKey(to));
+    if (actors.length !== 1 || receivers.length !== 1) continue;
+    const actor = actors[0], receiver = receivers[0];
+    const tags = (c: ImageCharacterPrompt) => c.tag.split(',').map(t => t.trim()).filter(Boolean);
+    const actorTags = tags(actor), receiverTags = tags(receiver);
+    const marker = (tag: string) => tag.match(/^(?:source|target|mutual)#(.+)$/i)?.[1].toLowerCase();
+    const shared = actorTags.map(marker).filter(word => word && receiverTags.some(t => word === marker(t)));
+    const directedKey = key && /^[a-z]+(?:[ -][a-z]+){0,2}$/i.test(key) ? key.toLowerCase()
+      : shared.length === 1 ? shared[0] : undefined;
+
+    function bind(character: ImageCharacterPrompt, cue: string, role: 'source' | 'target', parts: string[]) {
+      const visibleFace = role === 'target' && /\b(?:cheek|mouth|lips?|ear|face|jaw)\b/i.test(cue);
+      const kept = parts.filter(t => {
+        const word = t.toLowerCase();
+        if (visibleFace && word === 'faceless male') return false;
+        if (directedKey && (marker(t) === directedKey || word === directedKey)) return false;
+        return word !== cue.toLowerCase();
+      });
+      if (visibleFace && parts.some(t => /^faceless male$/i.test(t)) && !kept.some(t => /^(?:1?boy|male)$/i.test(t))) kept.unshift('boy');
+      if (directedKey) kept.push(role + '#' + directedKey);
+      kept.push(cue);
+      character.tag = kept.join(', ');
+    }
+    bind(actor, action, 'source', actorTags);
+    bind(receiver, response, 'target', receiverTags);
   }
-  bind(actor, action, 'source', actorTags);
-  bind(receiver, response, 'target', receiverTags);
 }
 
 function sanitizePosition(value: unknown, index: number): string {
@@ -340,7 +357,7 @@ export function parseImagePlan(
   segments: TargetSegment[],
   minImages: number,
   maxImages: number,
-  rules: { femaleScenesOnly?: boolean; knownMaleProfiles?: ReadonlySet<string> } = {},
+  rules: { femaleScenesOnly?: boolean; knownMaleProfiles?: ReadonlySet<string>; selectBeats?: boolean } = {},
 ): ImagePlan {
   const parsed = pickPlanObject(raw);
   if (!parsed) throw new Error('AI 返回的 JSON 缺少 images 数组');
@@ -351,7 +368,7 @@ export function parseImagePlan(
     Math.max(0, Math.floor(Number(minImages)) || 0),
   );
   const positions = new Map(segments.map(segment => [segment.id, segment.sourceLine]));
-  const ageCues = new Map(segments.map(segment => [segment.id, hasAgeCue(segment.text)]));
+  const source = new Map(segments.map(segment => [segment.id, segment.text]));
   const images: ImageInsertion[] = [];
   for (let index = 0; index < rawImages.length; index += 1) {
     const item = rawImages[index];
@@ -375,12 +392,23 @@ export function parseImagePlan(
     if (rules.femaleScenesOnly && !hasNaiFemaleSubject(tag, characters)) continue;
     const step = readWardrobeStep(entry.step);
     bindFrameContact(characters, entry.contact);
-    if (!ageCues.get(position)) for (const character of characters) delete character.frameAge;
+    const clause = storyClause(segments, position, entry.clause);
+    const text = source.get(position) ?? '';
+    const current = clause ? [storyClauses(text)[clause - 1] ?? ''] : storyClauses(text);
+    for (const character of characters) {
+      if (!character.frameAge) continue;
+      const ownAgeCue = current.some(part => hasAgeCue(part) && (part.includes(character.name)
+        || !characters.some(other => other.name !== character.name && part.includes(other.name))));
+      if (!ownAgeCue) delete character.frameAge;
+    }
+    const beat = rules.selectBeats ? readSceneBeat(entry.beat) : undefined;
     const extent = entry.extent === 'whole' || entry.extent === 'detail' ? entry.extent : undefined;
-    images.push({ position, sourceLine, ...(step ? { step } : {}), ...(extent ? { extent } : {}), tag, nl, negative, characters, size });
+    images.push({ position, sourceLine, ...(step ? { step } : {}), ...(clause ? { clause } : {}),
+      ...(extent ? { extent } : {}), ...(beat ? { beat } : {}), ...(entry.layout === 'sequence' ? { singleFrame: false } : {}),
+      tag, nl, negative, characters, size });
   }
 
-  const limitedImages = images.slice(0, normalizedMax);
+  const limitedImages = selectStoryImages(images, normalizedMax, normalizedMin);
   const noEligibleScene = rules.femaleScenesOnly && limitedImages.length === 0;
   if (!noEligibleScene && limitedImages.length < normalizedMin) {
     throw new Error(
@@ -390,7 +418,7 @@ export function parseImagePlan(
 
   return {
     images: limitedImages,
-    changes: parseChanges(parsed.changes, positions, rules.knownMaleProfiles),
+    changes: parseChanges(parsed.changes, positions, rules.knownMaleProfiles, segments),
   };
 }
 
@@ -484,6 +512,7 @@ function parseChanges(
   raw: unknown,
   positions: Map<string, number>,
   knownMaleProfiles?: ReadonlySet<string>,
+  segments: TargetSegment[] = [],
 ): CharChange[] {
   if (!Array.isArray(raw)) return [];
   const out: CharChange[] = [];
@@ -516,7 +545,8 @@ function parseChanges(
     if (!value && !nl) continue;
     const faceOptions = field === 'new' && Array.isArray(o.faceOptions)
       ? o.faceOptions.filter((v): v is string => typeof v === 'string' && v.length <= 64).slice(0, 8) : [];
-    out.push({ name, field, value, nl: nl || undefined, reason, position, sourceLine, ...(faceOptions.length ? { faceOptions } : {}) });
+    const clause = storyClause(segments, position, o.clause);
+    out.push({ name, field, value, clause, nl: nl || undefined, reason, position, sourceLine, ...(faceOptions.length ? { faceOptions } : {}) });
   }
   return out;
 }
@@ -526,7 +556,7 @@ export function injectImageTags(source: string, images: ImageInsertion[]): strin
   if (!images.length) return source;
   const lines = sourceLines(source);
   const byLine = new Map<number, ImageInsertion[]>();
-  for (const image of images) {
+  for (const image of [...images].sort(compareStoryMoments)) {
     if (!Number.isInteger(image.sourceLine) || image.sourceLine < 0 || image.sourceLine >= lines.length) {
       throw new Error(`位置 ${image.position} 对应的原始物理行已失效`);
     }
@@ -582,6 +612,7 @@ function parseWardrobeUpdates(
   rawUpdates: unknown,
   positions: Map<string, number>,
   maleNames?: ReadonlySet<string>,
+  segments: TargetSegment[] = [],
 ): WardrobeUpdate[] {
   if (!Array.isArray(rawUpdates)) return [];
   const out: WardrobeUpdate[] = [];
@@ -600,7 +631,8 @@ function parseWardrobeUpdates(
       sourceLine = parsed.sourceLine;
       position = parsed.position;
     }
-    out.push({ ...update, sourceLine, ...(position ? { position } : {}) });
+    const clause = storyClause(segments, position, update.clause);
+    out.push({ ...update, sourceLine, clause, ...(position ? { position } : {}) });
   }
   return out.sort((a, b) => (a.sourceLine ?? 0) - (b.sourceLine ?? 0));
 }
@@ -614,7 +646,7 @@ export function parseUnifiedPlan(
   segments: TargetSegment[],
   minImages: number,
   maxImages: number,
-  rules: { femaleScenesOnly?: boolean; knownMaleProfiles?: ReadonlySet<string> } = {},
+  rules: { femaleScenesOnly?: boolean; knownMaleProfiles?: ReadonlySet<string>; selectBeats?: boolean } = {},
 ): UnifiedPlan {
   const parsed = pickPlanObject(raw);
   if (!parsed) throw new Error('AI 返回的 JSON 缺少 images 数组');
@@ -629,6 +661,7 @@ export function parseUnifiedPlan(
       parsed.wardrobeUpdates ?? parsed.outfits,
       new Map(segments.map(segment => [segment.id, segment.sourceLine])),
       rules.knownMaleProfiles,
+      segments,
     ),
     ...(worldPreset ? { worldPreset } : {}),
   };

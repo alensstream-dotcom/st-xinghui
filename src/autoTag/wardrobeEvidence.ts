@@ -1,13 +1,14 @@
 import type { TargetSegment } from './clean';
+import { storyClauses } from './storyMoment';
 import { WARDROBE_SLOT_KEYS, type CharacterWardrobe, type TimeJump, type WardrobeSlotKey, type WardrobeUpdate } from '@/state/outfitState';
 
 const DAY_BREAK = /次日|翌日|隔天|第二天|第[二三四五六七八九十\d]+天|数日后|几天后|一[周月年]后|多年后|the next (?:day|morning)|\b(?:days|weeks|months|years) later\b/i;
-const CARRIED_OVER = /(?:仍|依旧|还是|照旧|未|没).{0,12}(?:换衣|原来那身|昨天那身|昨日的|同一[套件])|still wear(?:s|ing) the same|(?:without|did not) chang(?:e|ing) (?:clothes|outfits?)/i;
+const CARRIED_OVER = /(?:仍|依旧|还是|照旧|未|没).{0,12}(?:换衣|原来那身|昨天那身|昨日的|昨天那件|昨天的|同一[套件])|still wear(?:s|ing) the same|(?:without|did not) chang(?:e|ing) (?:clothes|outfits?)/i;
 const GARMENT = /衣|袍|衫|裳|裙|裤|褲|袜|襪|鞋|靴|领口|領口|袖口|扣子|拉链|肩带|腰带|围巾|披风|帽子|配饰|抹胸|胸罩|文胸|肚兜|泳装|围裙|袈裟|大氅|长褂|比甲|\b(?:clothes|outfit|suit|dress|shirt|coat|jacket|sweater|robe|skirt|pants|jeans|bra|bra strap|stockings|shoes?|boots?|socks?|collar|hem|sleeves?|zipper|buttons?)\b/i;
 const WEAR = /换|脱|褪|卸|穿|着[一件身]|身着|一身|一袭|披上|披着|裹着|套[上下着]|系[上好紧]|解[下开]|敞[开着]|卷[起上]|撩[起开]|掀[起开]|提[起上]|滑[落下]|扯[下开破]|掉[落下]|摘下|裸着|除去|撕破|[扯挣崩]断|修补|缝[好上]|沾[上满]|湿透|浸湿|扣[上紧好]|拉[上开下]|\b(?:wears?|wearing|dressed in|changes? into|remov(?:e|es|ed|ing)|tak(?:es|ing) off|took off|puts? on|unzip\w*|unbutton\w*|fasten\w*|lift\w*|rais\w*|slipp?\w*|tear\w*|torn|repair\w*|soaked)\b/i;
 const ACTUAL_OFF = /(?:脱|褪|卸|摘|取|扯|拽|扒|除)[掉下离去光]|赤脚|光着脚|没(?:有)?穿|只穿|(?:从|离开).{0,8}(?:手臂|双脚)|\b(?:remov\w*|took off|tak(?:e|es|ing) off|slip\w* out of|pull\w* off)\b/i;
 const ACTUAL_ON = /穿(?!过|行|梭|越|插|透)|着[一件身]|身着|披[上回着]|套[上回着]|扣[好上紧回]|拉[好上紧回]|放[下回]|恢复|\b(?:wear\w*|dress\w*|put\w* (?:back )?on|fasten\w*|lower\w*|button\w* up)\b/i;
-const REPOSITION = /敞|解开|卷|撩|掀|提[起上到至]|滑|松开|[掉落]到|拉开|\b(?:unbutton\w*|unzip\w*|lift\w*|rais\w*|slip\w*|roll\w* up|open\w*)\b/i;
+const REPOSITION = /一只|单只|脱了半|敞|解开|卷|撩|掀|提[起上到至]|滑|松开|[掉落]到|拉开|\b(?:unbutton\w*|unzip\w*|lift\w*|rais\w*|slip\w*|roll\w* up|open\w*)\b/i;
 const WEAR_CONDITION = /扯破|撕|破[了损洞]|[挣崩扯拉]?断[了裂开]?|湿透|浸湿|沾|缝[好上]|修补|晾干|\b(?:tore|torn|tear\w*|snapp\w*|broke|broken|repair\w*|soaked|wet|stained|drie\w*)\b/i;
 const CHANGE = /换[上成衣装]|更衣|换了|改穿|套上|一[袭身].{0,8}(?:新|改)|\b(?:chang(?:e|es|ed) into|put(?:s)? on)\b/i;
 const WHOLE_OUTFIT = /换[了上成]?(?:一套|整套|全套|衣服|装扮|身行头)|更衣完|换装完|new (?:outfit|set of clothes)|changed (?:her |his |their )?(?:outfit|clothes)/i;
@@ -23,25 +24,66 @@ const SLOT_MENTION: Record<WardrobeSlotKey, RegExp> = {
   shoes: /鞋|靴|\b(?:shoes?|heels?|boots?|sandals?|slippers?)\b/i,
 };
 
+const QUOTED = /“[^”]*”|「[^」]*」|『[^』]*』|"[^"]*"/g;
+const NON_PRESENT = /回忆|梦中|照片|画像|画中|脑海|想起|memory|portrait of|photograph of/i;
+
+function actualText(clause: string): string {
+  const narration = clause.replace(QUOTED, '');
+  return HYPOTHETICAL.test(narration) || NON_PRESENT.test(narration) ? '' : narration.trim();
+}
+
 function factualClauses(text: string): string[] {
-  return text.split(/[。！？；!?;\n]+/).flatMap(sentence =>
-    sentence.split(/\.\s+|[，,](?=\s*(?:随后|接着|于是|但|却|然后|后来|而|then\b|but\b))/i))
-    .filter(clause => !HYPOTHETICAL.test(clause));
+  return storyClauses(text).map(actualText).filter(Boolean);
+}
+
+function belongsTo(text: string, names: string[], owner: string): boolean {
+  const mentioned = names.filter(name => name && text.includes(name));
+  const possessors = mentioned.filter(name => text.includes(name + '的') || text.includes(name + "'s"));
+  if (possessors.length === 1) return possessors[0] === owner;
+  if (mentioned.length < 2) return !mentioned.length || mentioned[0] === owner;
+  const beforeFirstVerb = text.split(/换|脱|穿|解开|摘下|扣好|\b(?:wear|change|take|put)\b/i, 1)[0];
+  const subjects = mentioned.filter(name => beforeFirstVerb.includes(name));
+  const shared = /一起|都|各自|两人|一同|both|together/i.test(text);
+  if (subjects.length === 1 || shared) return subjects.includes(owner);
+  const nearest = subjects.find(name => beforeFirstVerb.trimEnd().endsWith(name));
+  return nearest === owner;
+}
+
+const COLOR_TEXT: Record<string, RegExp> = {
+  black: /黑|墨色|乌色|black/i, white: /白|雪色|white/i, red: /红|赤|绯|朱|red/i,
+  blue: /蓝|青蓝|靛|blue/i, navy: /藏蓝|深蓝|navy/i, green: /绿|翠|green/i,
+  purple: /紫|purple/i, brown: /棕|褐|brown/i, grey: /灰|gr[ae]y/i, gray: /灰|gr[ae]y/i,
+  beige: /米色|卡其|beige/i, ivory: /象牙白|ivory/i, pink: /粉|pink/i, yellow: /黄|yellow/i,
+  teal: /蓝绿|青绿|teal/i, gold: /金色|gold/i, cream: /奶白|乳白|cream/i,
+};
+
+function observedColor(tag: string | undefined, text: string): boolean {
+  const color = (tag ?? '').toLowerCase().split(/[\s,-]+/).find(word => Object.hasOwn(COLOR_TEXT, word));
+  return Boolean(color && COLOR_TEXT[color].test(text));
 }
 
 /** 状态证据限于指定 P 的实际动作；此前的段落只提供跨日时间锚点。 */
 export function wardrobeEvidence(update: WardrobeUpdate, segments: TargetSegment[], timeJump: TimeJump, cast: string[] = [], previous?: CharacterWardrobe) {
   const index = update.position ? segments.findIndex(segment => segment.id === update.position) : -1;
   const text = segments[index]?.text ?? '';
-  const timeText = [segments[Math.max(0, index)]?.text ?? '', ...segments.slice(0, Math.max(0, index)).map(s => s.text)];
-  const belongsTo = (clause: string) => clause.includes(update.name) || !cast.some(name => name !== update.name && name.length > 0 && clause.includes(name));
-  const statements = factualClauses(text).filter(belongsTo);
-  const date = timeJump === 'new_day' && belongsTo(text || timeText[0]) && !CARRIED_OVER.test(text || timeText[0])
-    && timeText.some(segment => factualClauses(segment).some(clause => DAY_BREAK.test(clause)
-      && !/前一[日天]|日前|昨天|先前|回忆|last (?:year|week)|remember/i.test(clause)));
-  const physical = statements.filter(clause => GARMENT.test(clause) || ACTUAL_OFF.test(clause)
+  const clauses = storyClauses(text);
+  const statements = (update.clause ? [clauses[update.clause - 1] ?? ''] : clauses)
+    .map(actualText).filter(clause => clause && belongsTo(clause, cast, update.name));
+  let day: string | undefined;
+  if (timeJump === 'new_day' && !CARRIED_OVER.test(text) && belongsTo(text, cast, update.name)) {
+    for (const segment of segments.slice(0, Math.max(0, index) + 1)) {
+      const points = storyClauses(segment.text);
+      const limit = segment.id === update.position ? update.clause ?? points.length : points.length;
+      for (let i = 0; i < limit; i++) {
+        const clause = actualText(points[i]);
+        if (DAY_BREAK.test(clause) && !/前一[日天]|日前|昨天|先前|last (?:year|week)|remember/i.test(clause)) day = segment.id + '.' + (i + 1);
+      }
+    }
+  }
+  const hasGarment = (clause: string) => GARMENT.test(clause) || WARDROBE_SLOT_KEYS.some(key => SLOT_MENTION[key].test(clause));
+  const physical = statements.filter(clause => hasGarment(clause) || ACTUAL_OFF.test(clause)
     || /穿回|重新穿上|重新扣好|衣扣|rolled (?:it|them) up|put (?:it|them) back on/i.test(clause));
-  const changes = statements.filter(clause => GARMENT.test(clause) && CHANGE.test(clause));
+  const changes = statements.filter(clause => hasGarment(clause) && CHANGE.test(clause));
   const matchingSlots = (clauses: string[]) => WARDROBE_SLOT_KEYS.filter(key => clauses.some(clause => SLOT_MENTION[key].test(clause)));
   const statusCues = (pattern: RegExp) => {
     const matching = physical.filter(clause => pattern.test(clause));
@@ -52,8 +94,19 @@ export function wardrobeEvidence(update: WardrobeUpdate, segments: TargetSegment
       || key === 'legs' && !previous?.shoes && changedSlots.includes('shoes'));
   };
   return {
-    date,
+    day,
+    observed: (key: WardrobeSlotKey, tag?: string) => Boolean(update.observed && statements.some(clause =>
+      SLOT_MENTION[key].test(clause) && (ACTUAL_ON.test(clause) || /一身|一袭|身上是|身上那件/.test(clause))
+      && observedColor(tag, clause))),
+    specifiedGarment: statements.some(hasGarment),
     motion: physical.some(clause => WEAR.test(clause) || WEAR_CONDITION.test(clause)),
+    shoeSide: (() => {
+      const wear = physical.filter(line => SLOT_MENTION.shoes.test(line)).join(' ');
+      const left = /左(?:脚|边|侧|鞋)|\bleft (?:foot|shoe|boot|slipper)\b/i.test(wear);
+      const right = /右(?:脚|边|侧|鞋)|\bright (?:foot|shoe|boot|slipper)\b/i.test(wear);
+      return left === right ? undefined : left ? 'left' as const : 'right' as const;
+    })(),
+    singleShoe: physical.some(line => SLOT_MENTION.shoes.test(line) && /一只|单只|[左右](?:脚|侧|边)|\b(?:one|left|right) (?:foot|shoe|boot|slipper)\b/i.test(line)),
     on: statusCues(ACTUAL_ON),
     off: statusCues(ACTUAL_OFF),
     half: statusCues(REPOSITION),

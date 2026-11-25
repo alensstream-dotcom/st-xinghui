@@ -8,6 +8,9 @@ export interface FrameContinuity {
   entries: CharTagEntry[];
   wardrobes: CharacterWardrobe[];
   position: string;
+  clause?: number;
+  step?: number;
+  cast?: string[];
   promptHash?: string;
   ages?: Record<string, string>;
 }
@@ -29,6 +32,9 @@ export function captureFrame(
   return {
     ...(Object.keys(ages).length ? { ages } : {}),
     position: shot.position,
+    ...(shot.clause ? { clause: shot.clause } : {}),
+    ...(shot.step ? { step: shot.step } : {}),
+    cast: [...names],
     entries: entries.filter(entry => names.has(entry.name)).map(entry => ({ ...entry, history: [] })),
     wardrobes: [...names].flatMap(name => wardrobes.get(name) ?? []),
   };

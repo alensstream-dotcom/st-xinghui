@@ -1,4 +1,5 @@
 import type { TargetSegment } from './clean';
+import { compareStoryMoments } from './storyMoment';
 import { recoverExplicitWear, wardrobeEvidence } from './wardrobeEvidence';
 import type { ImageCharacterPrompt, ImageInsertion } from '@/autoTag/protocol';
 import {
@@ -90,11 +91,7 @@ export function completeGarmentColor(original: string, proposed?: string): strin
   return HUE.test(hue) ? [hue + ' ' + item, ...details].join(', ') : original;
 }
 
-type Moment = { sourceLine: number; step?: number };
-
-export function compareMoments(a: Moment, b: Moment): number {
-  return a.sourceLine - b.sourceLine || (a.step ?? 0) - (b.step ?? 0);
-}
+export const compareMoments = compareStoryMoments;
 
 /** 显式变化先于同一瞬间的镜头；旧导演只返回 wearState 时补录在它自己的 P 点。 */
 export function compileWardrobeSequence<T>(
@@ -102,12 +99,15 @@ export function compileWardrobeSequence<T>(
   updates: WardrobeUpdate[],
   shots: ImageInsertion[],
   compile: (shot: ImageInsertion, wardrobe: Map<string, CharacterWardrobe>) => T,
-  narrative?: { segments: TargetSegment[]; timeJump: TimeJump; knownNames?: string[] },
+  narrative?: { segments: TargetSegment[]; timeJump: TimeJump; knownNames?: string[]; world?: string },
 ): { frames: T[]; updates: WardrobeUpdate[] } {
   const state = new Map(before);
   const persisted: WardrobeUpdate[] = [];
   const frames: T[] = new Array(shots.length);
-  const order = shots.map((shot, index) => ({ shot, index })).sort((a, b) => compareMoments(a.shot, b.shot));
+  const annotatedPositions = new Set(updates.filter(change => change.clause).map(change => change.position));
+  const momentOfShot = (shot: ImageInsertion) => shot.clause || !annotatedPositions.has(shot.position)
+    ? shot : { ...shot, clause: Number.MAX_SAFE_INTEGER };
+  const order = shots.map((shot, index) => ({ shot, index })).sort((a, b) => compareMoments(momentOfShot(a.shot), momentOfShot(b.shot)));
   const cast = [...new Set([...before.keys(), ...(narrative?.knownNames ?? []), ...updates.map(update => update.name),
     ...shots.flatMap(shot => shot.characters.map(c => c.name))])];
   const recovered = narrative ? recoverExplicitWear(narrative.segments, cast, updates) : [];
@@ -115,11 +115,29 @@ export function compileWardrobeSequence<T>(
     ...update, sourceLine: update.position ? (update.sourceLine ?? 0) : -1,
   })).sort(compareMoments);
   let cursor = 0;
+  const resetByDay = new Map<string, string>();
+
+  function fitUnspecifiedAncientCostume(slots: WardrobeUpdate['slots']) {
+    const replacements: Partial<Record<WardrobeSlotKey, [RegExp, string]>> = {
+      outer: [/\b(?:blazer|hoodie|bomber jacket|modern jacket)\b/i, 'traditional chinese outer robe'],
+      top: [/\b(?:t-shirt|hoodie|track top|suit jacket)\b/i, 'cross-collar chinese top'],
+      bottom: [/\b(?:jeans|denim shorts|cargo pants|bike shorts)\b/i, 'traditional chinese trousers'],
+      shoes: [/\b(?:sneakers|trainers|platform heels)\b/i, 'embroidered cloth shoes'],
+    };
+    for (const key of WARDROBE_SLOT_KEYS) {
+      const slot = slots[key];
+      const replacement = replacements[key];
+      if (!slot?.tag || !replacement?.[0].test(slot.tag)) continue;
+      const hue = slot.tag.match(/^(?:light |dark )?(?:black|white|red|blue|navy|green|pink|brown|gr[ae]y|ivory|cream|beige|purple)\b/i)?.[0];
+      slots[key] = { ...slot, tag: [hue, replacement[1]].filter(Boolean).join(' ') };
+    }
+  }
 
   function apply(update: WardrobeUpdate): void {
     const slots = { ...update.slots };
     const previous = state.get(update.name);
     let mode = update.mode;
+    let day: string | undefined;
     if (narrative) {
       // 旧楼层会把外套写在 top、把单独鞋履写在 legs。对原件做 patch 时认回旧地址。
       if (mode === 'patch' && previous) {
@@ -128,11 +146,16 @@ export function compileWardrobeSequence<T>(
           slots.top = slots.outer;
           delete slots.outer;
         }
-        if (slots.shoes && !previous.shoes && !slots.legs && !slots.shoes.tag
-          && /\b(?:shoes?|boots?|sneakers?|heels?|slippers?|sandals?|loafers?)\b/i.test(previous.legs?.tag ?? '')
-          && !/\b(?:socks?|stockings?|thighhighs|pantyhose)\b/i.test(previous.legs?.tag ?? '')) {
-          slots.legs = slots.shoes;
-          delete slots.shoes;
+        if (slots.shoes && !previous.shoes && !slots.legs && !slots.shoes.tag && previous.legs?.tag) {
+          const parts = previous.legs.tag.split(',').map(part => part.trim());
+          const shoe = parts.find(part => /\b(?:shoes?|boots?|sneakers?|heels?|slippers?|sandals?|loafers?)\b/i.test(part));
+          const socks = /\b(?:socks?|stockings?|thighhighs|pantyhose)\b/i.test(previous.legs.tag);
+          if (shoe && !socks) {
+            slots.legs = slots.shoes;
+            delete slots.shoes;
+          } else if (shoe) {
+            slots.shoes = { ...slots.shoes, tag: shoe };
+          }
         }
       }
       const evidence = wardrobeEvidence(update, narrative.segments, narrative.timeJump, cast, previous);
@@ -141,27 +164,55 @@ export function compileWardrobeSequence<T>(
           const request = slots[key];
           if (!request) continue;
           const old = previous?.[key];
-          const statusCue = request.status === 'on' ? evidence.on(key) : request.status === 'off' ? evidence.off(key) : evidence.half(key);
+          const statusCue = request.offSide ? evidence.off(key) || evidence.half(key)
+            : request.status === 'on' ? evidence.on(key) : request.status === 'off' ? evidence.off(key) : evidence.half(key);
           if (!statusCue && !(evidence.condition(key) && request.condition !== undefined && request.status === old?.status)) {
             delete slots[key];
-          } else if (request.condition !== undefined && !evidence.condition(key)) {
-            const { condition: _unsupported, ...wear } = request;
-            slots[key] = wear;
+          } else {
+            const next = { ...request };
+            if (request.condition !== undefined && !evidence.condition(key)) delete next.condition;
+            const footwear = key === 'shoes' || key === 'legs' && !previous?.shoes;
+            if (footwear && evidence.singleShoe) {
+              if (request.status === 'off' || request.offSide) {
+                const offSide = evidence.shoeSide ?? request.offSide;
+                if (old?.status !== 'off') {
+                  next.status = old?.offSide && offSide && old.offSide !== offSide ? 'off' : 'half';
+                  next.offSide = next.status === 'half' ? offSide : undefined;
+                  if (next.status === 'half' && !offSide) next.halfTag = next.halfTag || 'one shoe off';
+                } else {
+                  next.status = 'off';
+                  delete next.offSide;
+                }
+              } else if (request.status === 'on' && evidence.shoeSide && old?.status === 'off') {
+                next.status = 'half';
+                next.offSide = evidence.shoeSide === 'left' ? 'right' : 'left';
+              }
+            }
+            slots[key] = next;
           }
         }
       }
-      if (previous && mode !== 'patch' && !evidence.date && !evidence.whole) {
+      day = mode === 'replace' && evidence.day && resetByDay.get(update.name) !== evidence.day ? evidence.day : undefined;
+      if (narrative.world === 'chinese_ancient' && mode === 'replace' && (!previous || day) && !evidence.specifiedGarment) {
+        fitUnspecifiedAncientCostume(slots);
+      }
+      if (previous && mode !== 'patch' && !day && !evidence.whole) {
         if (!evidence.replacement) {
           // 补漏或补旧档缺失的主色。不会因为更换景别而替换已记录的衣物、穿法或鞋袜。
+          const observed = WARDROBE_SLOT_KEYS.filter(key => evidence.observed(key, slots[key]?.tag));
           for (const key of WARDROBE_SLOT_KEYS) {
             const old = previous[key], requested = slots[key];
             if (!requested) continue;
+            if (observed.length) {
+              if (!observed.includes(key)) delete slots[key];
+              continue;
+            }
             if (!old && evidence.motion && requested.tag) continue;
             const tag = old ? completeGarmentColor(old.tag, requested.tag) : undefined;
             if (old && tag && tag !== old.tag && evidence.motion) slots[key] = { ...old, tag };
             else delete slots[key];
           }
-          mode = 'patch';
+          mode = observed.length ? 'swap' : 'patch';
         } else {
           // 单件变化只改发生变化的槽位，不能让没列出的袜鞋和内搭消失。
           mode = 'swap';
@@ -187,11 +238,12 @@ export function compileWardrobeSequence<T>(
     if (!Object.keys(slots).length) return;
     const resolved: WardrobeUpdate = { ...update, mode, slots };
     applyWardrobeUpdate(state, resolved);
+    if (day && mode === 'replace') resetByDay.set(update.name, day);
     persisted.push(resolved);
   }
 
   for (const { shot, index } of order) {
-    while (cursor < ordered.length && compareMoments(ordered[cursor], shot) <= 0) apply(ordered[cursor++]);
+    while (cursor < ordered.length && compareMoments(ordered[cursor], momentOfShot(shot)) <= 0) apply(ordered[cursor++]);
     for (const character of shot.characters) {
       if (!character.wearState) continue;
       const slots = { ...character.wearState };
@@ -200,7 +252,7 @@ export function compileWardrobeSequence<T>(
         for (const key of WARDROBE_SLOT_KEYS) if (update.slots[key]) delete slots[key];
       }
       // 旧导演的镜头意见要和新事件过同一条正文检查，才能影响后续镜头。
-      const legacy = normaliseWardrobeUpdate({ name: character.name, mode: 'patch', slots, position: shot.position, step: shot.step });
+      const legacy = normaliseWardrobeUpdate({ name: character.name, mode: 'patch', slots, position: shot.position, step: shot.step, clause: shot.clause });
       if (legacy) apply({ ...legacy, sourceLine: shot.sourceLine });
     }
     const characters = shot.characters.map(({ wearState, ...character }) => character);

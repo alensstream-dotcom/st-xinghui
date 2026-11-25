@@ -194,6 +194,16 @@ const STATIC_BODY_TAG = /\b(tall female|petite|slender|curvy|voluptuous|flat che
 /** 以衣物名词判槽位，颜色与面料是开放词表。账本没有该层时仍容许导演提供该件衣物。 */
 function wardrobeOwnsTag(tag: string, wardrobe: CharacterWardrobe | undefined): boolean {
   if (!wardrobe || tag.includes('#') || ACTION_TOUCH_TAG.test(tag)) return false;
+  if (/^(?:topless|bare torso|bare chest|bare breasts|nipples|no bra|bra only)$/i.test(tag)) {
+    return Boolean(wardrobe.outer || wardrobe.top || wardrobe.innerTop);
+  }
+  if (/^(?:bottomless|no panties|panties only)$/i.test(tag)) {
+    return Boolean(wardrobe.bottom || wardrobe.innerBottom || ONEPIECE_GARMENT.test(wardrobe.top?.tag ?? ''));
+  }
+  if (/^(?:nude|naked|fully nude|completely naked|clothing removed)$/i.test(tag)) {
+    return Boolean(wardrobe.outer || wardrobe.top || wardrobe.bottom || wardrobe.innerTop || wardrobe.innerBottom);
+  }
+
   if (/\b(?:underwear|lingerie)$/i.test(tag)) return Boolean(wardrobe.outer || wardrobe.top || wardrobe.bottom || wardrobe.innerTop || wardrobe.innerBottom);
   if (/\b(?:bra|bralette|brassiere|bikini top)$/i.test(tag)) return Boolean(wardrobe.outer || wardrobe.top || wardrobe.innerTop);
   if (/\b(?:panties|briefs|thong)$/i.test(tag)) return Boolean(wardrobe.bottom || wardrobe.innerBottom || ONEPIECE_GARMENT.test(wardrobe.top?.tag ?? ''));
@@ -278,6 +288,7 @@ interface ResolvedSlot {
   status: SlotWearStatus;
   halfTag?: string;
   reveal?: 'none' | 'layer';
+  offSide?: 'left' | 'right';
 }
 
 /**
@@ -296,7 +307,7 @@ function resolveSlot(
   const tag = base?.tag ? [base.tag, base.condition].filter(Boolean).join(', ') : '';
   const halfTag = (override?.halfTag || base?.halfTag || '').trim();
   if (!tag && !(status === 'off' && (key === 'innerTop' || key === 'innerBottom'))) return null;
-  return { tag, status, halfTag, reveal: override ? undefined : base?.reveal };
+  return { tag, status, halfTag, reveal: override ? undefined : base?.reveal, offSide: override ? undefined : base?.offSide };
 }
 
 /**
@@ -385,7 +396,9 @@ export function compileWardrobeForFrame(
   const bottom: ResolvedSlot | null =
     bottomRaw ?? (isOnePiece && top ? { ...top, tag: '' } : null);
   const bottomStatus = bottom?.status ?? null;
-  const hemOpen = !isOnePiece || canSeeNextLayer(top, 'bottom', true);
+  const longOuter = Boolean(outer && /\b(?:ankle-length|floor-length|full-length)\b/i.test(outer.tag));
+  const outerHemOpen = !longOuter || canSeeNextLayer(outer, 'bottom', true);
+  const hemOpen = outerHemOpen && (!isOnePiece || canSeeNextLayer(top, 'bottom', true));
   const lowerOpen = hemOpen && (bottomRaw ? canSeeNextLayer(bottomRaw, 'bottom') : true);
 
   if (hemOpen && bottom?.tag && bottomStatus === 'on') {
@@ -409,16 +422,30 @@ export function compileWardrobeForFrame(
     }
   }
 
-  if (legs?.status === 'on') push(legs.tag);
-  else if (isHalfStatus(legs?.status) && legs) {
-    push(legs.tag);
-    push(legs.halfTag);
-  } else if (legs?.status === 'off') negatives.push(...SLOT_NEGATIVES.legs);
+  const oldShoeSlot = !shoes && Boolean(legs?.offSide);
+  if (!oldShoeSlot) {
+    const legTags = shoes && legs ? splitTags(legs.tag).filter(t => !SHOE_WORD.test(t)).join(', ') : legs?.tag;
+    if (legs?.status === 'on') push(legTags);
+    else if (isHalfStatus(legs?.status) && legs) {
+      push(legTags);
+      push(legs.halfTag);
+    } else if (legs?.status === 'off') negatives.push(...SLOT_NEGATIVES.legs);
+  }
 
-  if (shoes?.status === 'off') negatives.push(...SLOT_NEGATIVES.shoes);
-  if (shoes && shoes.status !== 'off') {
-    push(shoes.tag);
-    if (isHalfStatus(shoes.status)) push(shoes.halfTag);
+  const footwear = oldShoeSlot ? legs : shoes;
+  if (footwear?.status === 'off') negatives.push(...SLOT_NEGATIVES.shoes);
+  if (footwear && footwear.status !== 'off') {
+    if (footwear.offSide) {
+      const opposite = footwear.offSide === 'left' ? 'right' : 'left';
+      const [item, ...details] = splitTags(footwear.tag);
+      const singular = item.replace(/(?:shoes|boots|heels|slippers|sneakers|sandals|loafers|pumps)$/i, tag => tag.slice(0, -1));
+      push(singular + ' on ' + opposite + ' foot');
+      push(footwear.offSide + ' foot without a shoe');
+      details.forEach(push);
+    } else {
+      push(footwear.tag);
+    }
+    if (isHalfStatus(footwear.status)) push(footwear.halfTag);
   }
   return finishWardrobe(positive, negatives);
 }
@@ -486,19 +513,30 @@ function guardrailNegatives(world: WorldAnchorConfig | undefined, positive: stri
 const SHOT_SCALE = /^(?:medium shot|medium close-up|upper body|portrait|close[- ]?up|face focus|cowboy shot|full shot|full body|wide shot|long shot)$/i;
 const LOCAL_FOCUS = /^(?:lower body|foot focus|feet focus|ankle focus|hand focus|leg focus|thigh focus|face focus|upper body focus)$/i;
 const FULL_POSE = /\b(?:(?:the |straddle |middle |front |side )splits?|m[- ](?:shaped (?:split|pose)|legs)|grabbing (?:own|both|her own|his own) ankles)\b/i;
-const DISTANT_DETAIL = /^(?:sanpaku|long eyelashes|mole (?:on|under|beside) (?:neck|mouth|eye|lip|nose|chin))$/i;
+const DISTANT_DETAIL = /^(?:sanpaku|(?:long|thick|lower) eyelashes|mole (?:on|under|beside) (?:neck|mouth|eye|lip|nose|chin))$/i;
+const COMPOSITION_TAG = /^(?:split screen|diptych|triptych|multiple views|multiple angles|inset (?:image|portrait)|character reference sheet|character sheet|portrait inset)$/i;
+const CAMERA_ANGLE = /^(?:from side|profile view|front view|from front|three-quarter view|from behind|back view)$/i;
 
 function fitShotToPose(image: ImageInsertion): string {
-  const tags = splitTags(image.tag);
+  const tags = splitTags(image.tag).filter(t => image.singleFrame === false || !COMPOSITION_TAG.test(t));
   const action = [image.tag, image.nl, ...image.characters.flatMap(c => [c.tag, c.nl])].join(', ');
   const local = image.extent === 'detail' || (!image.extent && tags.some(t => LOCAL_FOCUS.test(t)));
-  if (local || (image.extent !== 'whole' && !FULL_POSE.test(action) && ![image.tag, ...image.characters.map(c => c.tag)].some(raw => splitTags(raw).some(t => /^splits$/i.test(t))))) return image.tag;
-  const scale = tags.some(t => /^(?:wide shot|long shot)$/i.test(t)) ? 'wide shot' : 'full body';
-  const index = tags.findIndex(t => SHOT_SCALE.test(t) || LOCAL_FOCUS.test(t));
-  const kept = tags.filter(t => !SHOT_SCALE.test(t) && !LOCAL_FOCUS.test(t));
-  kept.splice(index < 0 ? Math.min(1, kept.length) : index, 0, scale);
-  if (/\b(?:m[- ]legs|m-shaped split|straddle split|middle split)\b/i.test(action)) {
-    const side = kept.findIndex(t => /^from side$/i.test(t));
+  const whole = !local && (image.extent === 'whole' || FULL_POSE.test(action)
+    || [image.tag, ...image.characters.map(c => c.tag)].some(raw => splitTags(raw).some(t => /^splits$/i.test(t))));
+  const resolution = whole
+    ? tags.some(t => /^(?:wide shot|long shot)$/i.test(t)) ? 'wide shot' : 'full body'
+    : tags.find(t => SHOT_SCALE.test(t) && (!local || !/^(?:full body|full shot|wide shot|long shot)$/i.test(t)));
+  const kept: string[] = [];
+  for (const token of tags) {
+    if (SHOT_SCALE.test(token) || whole && LOCAL_FOCUS.test(token)) {
+      if (resolution && !kept.includes(resolution)) kept.push(resolution);
+    } else if (!CAMERA_ANGLE.test(token) || !kept.some(t => CAMERA_ANGLE.test(t))) {
+      kept.push(token);
+    }
+  }
+  if (resolution && !kept.includes(resolution)) kept.splice(Math.min(1, kept.length), 0, resolution);
+  if (whole && /\b(?:m[- ]legs|m-shaped split|straddle split|middle split)\b/i.test(action)) {
+    const side = kept.findIndex(t => /^(?:from side|profile view)$/i.test(t));
     if (side >= 0) kept[side] = 'three-quarter view';
   }
   return kept.join(', ');
@@ -520,7 +558,9 @@ export function assembleImageCharacters(
 ): ImageInsertion {
   if (visualSubjects) image = resolveVisualSubjects(image, entriesAtPos);
   const tag = visualSubjects ? fitShotToPose(image) : image.tag;
-  const upperOnly = isUpperOnlyShot(tag);
+  const footOnly = visualSubjects && /\b(?:foot|feet|ankle|shoe) focus\b/i.test(tag)
+    && !/\b(?:full body|wide shot|long shot)\b/i.test(tag);
+  const upperOnly = !footOnly && isUpperOnlyShot(tag);
   const shoesHidden = SHOES_HIDDEN_SHOT.test(tag) && !/\b(?:feet|foot|ankle|shoe) focus\b/i.test(tag);
   const distant = splitTags(tag).some(t => /^(?:full body|full shot|wide shot|long shot)$/i.test(t));
   const femaleIndexes: number[] = [];
@@ -538,7 +578,9 @@ export function assembleImageCharacters(
     if (isMaleEntry(entry, character.tag)) {
       const maleTag = dropLocalizedMarkers(splitTags(character.tag)).join(', ');
       const male: ImageCharacterPrompt = { name: character.name, tag: maleTag, nl: character.nl };
-      if (character.uc) male.uc = character.uc;
+      const wardrobeGuard = visualSubjects ? guardrailNegatives(world, splitTags(maleTag)) : [];
+      const uc = dedupeTags([...splitTags(character.uc ?? ''), ...wardrobeGuard]).join(', ');
+      if (uc) male.uc = uc;
       return male;
     }
 
@@ -563,16 +605,22 @@ export function assembleImageCharacters(
 
     const visibleInCrop = (t: string) => !(upperOnly && (LEG_ONLY.test(t) || LOWER_ONLY.test(t)))
       && !(shoesHidden && SHOE_WORD.test(t));
+    const fixedVisible = footOnly ? fixedTags.filter(t => /^(?:girl|boy|.* skin|tan)$/i.test(t)) : fixedTags;
+    const outfitVisible = footOnly ? outfitTags.filter(t => SHOE_WORD.test(t) || /\b(?:foot|feet|ankle|socks?|stockings?|pantyhose|thighhighs)\b/i.test(t)) : outfitTags;
     const mergedPositive = dedupeTags([
-      ...fixedTags.filter(visibleInCrop), ...outfitTags.filter(visibleInCrop),
+      ...fixedVisible.filter(visibleInCrop), ...outfitVisible.filter(visibleInCrop),
       ...directorTags.filter(t => DIRECTOR_MARKER.test(t) || ACTION_TOUCH_TAG.test(t) || visibleInCrop(t)),
     ]);
-    const singleShoeOff = mergedPositive.some(tag => /^one (?:shoe|slipper|sandal|boot) off$/i.test(tag));
-    const visiblePositive = mergedPositive
+    const singleShoeOff = mergedPositive.some(tag => /^one (?:shoe|slipper|sandal|boot) off$/i.test(tag)
+      || /^(?:left|right) foot without a shoe$/i.test(tag));
+    const socksWorn = Boolean(wardrobe?.legs?.status === 'on' && /\b(?:socks?|stockings?|pantyhose|thighhighs)\b/i.test(wardrobe.legs.tag));
+    const visiblePositive = mergedPositive.filter(tag => !COMPOSITION_TAG.test(tag) || !visualSubjects || image.singleFrame === false)
+      .filter(tag => !(singleShoeOff && socksWorn && /^barefoot$/i.test(tag)))
       .map(tag => singleShoeOff && /^barefoot$/i.test(tag) ? 'one bare foot' : tag);
+    const normalize = (value: string) => value.toLowerCase().replace(/(?:^|\s)-?\d+(?:\.\d+)?::|::/g, '').replace(/[_{}\[\]]/g, ' ').replace(/\s+/g, ' ').trim();
 
-    const ownTraits = visiblePositive.map(tag => ` ${tag.toLowerCase()} `);
-    const affirms = (trait: string) => ownTraits.some(tag => tag.includes(` ${trait.toLowerCase()} `));
+    const ownTraits = visiblePositive.map(tag => ` ${normalize(tag)} `);
+    const affirms = (trait: string) => ownTraits.some(tag => tag.includes(` ${normalize(trait)} `));
     const negativeParts = [
       ...splitTags(character.uc ?? ''),
       ...compiled.negatives,
@@ -593,7 +641,7 @@ export function assembleImageCharacters(
       }
     }
 
-    const mergedUc = dedupeTags(negativeParts).join(', ');
+    const mergedUc = dedupeTags(negativeParts.filter(t => !visualSubjects || !affirms(t))).join(', ');
     const result: ImageCharacterPrompt = {
       name: character.name,
       tag: visiblePositive.join(', '),

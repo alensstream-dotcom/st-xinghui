@@ -1,3 +1,5 @@
+import { compactGeneratedScene, type SceneBudget } from './sceneCompaction';
+import { naiArtistPrompt, naiQualityTags } from '@/backends/nai';
 import { retainUnchangedTraits } from './visualIdentity';
 import { wardrobeEvidence } from './wardrobeEvidence';
 import { runChannelWithRetries } from './channelRetry';
@@ -21,7 +23,8 @@ import {
   type UnifiedInput,
 } from '@/autoTag/prompt';
 import { rebaseImagePositions, type RebaseReport } from '@/autoTag/rebase';
-import { buildSlotTaskNote } from '@/autoTag/slotPlan';
+import { compareStoryMoments } from './storyMoment';
+import { buildSlotTaskNote, slotStoryPosition } from '@/autoTag/slotPlan';
 import {
   BBI_CHAR_EXTRA_KEY,
   CHAR_TAG_FIELDS,
@@ -63,7 +66,7 @@ import {
   serializeImageTag,
   stripImageTags,
 } from '@/st/imageTagRegex';
-import { getTagGenChannel, isCurrentChatExcluded, settings, type ApiChannel } from '@/state/settings';
+import { effectiveNai, getTagGenChannel, isCurrentChatExcluded, settings, type ApiChannel } from '@/state/settings';
 import { applyDetectedWorldPreset, readWorldAnchor, type WorldAnchorConfig } from '@/state/worldAnchor';
 import {
   BBI_OUTFIT_EXTRA_KEY,
@@ -208,9 +211,9 @@ function planChangeOps(plan: ImagePlan): PositionedCharOp[] {
     } else {
       op = createCharTagSetOp(change.name, change.field, change.value, change.reason);
     }
-    if (op) ops.push({ op, sourceLine: change.sourceLine });
+    if (op) ops.push({ op, sourceLine: change.sourceLine, clause: change.clause });
   }
-  return ops.sort((left, right) => left.sourceLine - right.sourceLine);
+  return ops.sort(compareStoryMoments);
 }
 
 /**
@@ -263,23 +266,30 @@ async function runUnifiedPass(params: {
   const wardrobesBefore = params.wardrobesBefore;
   const input: UnifiedInput = {
     ...params.input,
+    trackMoments: params.captureFrames,
     wardrobeText: buildWardrobeText(wardrobesBefore),
     traitBlock: traitCandidateBlock(params.input.world.presetId, params.entries),
   };
   const messages = await buildUnifiedMessages(input);
   const source = `出图计划(第 ${params.floor} 楼)`;
 
+  let compactRetry = false;
   const plan = await runChannelWithRetries(async next => {
-    const raw = await dispatchLlm(messages, params.channel, next);
+    const request = compactRetry ? [...messages.slice(0, -1),
+      { role: 'system' as const, content: '上一轮格式无效。直接返回完整 JSON。每张只保留一个主要瞬间，省略重复英文与空字段，真实变化仍按 P 完整记录。' },
+      ...messages.slice(-1)] : messages;
+    const raw = await dispatchLlm(request, params.channel, next);
     diagnostic('unified:response', { floor: params.floor, chars: raw.length });
     try {
       return parseUnifiedPlan(raw, params.segments, input.minImages, input.maxImages, {
         femaleScenesOnly: true,
         knownMaleProfiles: params.maleNames,
+        selectBeats: params.captureFrames,
       });
     } catch (error) {
       // 解析失败最常见的原因是上游按 max_tokens 截断：把字符数与末尾 150 字打出来，
       // 一眼就能分清「模型没遵守协议」和「输出被砍断」。
+      compactRetry = params.captureFrames;
       diagnostic('unified:parse-failed', {
         chars: raw.length,
         tail: raw.slice(-150),
@@ -319,12 +329,19 @@ async function runUnifiedPass(params: {
     if (index >= 0) plan.changes[index] = prior;
     else plan.changes.push(prior);
   }
-  for (const update of plan.wardrobeUpdates) {
-    if (update.mode !== 'replace' || wardrobesBefore.has(update.name)
-      || wardrobeEvidence(update, params.segments, plan.timeJump).motion) continue;
-    const matches = params.reuseOutfits?.filter(prior => prior.mode === 'replace' && prior.name === update.name
-      && prior.position === update.position && prior.step === update.step);
-    if (matches?.length === 1) update.slots = matches[0].slots;
+  // 重分析同一正文且起始档案未变时，首套衣物的初始化不再依赖模型这次有没有重报。
+  const reusedInitial = new Set<string>();
+  for (const prior of params.reuseOutfits ?? []) {
+    if (prior.mode !== 'replace' || wardrobesBefore.has(prior.name) || reusedInitial.has(prior.name)) continue;
+    if (prior.position && !params.segments.some(segment => segment.id === prior.position)) continue;
+    reusedInitial.add(prior.name);
+    const proposed = plan.wardrobeUpdates.find(update => update.mode === 'replace' && update.name === prior.name);
+    if (!proposed) {
+      const sourceLine = params.segments.find(segment => segment.id === prior.position)?.sourceLine;
+      plan.wardrobeUpdates.push({ ...prior, sourceLine });
+    } else if (!wardrobeEvidence(proposed, params.segments, plan.timeJump).motion) {
+      proposed.slots = prior.slots;
+    }
   }
   const canonical = new Map<string, Set<string>>();
   const nameKey = (name: string) => name.normalize('NFKC').trim().toLowerCase();
@@ -346,17 +363,24 @@ async function runUnifiedPass(params: {
     allocateNewProfileFaces(plan.changes, params.entries, world.presetId);
   }
   const positionedOps = params.opsResolver(plan.changes);
+  let budget: SceneBudget | undefined;
+  if (params.captureFrames) {
+    const config = effectiveNai();
+    budget = { fixed: [naiArtistPrompt(config), naiQualityTags(config)].filter(Boolean).join(', '),
+      sharedReference: /nai-diffusion-4(?:-|$)/.test(config.model) ? 512 : undefined };
+  }
   // 换装按 position 逐图生效：带 position 的 update 只对 sourceLine 不早于它的图片生效，
   // 省略 position 的从楼首起生效。这样「P10 进房间换女仆装」不会把 P2 那张旧衣裳的图
   // 也套上女仆装，而 P12 之后立刻穿新装。
   const sequence = compileWardrobeSequence(wardrobesBefore, plan.wardrobeUpdates, plan.images, (shot, wardrobe) => {
-    const entries = entriesAtPosition(params.entries, positionedOps, shot.sourceLine, params.lockedNames);
+    const entries = entriesAtPosition(params.entries, positionedOps, shot.sourceLine, params.lockedNames, shot.clause);
+    const image = assembleImageCharacters(shot, entries, wardrobe, world, params.captureFrames);
     return {
-      image: assembleImageCharacters(shot, entries, wardrobe, world, params.captureFrames),
+      image: params.captureFrames ? compactGeneratedScene(image, budget) : image,
       frame: params.captureFrames ? captureFrame(shot, entries, wardrobe) : undefined,
     };
   }, params.captureFrames ? { segments: params.segments, timeJump: plan.timeJump,
-    knownNames: [...knownNames, ...plan.changes.map(change => change.name)] } : undefined);
+    knownNames: [...knownNames, ...plan.changes.map(change => change.name)], world: world.presetId } : undefined);
   const assembledImages = sequence.frames.map(item => item.image);
   const frames = sequence.frames.flatMap(item => item.frame ?? []);
   const wardrobeUpdates = sequence.updates;
@@ -518,6 +542,7 @@ async function runForFloor(floor: number, opts: RunOptions = {}): Promise<void> 
       : undefined;
     const previousFrame = slot && slotRawTag && priorRun?.frames[slot.seq]?.promptHash === textHash(slotRawTag)
       ? priorRun.frames[slot.seq] : undefined;
+    const slotPosition = slot ? slotStoryPosition(rawSource, slot.seq, preparedTarget.segments) : undefined;
     const previousEntries = previousFrame?.entries ?? (slot ? charTagsBeforeFloor(floor + 1) : baseline);
     const previousDelta = readCharTagFloorDelta(message);
     const previousOutfitDelta = readWardrobeFloorDelta(message);
@@ -555,7 +580,7 @@ async function runForFloor(floor: number, opts: RunOptions = {}): Promise<void> 
           buildSlotTaskNote(rawSource, slot.seq),
           ...(profile.naiCharPrompts && !profile.comic ? [CONTACT_PROMPT] : []),
           ...(previousFrame ? [
-            '当前镜头在 ' + previousFrame.position + '。本格的外貌和衣物由插件按原镜头补齐，角色 tag 只写动作表情；英文只补此刻可见的信息。共享关系写一次。',
+            '当前镜头在 ' + previousFrame.position + (previousFrame.clause ? ' 子句 ' + previousFrame.clause : '') + '。本格的外貌和衣物由插件按原镜头补齐，角色 tag 只写动作表情；英文只补此刻可见的信息。共享关系写一次。',
             buildWardrobeText(new Map(previousFrame.wardrobes.map(item => [item.name, item]))),
           ] : []),
         ].join('\n') : '',
@@ -691,18 +716,28 @@ async function runForFloor(floor: number, opts: RunOptions = {}): Promise<void> 
           const births = sameSource && previousDelta?.swipe === (swipeId ?? 0)
             ? previousDelta.ops.filter(op => op.kind === 'new').map(op => ({ op, sourceLine: 0 })) : [];
           const stable = entriesAtPosition(baseline, births, 0, lockedNames);
-          const shots = plan.images.map(i => ({ ...i, characters: i.characters.map(({ wearState, ...c }) => c) }));
+          const shots = plan.images.map(i => ({ ...i,
+            ...(slotPosition ? { position: slotPosition.id, sourceLine: slotPosition.sourceLine, clause: undefined, step: undefined } : {}),
+            characters: i.characters.map(({ wearState, ...c }) => c) }));
           plan.images = compileWardrobeSequence(wardrobeBaseline, updates, shots,
             (i, wardrobe) => assembleImageCharacters(i, stable, wardrobe, world)).frames;
         } else if (plan && previousFrame) {
           const wardrobe = new Map(previousFrame.wardrobes.map(item => [item.name, item]));
-          plan.images = plan.images.map(image => assembleImageCharacters({
-            ...image, characters: image.characters.map(({ wearState, ...character }) => ({
+          const original = preparedTarget.segments.find(s => s.id === previousFrame.position);
+          const originalCast = previousFrame.cast ?? (slotRawTag ? parseImageTagContent(slotRawTag).characters?.map(c => c.name) : undefined);
+          if (originalCast?.length && plan.images.some(image => originalCast.some(name => !image.characters.some(c => c.name === name)))) {
+            throw new Error('重写缺少原镜头中的角色，已保留原提示词');
+          }
+          plan.images = plan.images.map(image => compactGeneratedScene(assembleImageCharacters({
+            ...image, position: previousFrame.position, sourceLine: original?.sourceLine ?? image.sourceLine,
+            clause: previousFrame.clause, step: previousFrame.step,
+            characters: image.characters.filter(c => !originalCast?.length || originalCast.includes(c.name)).map(({ wearState, ...character }) => ({
               ...character, frameAge: previousFrame.ages?.[character.name.toLowerCase()],
             })),
-          }, previousEntries, wardrobe, world));
+          }, previousEntries, wardrobe, world)));
         }
       } catch (error) {
+        plan = null;
         if (controller.signal.aborted) {
           processed.delete(identity);
           return;
@@ -758,6 +793,7 @@ async function runForFloor(floor: number, opts: RunOptions = {}): Promise<void> 
         image.sourceLine,
         'tag',
         lockedNames,
+        image.clause,
       );
       if (tagRes.text) image.tag = tagRes.text;
       if (image.nl) {
@@ -768,6 +804,7 @@ async function runForFloor(floor: number, opts: RunOptions = {}): Promise<void> 
           image.sourceLine,
           'nl',
           lockedNames,
+          image.clause,
         );
         image.nl = nlRes.text;
         for (const n of nlRes.unknown) unknownNames.add(n);
@@ -780,6 +817,7 @@ async function runForFloor(floor: number, opts: RunOptions = {}): Promise<void> 
           image.sourceLine,
           'tag',
           lockedNames,
+          image.clause,
         );
         character.tag = charTag.text;
         for (const n of charTag.unknown) unknownNames.add(n);
@@ -791,6 +829,7 @@ async function runForFloor(floor: number, opts: RunOptions = {}): Promise<void> 
             image.sourceLine,
             'nl',
             lockedNames,
+            image.clause,
           );
           character.nl = charNl.text;
           for (const n of charNl.unknown) unknownNames.add(n);
@@ -855,8 +894,8 @@ async function runForFloor(floor: number, opts: RunOptions = {}): Promise<void> 
     } else if (frameDelta) {
       const plannedFrames = frameDelta.frames;
       frameDelta.frames = plan.images.map((image, index) => ({
-        sourceLine: image.sourceLine, frame: { ...plannedFrames[index], promptHash: textHash(serializeImageTag(image)) },
-      })).sort((a, b) => a.sourceLine - b.sourceLine).map(item => item.frame);
+        sourceLine: image.sourceLine, clause: image.clause, step: image.step, frame: { ...plannedFrames[index], promptHash: textHash(serializeImageTag(image)) },
+      })).sort(compareStoryMoments).map(item => item.frame);
     }
     const frameExtra = { key: FRAME_CONTINUITY_KEY, value: frameDelta };
     const result = await applyMessageText(

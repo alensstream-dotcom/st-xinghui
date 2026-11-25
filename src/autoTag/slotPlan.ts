@@ -1,4 +1,5 @@
-import { formatPromptText, parseImageTagContent, parseImageTags } from '@/st/imageTagRegex';
+import type { TargetSegment } from './clean';
+import { formatPromptText, parseImageTagContent, parseImageTags, stripImageTags } from '@/st/imageTagRegex';
 
 /** 单条已占用画面摘要的截断长度:清单只是给模型「别撞车」用的,不是让它照抄的提示词。 */
 const MAX_SUMMARY = 160;
@@ -61,4 +62,21 @@ export function buildSlotTaskNote(rawSource: string, seq: number, maxSummary = M
     lines.push('', '本楼其余画面（它们各自的提示词已经确定，不要把它们的画面抢过来，也不要改动它们）：', ...occupied);
   }
   return lines.join('\n');
+}
+
+/** 老 tag 没有镜头快照时，按实际插入位置找正文，不拿重写模型另选的 P 回放旧衣。 */
+export function slotStoryPosition(source: string, seq: number, segments: TargetSegment[]): TargetSegment | undefined {
+  const tags = parseImageTags(source).slice(0, seq + 1);
+  if (tags.length !== seq + 1) return;
+  let start = 0;
+  let cursor = 0;
+  for (const tag of tags) {
+    start = source.indexOf(tag, cursor);
+    if (start < 0) return;
+    cursor = start + tag.length;
+  }
+  const prefix = stripImageTags(source.slice(0, start)).trimEnd();
+  if (!prefix) return;
+  const line = prefix.split(/\r\n|[\r\n]/).length - 1;
+  return segments.findLast(segment => segment.sourceLine <= line);
 }

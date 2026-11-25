@@ -1,3 +1,4 @@
+import { momentPromptText } from './storyMoment';
 import type { ChatMsg } from '@/api/client';
 import { templateSupportsNegative } from '@/backends/comfyTemplates';
 import { getWorkflowPlaceholders } from '@/backends/comfyui';
@@ -461,17 +462,18 @@ export interface UnifiedInput {
   world: WorldAnchorConfig;
   /** 本楼之前的角色库条目（防撞脸统计用；缺省视为空库）。 */
   entries?: CharTagEntry[];
+  trackMoments?: boolean;
 }
 
 /** 装备表规则（v3：装备描述永不删除，状态码 on/half/off 分离）。 */
 const WARDROBE_RULES = `② 装备表与跨楼规则
 - 从上一楼装备表开始，通读到本楼最后一段。没写换装就继承最近有效状态；换房间、出门、回家、镜头裁切、谈论和想象都不能变更现实装备。
-- 首次出现先取正文和卡明写的衣服，无描述才按时代和角色定一次。固定款式含主色、衣物名、显著材质，换的才记。系扣、敞开和卷袖写进穿法字段。用 outer 外套、top 上衣/连身服、innerTop 贴身内层、bottom 下装、innerBottom 贴身下层、legs 袜、shoes 鞋。未知层留空。古风中衣可写 white inner robe，贴身古风衣物按原文用可画的等效词，例如系颈的传统内搭用 halterneck camisole。连身服没有独立下装时不凭空补。鞋袜和随套装的配饰跟随各自衣件。
+- 首次出现先取正文和卡明写的衣服，无描述才按时代和角色定一次。固定款式含主色、衣物名、显著材质，换的才记。系扣、敞开和卷袖写进穿法字段。用 outer 外套、top 上衣/连身服、innerTop 贴身内层、bottom 下装、innerBottom 贴身下层、legs 袜、shoes 鞋。未知层留空。没有衣物描写时男女入镜者均用该世界观的日常服饰，正文明确的反差保留。古风中衣可写 white inner robe，贴身古风衣物按原文用可画的等效词，例如系颈的传统内搭用 halterneck camisole。连身服没有独立下装时不凭空补。鞋袜和随套装的配饰跟随各自衣件。
 - wardrobeUpdates：同一件穿脱或损坏用 patch（可省 tag，永远沿用原件），换单件用 swap，明确整套更换或首次设定用 replace。每次变化写实际发生的 P，楼首用 P1；同 P 先脱后穿才加 step 跨图区分。即使此处不出图、发生在末图之后也记录。无变化给 []，不用每张图重复 wearState。
 - status=on/off/half/half_top/half_bottom；halfTag 写可见的穿法（如 rolled sleeves / collar ajar / open front / hem lifted above hips）。只卷袖、领口开一颗扣子或滑肩而内层仍遮住时用 reveal:"none"；确实露出下一层时用 reveal:"layer"。连身衣开领和提下摆分上、下；外套敞开如果下面还穿着扣好的衬衫，只露衬衫。明确损坏或沾湿用 condition，恢复时给 condition:""。暂时裁掉或挡住的衣物保持原状态。
 - 时间按人判断：明确跨日且另场再见可设新套，连续赶路、回家、原文仍穿同套时继承。人物还没走进那次新场景、或只是另一个人跨日，不提前改变这件衣服。`;
 
-export const CONTACT_PROMPT = '两人发生具体接触时可用 contact:[施动者原名,承受者原名,施动者英文短语,承受者英文短语]。短语写同一拍：道具归谁、正贴住对方哪里、对方哪侧迎向动作；插件会放入对应角色块。共享英文用 @{原名} 或显著可见特征指代，亲属称谓不作为年龄或体型词。单人、自触、画外人物省略 contact。';
+export const CONTACT_PROMPT = '两人发生具体接触时可用 contact:[施动者原名,承受者原名,施动者英文短语,承受者英文短语,可选的同一动作标记词]。同时发生的接触可用至多三组，先写视觉中心。短语写同一拍：道具归谁、正贴住对方哪里、对方哪侧迎向动作；插件会放入对应角色块。共享英文用 @{原名} 或显著可见特征指代，亲属称谓不作为年龄或体型词。单人、自触、画外人物省略 contact。';
 
 /** 镜头规则（选帧 / 机位 / 表情 / 标记 / 防偏见）。 */
 const SHOT_RULES = `③ 选帧与构图防线
@@ -479,8 +481,8 @@ const SHOT_RULES = `③ 选帧与构图防线
 - 必须从楼尾倒扫回开头通读全楼；S 级未覆盖完不许用 A/B 占名额；楼超 15～20 段且上限 ≥3 张时名额跨段分布。
 - 峰值帧：同一事件跨多个 P 编号选动作完全成立、张力最饱满那句，铺垫与收尾不算。同级候选优先改变眼前局面、关系或情绪且能用可见动作读懂的一刻，再用名额覆盖另一段不同事件。一姿势一图：不重复高光各占 1 张，有余量才补同姿势第 2 张且换机位与景别。
 - 机位：pov（女主默认 looking at viewer）用于面对面直视、男主伸手触碰、身前侍奉、后背位俯视（pov, from behind, from above）；第三人称（from side / three-quarter view / from above）用于独处、多女角同框、侧面曲线、背后环抱。连续两张或跨楼同体位必须换机位与景别；**男主整个人或上半身入镜一律第三人称禁 pov**。高低差互动（一人站+一人坐/跪/躺）禁 from below / low angle，改 from side, eye-level。
-- 景别以要看见的身体跨度为准：双手与脚踝、两人的站蹲高低差等要同时入镜时 extent:"whole"，有意只拍手、鞋、触点时 extent:"detail"。其余省略 extent。Base.tag：人数、机位、一个景别、地点和环境光。不要为微小特征加并列特写。
-- 标记 source#/target#/mutual#<1～3 词英文动作> 的两侧逐字相同，施受绝不写反；参与的男方入镜时也有角色块。 ${CONTACT_PROMPT}
+- 景别以要看见的身体跨度为准：双手与脚踝、两人的站蹲高低差等要同时入镜时 extent:"whole"，有意只拍手、鞋、触点时 extent:"detail"。其余省略 extent。Base.tag：人数、机位、一个景别、地点和环境光。一张插画保持一个取景。避免分屏、背后加放大的同一张脸或用角色设定表代替当前镜头；剧中特意设计分格时可标 layout:"sequence"。
+- 标记 source#/target#/mutual#<1～3 词英文动作> 的两侧逐字相同，施受绝不写反；参与的男方入镜时也有角色块，用 boy 标识这一人。 ${CONTACT_PROMPT}
 - 表情只从这些词挑：smile, grin, laughing, blush, embarrassed, frown, pout, surprised, crying, tears, angry, serious, sad, worried, scared, smug, seductive smile, expressionless, half-closed eyes, open mouth, clenched teeth, ahegao；视线只选 looking at viewer / at another / away / down / up / back / closed eyes；禁自造短语，女角表情与视线不许为空。
 - characters[].tag **禁写**：性别人数词、发色发型刘海词、瞳色眼型肤色词、体型词、任何服装词（写了也会被剥）；只写表情、视线、姿势动作、可见解剖部位、标记。omitFeatures 只放本帧看不见的**配饰**（眼镜、耳环、项链、发饰、帽子、手套），禁放 hair/eyes/skin/body。
 - 确定选中 P 的可见瞬间：连续动作只取一个已经成立的时点，同一时间的人物反应可以同框。先明确施动者、承受者、道具、触点和朝向。把关系写成一条自然英文，优先放 Base.nl；角色 nl 只补自己的支撑、朝向或反应，没新信息留空。NL 关闭时将必要动作短语写进该角色 tag。先写可见事实，省掉剧情复述和心理解释。除非正文这格明确写了穿脱，否则不写衣服款式颜色。
@@ -555,6 +557,7 @@ export function unifiedSystemPrompt(
   nlOn: boolean,
   minImages: number,
   maxImages: number,
+  trackMoments = true,
 ): string {
   const countRule =
     minImages > 0
@@ -577,6 +580,8 @@ ${ARCHIVE_RULES}
 ${WARDROBE_RULES}
 
 ${SHOT_RULES}
+
+${trackMoments ? '同一 P 有 ⟦1⟧、⟦2⟧ 等子句标记时，镜头和发生服装或外貌变化的记录可填 clause:对应数字。只定位一个已经发生的瞬间；同子句多步仍用 step。图片可填 beat:["同一事件用相同短编号","S/A/B 中一个","peak/lead-in/aftermath 中一个"]，画动作成立时填 peak；不同事件用不同编号。清楚写已经穿着新衣、但没写换装动作时，可用 swap + observed:true，只给原文明确的那件。单只鞋离脚在 shoes 填 offSide:"left"/"right"，不确定哪只时用 halfTag。' : ''}
 
 ${OUTPUT_RULES}`;
 }
@@ -633,7 +638,7 @@ async function unifiedPreamble(input: UnifiedInput, contract: string): Promise<C
       `【上一楼结尾装备表（本楼起始基准：没换装就原样沿用，有穿脱就按本段正文 patch）】\n${input.wardrobeText}`,
       `【已高频占用的特征（新女角建档必须避开）】\n${usedTraits}`,
       input.traitBlock,
-      `--- 目标正文｜${roleLabel(context, targetFloor)} ---\n${preparedTarget.promptText}`,
+      `--- 目标正文｜${roleLabel(context, targetFloor)} ---\n${input.trackMoments ? momentPromptText(preparedTarget.segments) : preparedTarget.promptText}`,
     ]
       .filter(Boolean)
       .join('\n\n'),
@@ -650,6 +655,6 @@ export async function buildUnifiedMessages(input: UnifiedInput): Promise<ChatMsg
   const maxImages = input.maxImages ?? MAX_IMAGES;
   return unifiedPreamble(
     input,
-    unifiedSystemPrompt(input.world, input.nlOn, minImages, maxImages),
+    unifiedSystemPrompt(input.world, input.nlOn, minImages, maxImages, input.trackMoments ?? false),
   );
 }

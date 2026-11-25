@@ -1,3 +1,4 @@
+import { compareStoryMoments, storyClauses } from './storyMoment';
 import type { CharTagEntry } from '@/state/charTags';
 import type { CharChange, ImageInsertion } from './protocol';
 
@@ -77,32 +78,65 @@ export function resolveVisualSubjects(image: ImageInsertion, entries: CharTagEnt
 
 /** 同一字段的局部变化不应抹掉独立且已确认的体征。只用于新生成的自动档案操作。 */
 export function retainUnchangedTraits(changes: CharChange[], entries: CharTagEntry[], sourceByPosition: ReadonlyMap<string, string>): void {
-  const known = new Map(entries.map(e => [e.name, { body: e.fields.body, hair: e.fields.hair }]));
-  for (const c of [...changes].sort((a, b) => a.sourceLine - b.sourceLine)) {
+  const known = new Map(entries.map(e => [e.name, {
+    body: e.fields.body, hair: e.fields.hair, eyes: e.fields.eyes, skin: e.fields.skin, age: profileAge(e),
+  }]));
+  for (const c of [...changes].sort(compareStoryMoments)) {
     if (c.field === 'new' && c.value.startsWith('{') && !known.has(c.name)) {
       const f = JSON.parse(c.value);
-      known.set(c.name, { body: f.body ?? '', hair: f.hair ?? '' });
+      known.set(c.name, { body: f.body ?? '', hair: f.hair ?? '', eyes: f.eyes ?? '', skin: f.skin ?? '', age: '' });
     }
     const fields = known.get(c.name);
-    if (!fields || (c.field !== 'hair' && c.field !== 'body')) continue;
+    if (!fields || (c.field !== 'hair' && c.field !== 'body' && c.field !== 'eyes' && c.field !== 'skin')) continue;
+    const text = sourceByPosition.get(c.position) ?? '';
+    const source = c.clause ? storyClauses(text)[c.clause - 1] ?? '' : text;
     const old = tags(fields[c.field]), next = tags(c.value);
     if (c.field === 'body') {
-      const established = old.find(t => ageBand(t));
-      if (established && !hasAgeCue(sourceByPosition.get(c.position) ?? '')) {
+      const established = old.find(t => ageBand(t)) || fields.age;
+      if (established && !hasAgeCue(source)) {
         const originalAge = next.filter(t => !ageBand(t));
         next.splice(0, next.length, ...originalAge, established);
       }
       const chest = /^(?:flat chest|(?:small|medium|large|huge|gigantic) breasts)$/i;
+      if (old.some(t => chest.test(t)) && !/胸(?:围|型|部|口).{0,16}(?:变|长大|缩小|隆起)|(?:bust|chest).{0,20}(?:chang|grew|shr[au]nk)/i.test(source)) {
+        for (let i = next.length - 1; i >= 0; i--) if (chest.test(next[i])) next.splice(i, 1);
+      }
       for (const dimension of [(t: string) => Boolean(ageBand(t)), (t: string) => chest.test(t)]) {
         const prior = old.find(dimension);
         if (prior && !next.some(dimension)) next.push(prior);
       }
-    } else if (next.length && next.every(t => /\b(?:bangs|bun|ponytail|braids?|bob|twintails)\b|^(?:very long|long|medium|short|curly|straight|wavy) hair$/i.test(t))) {
-      const color = old.map(t => t.replace(/^(?:very long|long|medium|short) /i, '')).find(t =>
-        /^(?:(?:dark|light|platinum) )?(?:black|brown|blue|red|blonde|silver|white|pink|green|purple|gr[ae]y|auburn) hair$/i.test(t));
-      if (color) next.unshift(color);
+    } else if (c.field === 'hair' && next.length) {
+      const hairColor = (t: string) => t.replace(/^(?:very long|long|medium|short) /i, '');
+      const color = /^(?:(?:dark|light|platinum|ash) )?(?:black|brown|blue|red|blonde|silver|white|pink|green|purple|gr[ae]y|auburn) hair$/i;
+      const dye = /染|挑染|鬓边.{0,5}(?:白|灰)|发色.{0,9}(?:变|成)|hair.{0,12}(?:dyed|turned|chang)/i.test(source);
+      const originalColor = old.map(hairColor).find(t => color.test(t));
+      if (originalColor && !dye) {
+        for (let i = next.length - 1; i >= 0; i--) {
+          if (!color.test(hairColor(next[i]))) continue;
+          const length = next[i].match(/^(very long|long|medium|short) /i)?.[1];
+          next.splice(i, 1, ...(length ? [length + ' hair'] : []));
+        }
+        next.unshift(originalColor);
+      }
+      const lengthWord = /^(?:very long|long|medium|short) (?:.+ )?hair$/i;
+      if (!next.some(t => lengthWord.test(t))) {
+        const length = old.find(t => lengthWord.test(t))?.match(/^(very long|long|medium|short)/i)?.[0];
+        if (length) next.push(length + ' hair');
+      }
+    } else if (c.field === 'eyes' && old.length) {
+      const color = /\b(?:black|brown|blue|red|pink|purple|violet|amber|gold|green|grey|gray|silver|orange|aqua|emerald|yellow) eyes$/i;
+      const changeColor = /瞳色|眼睛.{0,12}(?:变成|变为)|美瞳|eyes?.{0,12}(?:turned|changed color)/i.test(source);
+      if (!changeColor && old.some(t => color.test(t))) {
+        const newShape = next.filter(t => !color.test(t));
+        next.splice(0, next.length, ...old.filter(t => color.test(t)), ...newShape);
+      }
+      const shape = /^(?:tsurime|tareme|jitome|sanpaku|big eyes)$/i;
+      if (!next.some(t => shape.test(t))) next.push(...old.filter(t => shape.test(t)));
+    } else if (c.field === 'skin' && old.length
+      && !/变黑|晒黑|肤色.{0,9}(?:变|转)|skin.{0,12}(?:turned|changed)|got a tan/i.test(source)) {
+      next.splice(0, next.length, ...old);
     }
-    c.value = next.join(', ');
+    c.value = [...new Set(next)].join(', ');
     fields[c.field] = c.value;
   }
 }

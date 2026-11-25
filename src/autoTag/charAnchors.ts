@@ -241,6 +241,7 @@ export function applyCharRefs(
 export interface PositionedCharOp {
   op: CharTagAutoOp;
   sourceLine: number;
+  clause?: number;
 }
 
 /**
@@ -258,8 +259,9 @@ export function applyPositionedCharRefs(
   sourceLine: number,
   mode: 'tag' | 'nl' = 'tag',
   locked?: ReadonlySet<string>,
+  clause?: number,
 ): { text: string; unknown: string[] } {
-  return applyCharRefs(text, entriesAtPosition(entries, ops, sourceLine, locked), mode);
+  return applyCharRefs(text, entriesAtPosition(entries, ops, sourceLine, locked, clause), mode);
 }
 
 /** 某个正文位置上生效的角色库(门控口径见 applyPositionedCharRefs);漫画按 name 补外貌也用它。 */
@@ -268,9 +270,11 @@ export function entriesAtPosition(
   ops: PositionedCharOp[],
   sourceLine: number,
   locked?: ReadonlySet<string>,
+  clause?: number,
 ): CharTagEntry[] {
   const activeOps = ops
-    .filter(item => item.op.kind === 'new' || item.sourceLine <= sourceLine)
+    .filter(item => item.op.kind === 'new' || item.sourceLine < sourceLine
+      || item.sourceLine === sourceLine && (!clause || (item.clause ?? 0) <= clause))
     .map(item => item.op);
   return applyCharTagOps(entries, activeOps, -1, locked);
 }
