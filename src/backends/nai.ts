@@ -637,7 +637,7 @@ export function unzipNaiImage(buffer: ArrayBuffer): { base64: string; filename: 
 export interface NaiImageOutput {
   result: ComfyImageResult;
   /** 不在 tag 文本里的那部分配方（画师串 / vibe / 采样参数 / 模型无关字段）。 */
-  usage: Pick<GenerationMeta, 'positive' | 'negative' | 'width' | 'height' | 'artist' | 'vibes' | 'params'>;
+  usage: Pick<GenerationMeta, 'positive' | 'negative' | 'requestCharacters' | 'width' | 'height' | 'artist' | 'vibes' | 'params'>;
 }
 
 /**
@@ -725,6 +725,11 @@ export async function generateNaiImage(
       // positive 即顶层 input / v4_prompt 里那份全文（含画师串与质量词）
       positive: fullPositivePrompt(nai, values.prompt, values.nl),
       negative: fullNegativePrompt(nai),
+      ...(naiSupportsCharacterPrompts(nai.model) && values.characters?.length ? {
+        requestCharacters: values.characters.map(character => ({
+          name: character.name, positive: characterCaption(character), negative: (character.uc ?? '').trim(),
+        })),
+      } : {}),
       width: params.width as number,
       height: params.height as number,
       artist,

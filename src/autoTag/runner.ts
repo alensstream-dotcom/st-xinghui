@@ -23,8 +23,9 @@ import {
   type UnifiedInput,
 } from '@/autoTag/prompt';
 import { rebaseImagePositions, type RebaseReport } from '@/autoTag/rebase';
+import { frameTextHash as textHash } from './frameContinuity';
 import { compareStoryMoments } from './storyMoment';
-import { buildSlotTaskNote, slotStoryPosition } from '@/autoTag/slotPlan';
+import { buildSlotTaskNote } from '@/autoTag/slotPlan';
 import {
   BBI_CHAR_EXTRA_KEY,
   CHAR_TAG_FIELDS,
@@ -129,14 +130,6 @@ function activeSwipeId(message: STMessage): number | null {
   return typeof message.swipe_id === 'number' ? message.swipe_id : 0;
 }
 
-function textHash(text: string): string {
-  let hash = 2166136261;
-  for (let index = 0; index < text.length; index += 1) {
-    hash ^= text.charCodeAt(index);
-    hash = Math.imul(hash, 16777619);
-  }
-  return (hash >>> 0).toString(36);
-}
 
 interface RunOptions {
   baselineRetried?: boolean;
@@ -284,7 +277,7 @@ async function runUnifiedPass(params: {
       return parseUnifiedPlan(raw, params.segments, input.minImages, input.maxImages, {
         femaleScenesOnly: true,
         knownMaleProfiles: params.maleNames,
-        selectBeats: params.captureFrames,
+        selectBeats: params.captureFrames, pinSelection: true,
       });
     } catch (error) {
       // 解析失败最常见的原因是上游按 max_tokens 截断：把字符数与末尾 150 字打出来，
@@ -382,7 +375,7 @@ async function runUnifiedPass(params: {
     const image = assembleImageCharacters(shot, entries, wardrobe, world, params.captureFrames);
     return {
       image: params.captureFrames ? compactGeneratedScene(image, budget) : image,
-      frame: params.captureFrames ? captureFrame(shot, entries, wardrobe) : undefined,
+      frame: captureFrame(shot, entries, wardrobe),
     };
   }, params.captureFrames ? { segments: params.segments, timeJump: plan.timeJump,
     knownNames: [...knownNames, ...plan.changes.map(change => change.name)], maleNames: params.maleNames, world: world.presetId, previousStory: params.previousStory } : undefined);
@@ -542,12 +535,16 @@ async function runForFloor(floor: number, opts: RunOptions = {}): Promise<void> 
     ]));
     const baselineHash = baselineFingerprint();
     let expectedBaseline = baselineHash;
-    const priorRun = profile.naiCharPrompts && !profile.comic
+    const priorRun = !profile.comic
       ? readFloorContinuity(message.extra?.[FRAME_CONTINUITY_KEY], swipeId ?? 0, signature, baselineHash)
       : undefined;
     const previousFrame = slot && slotRawTag && priorRun?.frames[slot.seq]?.promptHash === textHash(slotRawTag)
       ? priorRun.frames[slot.seq] : undefined;
-    const slotPosition = slot ? slotStoryPosition(rawSource, slot.seq, preparedTarget.segments) : undefined;
+    if (slot && !previousFrame?.anchor) {
+      processed.delete(identity);
+      abort(floor, 'slot-anchor-missing', true, '本图没有已核对的剧情锚点，请先重新分析本楼');
+      return;
+    }
     const previousEntries = previousFrame?.entries ?? (slot ? charTagsBeforeFloor(floor + 1) : baseline);
     const previousDelta = readCharTagFloorDelta(message);
     const previousOutfitDelta = readWardrobeFloorDelta(message);
@@ -586,6 +583,7 @@ async function runForFloor(floor: number, opts: RunOptions = {}): Promise<void> 
           ...(profile.naiCharPrompts && !profile.comic ? [CONTACT_PROMPT] : []),
           ...(previousFrame ? [
             '当前镜头在 ' + previousFrame.position + (previousFrame.clause ? ' 子句 ' + previousFrame.clause : '') + '。本格的外貌和衣物由插件按原镜头补齐，角色 tag 只写动作表情；英文只补此刻可见的信息。共享关系写一次。',
+            ...(previousFrame.anchor ? ['必须使用同一 anchor 原文：' + previousFrame.anchor.exact] : []),
             buildWardrobeText(new Map(previousFrame.wardrobes.map(item => [item.name, item]))),
           ] : []),
         ].join('\n') : '',
@@ -643,7 +641,7 @@ async function runForFloor(floor: number, opts: RunOptions = {}): Promise<void> 
       });
       plan = unified.plan;
       expectedBaseline = baselineFingerprint();
-      if (profile.naiCharPrompts) frameDelta = {
+      frameDelta = {
         swipe: swipeId ?? 0, sourceHash: signature, baselineHash: expectedBaseline, frames: unified.frames,
       };
       wardrobeUpdates = unified.wardrobeUpdates;
@@ -674,8 +672,13 @@ async function runForFloor(floor: number, opts: RunOptions = {}): Promise<void> 
                 preparedTarget.segments,
                 promptOptions.minImages,
                 promptOptions.maxImages,
-                { femaleScenesOnly: profile.naiCharPrompts && !slot, knownMaleProfiles: storyProfiles?.maleNames },
+                { femaleScenesOnly: profile.naiCharPrompts && !slot, knownMaleProfiles: storyProfiles?.maleNames, pinSelection: true },
               );
+          if (slot && !profile.comic) {
+            if (!previousFrame?.anchor || candidate.images.length !== 1 || candidate.images.some(image => image.position !== previousFrame.position
+              || image.clause !== previousFrame.clause || image.anchor?.start !== previousFrame.anchor?.start
+              || image.sourceCue !== previousFrame.anchor?.exact)) throw new Error('重写改变了原分镜的动作位置');
+          }
           // 单槽重写忽略本次 changes,不校验建档 nl —— 校验它会为一份会被丢弃的
           // changes 白白消耗重试次数。NAI 关了自然语言时协议不要 nl,也就不验。
           if (
@@ -712,24 +715,7 @@ async function runForFloor(floor: number, opts: RunOptions = {}): Promise<void> 
           return;
         }
         plan = parsed.plan;
-        if (plan && slot && profile.naiCharPrompts && !profile.comic && !previousFrame) {
-          // 旧楼层可能没有快照。只回放能定位的服装事件；旧人物增量缺 P 时只采纳建档，避免拿楼尾造型覆盖较早镜头。
-          const stored = message.extra?.[FRAME_CONTINUITY_KEY] as Partial<FloorContinuity> | undefined;
-          const sameSource = !stored || (stored.sourceHash === signature && stored.swipe === (swipeId ?? 0));
-          const points = new Map(preparedTarget.segments.map(s => [s.id, s.sourceLine]));
-          const updates = sameSource && previousOutfitDelta?.swipe === (swipeId ?? 0)
-            ? previousOutfitDelta.updates.filter(u => !u.position || points.has(u.position)).map(u => ({
-              ...u, sourceLine: u.position ? points.get(u.position) : 0,
-            })) : [];
-          const births = sameSource && previousDelta?.swipe === (swipeId ?? 0)
-            ? previousDelta.ops.filter(op => op.kind === 'new').map(op => ({ op, sourceLine: 0 })) : [];
-          const stable = entriesAtPosition(baseline, births, 0, lockedNames);
-          const shots = plan.images.map(i => ({ ...i,
-            ...(slotPosition ? { position: slotPosition.id, sourceLine: slotPosition.sourceLine, clause: undefined, step: undefined } : {}),
-            characters: i.characters.map(({ wearState, ...c }) => c) }));
-          plan.images = compileWardrobeSequence(wardrobeBaseline, updates, shots,
-            (i, wardrobe) => assembleImageCharacters(i, stable, wardrobe, world)).frames;
-        } else if (plan && previousFrame) {
+        if (plan && previousFrame) {
           const wardrobe = new Map(previousFrame.wardrobes.map(item => [item.name, item]));
           const original = preparedTarget.segments.find(s => s.id === previousFrame.position);
           const originalCast = previousFrame.cast ?? (slotRawTag ? parseImageTagContent(slotRawTag).characters?.map(c => c.name) : undefined);
@@ -902,7 +888,8 @@ async function runForFloor(floor: number, opts: RunOptions = {}): Promise<void> 
     } else if (frameDelta) {
       const plannedFrames = frameDelta.frames;
       frameDelta.frames = plan.images.map((image, index) => ({
-        sourceLine: image.sourceLine, clause: image.clause, step: image.step, frame: { ...plannedFrames[index], promptHash: textHash(serializeImageTag(image)) },
+        sourceLine: image.sourceLine, clause: image.clause, step: image.step, frame: { ...plannedFrames[index], promptHash: textHash(serializeImageTag(image)),
+          ...(image.anchor ? { frameId: JSON.stringify([signature, image.position, image.clause, image.anchor.start, image.anchor.exact]) } : {}) },
       })).sort(compareStoryMoments).map(item => item.frame);
     }
     const frameExtra = { key: FRAME_CONTINUITY_KEY, value: frameDelta };
@@ -913,7 +900,8 @@ async function runForFloor(floor: number, opts: RunOptions = {}): Promise<void> 
         // 模型返回的 position 在这里刻意不参与——画面钉死在原位,它只负责重写内容。
         // 开跑时快照的原文对不上 = 期间被用户/别的流程改过,放弃覆盖(同提示词编辑弹窗)。
         if (slot) {
-          if (parseImageTags(currentText)[slot.seq] !== slotRawTag) return null;
+          if (parseImageTags(currentText)[slot.seq] !== slotRawTag
+            || textHash(prepareTargetText(stripImageTags(currentText), settings.excludes.customStripTags).promptText) !== signature) return null;
           return replaceImageTagAt(currentText, slot.seq, serializeImageTag(plan.images[0]));
         }
         // replace 路径同样以当前正文为基底剔除旧 tag,不能用旧快照

@@ -69,3 +69,22 @@ export function groundFrameAnchor(image: ImageInsertion, raw: Record<string, unk
   image.clause = anchor.clause;
   image.sourceCue = anchor.cue;
 }
+
+/** Resolve the declared selection before interpreting any rendering instructions. */
+export function pinFrameAnchor(image: ImageInsertion, raw: Record<string, unknown>, segments: TargetSegment[]): boolean {
+  const segment = segments.find(item => item.id === image.position);
+  const exact = typeof raw.anchor === 'string' ? raw.anchor.trim() : '';
+  if (!segment || exact.length < 4 || exact.length > 160 || !image.clause) return false;
+  const clauses = storyClauses(segment.text);
+  const selected = clauses[image.clause - 1];
+  if (!selected || !affirmedCue(selected, exact) || selected.indexOf(exact) !== selected.lastIndexOf(exact)) return false;
+  let offset = 0;
+  for (const clause of clauses.slice(0, image.clause - 1)) offset = segment.text.indexOf(clause, offset) + clause.length;
+  const clauseStart = segment.text.indexOf(selected, offset);
+  if (clauseStart < 0) return false;
+  const start = clauseStart + selected.indexOf(exact);
+  const end = start + exact.length;
+  image.sourceCue = exact;
+  image.anchor = { exact, start, end, prefix: segment.text.slice(0, start).slice(-32), suffix: segment.text.slice(end, end + 32) };
+  return true;
+}

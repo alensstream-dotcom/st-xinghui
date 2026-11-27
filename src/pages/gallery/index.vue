@@ -5,7 +5,7 @@ import { imageDownloadFileName } from '@/floor/download';
 import { openLightbox } from '@/floor/lightbox';
 import { markImagesMissing, normalizeImagePath } from '@/floor/missingImages';
 import { deleteImageFileOnly, readStore, sidecarPathFor, type BbiImageSidecar } from '@/floor/storage';
-import { formatGenerationMeta, type GenerationMeta } from '@/generationMeta';
+import { formatGenerationMeta, formatRequestPrompt, type GenerationMeta } from '@/generationMeta';
 import { mapLimit } from '@/pool';
 import { getContext } from '@/st/context';
 import { formatPromptText, parseImageTagContent } from '@/st/imageTagRegex';
@@ -94,7 +94,8 @@ const promptCache = ref(new Map<string, string | null>());
 /** 侧写/extra 里存的都是 tag 原文,统一在这里解析成人读的全文(与卡片同一口径)。
  *  meta(画师串/vibe/采样参数)是只读溯源信息,追加在后面;它不在可编辑的 tag 文本里。 */
 function renderPrompt(rawTag: string, seed: number | null, meta?: GenerationMeta): string {
-  const text = formatPromptText(parseImageTagContent(rawTag));
+  const saved = formatPromptText(parseImageTagContent(rawTag));
+  const text = meta?.requestCharacters ? formatRequestPrompt(meta) || saved : saved;
   if (!text) return '';
   const lines = [text];
   if (seed !== null) lines.push(`Seed: ${seed}`);

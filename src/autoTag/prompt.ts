@@ -165,6 +165,8 @@ function roleLabel(context: STContext, floor: number): string {
   return `assistant（${message.name || context.name2 || 'Assistant'}）`;
 }
 
+const PINNED_FRAME_RULE = '每张插画必须提供 position、clause（从 1 起，单句也是 1）、anchor（该子句已发生动作的原文引用）和 staging。staging.action 为 [与 anchor 完全相同的原文, 一句英文可见动作]。staging.event 为 {actor, verb, target, phase}，actor 用人物原名或 viewer，verb 和 target 用英文并原样出现在 action 的英文句中，人物可用 @{原名} 指明主语，phase 从 approach/contact/result/state 选一项。focus 如果提供也用同一原文。staging.actors 用原文证据提供同刻姿态。男女互动优先使用男方 POV，画外男方的手、接触点或所持物写进 action，画外人不进角色列表；camera 用 pov。';
+
 export async function buildAutoTagMessages(
   context: STContext,
   targetFloor: number,
@@ -410,7 +412,7 @@ ${comicSizeRule}
   if (worldInfo) messages.push({ role: 'system', content: buildWorldInfoSystem(worldInfo) });
   // 后端书写规范(ComfyUI/NAI)压在固定协议之前;无适用规范时不占消息位。
   if (spec) messages.push({ role: 'system', content: spec });
-  messages.push({ role: 'system', content: profile.comic ? comicContract : fixedContract });
+  messages.push({ role: 'system', content: profile.comic ? comicContract : fixedContract + '\n' + PINNED_FRAME_RULE });
   // 思维链:压在任务协议之后,要求模型先在 <thinking> 里过检查点再输出 JSON。
   // 解析端(protocol.ts)会先剥掉 think 块再取 JSON,二者配套;按后端取对应的那一份。
   const thinking = backendThinkingPrompt(options, nlOn, naiCharPromptsOn);
@@ -620,7 +622,7 @@ async function unifiedPreamble(input: UnifiedInput, contract: string): Promise<C
   if (charCard) messages.push({ role: 'system', content: buildCharCardSystem(charCard) });
   if (persona) messages.push({ role: 'system', content: buildPersonaSystem(persona) });
   if (worldInfo) messages.push({ role: 'system', content: buildWorldInfoSystem(worldInfo) });
-  messages.push({ role: 'system', content: contract });
+  messages.push({ role: 'system', content: contract + '\n' + PINNED_FRAME_RULE });
 
   const previous = clampPreviousContext(
     scanFloors

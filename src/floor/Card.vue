@@ -35,12 +35,12 @@ import {
   type BbiImageEntry,
 } from '@/floor/storage';
 import { isTagPlanning } from '@/floor/tagPlanState';
-import { formatGenerationMeta } from '@/generationMeta';
+import { formatGenerationMeta, formatRequestPrompt } from '@/generationMeta';
 import { activeComfyPreset, activeNaiPlan, activeOrientationLock, imageDisplayMaxHeight, settings, type ComfyKind } from '@/state/settings';
 import { beginImage, failImage, finishImage, safeHistory } from '@/state/history';
 import { copyText } from '@/st/clipboard';
 import { getContext } from '@/st/context';
-import { formatPromptText } from '@/st/imageTagRegex';
+import { formatPromptText, parseImageTagContent } from '@/st/imageTagRegex';
 
 /**
  * 楼层生图卡片(DESIGN-FLOOR-UI.md §8)。
@@ -80,6 +80,7 @@ const props = defineProps<{
   history: BbiImageEntry[];
   /** 无匹配历史时,旧提示词同槽位的最新结果(stale)。 */
   staleEntry: BbiImageEntry | null;
+  frameId?: string;
   /** 所在聊天 id(水合时传入):槽位 key 的一部分,不再各自去 getContext 取。 */
   chatId: string;
 }>();
@@ -244,8 +245,10 @@ const imageSrc = computed(() => shownEntry.value?.path ?? '');
  * 与卡片内可编辑的 `promptText` 分开 —— 元信息只读,绝不能混进可写回的 tag 文本。
  */
 const lightboxPrompt = computed(() => {
-  const meta = shownEntry.value?.meta;
-  return [promptText.value, meta ? formatGenerationMeta(meta) : ''].filter(Boolean).join('\n\n');
+  const entry = shownEntry.value;
+  const meta = entry?.meta;
+  const saved = entry ? formatPromptText(parseImageTagContent(entry.prompt)) : promptText.value;
+  return [meta?.requestCharacters ? formatRequestPrompt(meta) || saved : saved, meta ? formatGenerationMeta(meta) : ''].filter(Boolean).join('\n\n');
 });
 
 /**
@@ -320,6 +323,7 @@ async function generate(): Promise<void> {
     swipeId: props.swipeId,
     seq: props.seq,
     tag: props.tag,
+    frameId: props.frameId,
     prompt: props.prompt,
     nl: props.nl,
     negative: props.negative,
@@ -372,7 +376,8 @@ async function generate(): Promise<void> {
     }
     // 落盘:图片进 ST 文件系统 + extra 写指针。成功后重水合,
     // 卡片从 extra 恢复为 ready(blob/dataURL 生命周期随之结束)。
-    await saveImageResult(job.messageId, job.swipeId, job.seq, job.tag, seed, result, meta);
+    await saveImageResult(job.messageId, job.swipeId, job.seq, job.tag, seed, result,
+      job.frameId ? { ...meta, frameId: job.frameId } : meta, job.frameId);
     result.revoke();
     if (historyId !== null) safeHistory(() => finishImage(historyId!));
     // 先清运行态再重水合:重水合会重建本组件,清完才不会带着 generating 复活

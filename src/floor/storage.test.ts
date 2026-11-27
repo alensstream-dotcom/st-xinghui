@@ -109,6 +109,13 @@ describe('sidecar naming', () => {
 });
 
 describe('store read helpers', () => {
+  it('only reuses an old render belonging to the same verified frame', () => {
+    const store = appendEntry({}, 0, 'old', fakeEntry({ slotSeq: 0, frameId: 'cup' }));
+    expect(historyEntries(store, 0, 'old', 0, 'door')).toEqual([]);
+    expect(latestStaleEntry(store, 0, 'new', 0, 'door')).toBeNull();
+    expect(latestStaleEntry(store, 0, 'new', 0, 'cup')?.frameId).toBe('cup');
+  });
+
   it('reads latest entry by swipe + hash and ignores other swipes', () => {
     const store = appendEntry({}, 0, 'h1', fakeEntry({ generationId: 'a', createdAt: 1, slotSeq: 0 }));
     const store2 = appendEntry(store, 0, 'h1', fakeEntry({ generationId: 'b', createdAt: 2, slotSeq: 0 }));

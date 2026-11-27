@@ -26,6 +26,7 @@ import { settings } from '@/state/settings';
  */
 
 export interface BbiImageEntry {
+  frameId?: string;
   /** 本次生成唯一 id。 */
   generationId: string;
   /** ST 静态路径 /user/images/... 或旧 /user/files/...（<img src> 直接引用）。 */
@@ -142,10 +143,11 @@ export function historyEntries(
   swipeId: number,
   hash: string,
   seq: number,
+  frameId?: string,
 ): BbiImageEntry[] {
   const list = store?.[String(swipeId)]?.[hash];
   if (!list) return [];
-  return list.filter(entry => entrySeq(entry) === seq);
+  return list.filter(entry => entrySeq(entry) === seq && (frameId === undefined || entry.frameId === frameId));
 }
 
 /** hash 匹配且位于同一槽位的最新一条结果（卡片 ready）。 */
@@ -170,6 +172,7 @@ export function latestStaleEntry(
   swipeId: number,
   hash: string,
   seq: number,
+  frameId?: string,
 ): BbiImageEntry | null {
   const bucket = store?.[String(swipeId)];
   if (!bucket) return null;
@@ -179,6 +182,7 @@ export function latestStaleEntry(
     for (let i = list.length - 1; i >= 0; i--) {
       if (entrySeq(list[i]) !== seq) continue;
       const candidate = list[i];
+      if (frameId !== undefined && candidate.frameId !== frameId) continue;
       if (!latest || candidate.createdAt > latest.createdAt) latest = candidate;
       break; // 该桶内最新的一条即可
     }
@@ -418,6 +422,7 @@ export async function saveImageResult(
   seed: number,
   result: ComfyImageResult,
   meta?: GenerationMeta,
+  frameId?: string,
 ): Promise<BbiImageEntry> {
   const ctx = getContext();
   if (!ctx?.saveChat) throw new Error('SillyTavern 上下文不可用');
@@ -445,6 +450,7 @@ export async function saveImageResult(
     status: 'ready',
     createdAt,
     slotSeq: seq,
+    ...(frameId ? { frameId } : {}),
     ...(meta ? { meta } : {}),
   };
 

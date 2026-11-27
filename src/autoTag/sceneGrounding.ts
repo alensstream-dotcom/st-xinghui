@@ -1,7 +1,7 @@
 import type { TargetSegment } from './clean';
 import type { ImageCharacterPrompt, ImageInsertion } from './protocol';
 import { applyFrameStaging, keepGroundedSupport, stagingActionQuote } from './frameStaging';
-import { affirmedCue, groundFrameAnchor } from './frameAnchor';
+import { affirmedCue, groundFrameAnchor, pinFrameAnchor } from './frameAnchor';
 import { readContactLayers } from './wardrobeProjection';
 import { storyClauses } from './storyMoment';
 
@@ -86,7 +86,15 @@ function applyViewpoint(image: ImageInsertion, raw: unknown, at: string): void {
 }
 
 /** 旧导演也能用正文校验。新导演可提供准确的触发短句和镜头必须容纳的部位。 */
-export function groundStoryImage(image: ImageInsertion, raw: Record<string, unknown>, segments: TargetSegment[]): ImageInsertion {
+export function groundStoryImage(image: ImageInsertion, raw: Record<string, unknown>, segments: TargetSegment[], pinSelection = false): ImageInsertion {
+  if (pinSelection) {
+    if (!pinFrameAnchor(image, raw, segments)) throw new Error('分镜必须引用所选子句中实际发生的原句');
+    const staging = raw.staging as { action?: unknown[] } | undefined;
+    if (stagingActionQuote(staging) !== image.sourceCue
+      || Array.isArray(raw.focus) && raw.focus[1] !== image.sourceCue) throw new Error('分镜动作引用与选中原句不一致');
+    if (!applyFrameStaging(image, staging, segments, true)) throw new Error('缺少可验证的分镜动作');
+    return image;
+  }
   if (image.singleFrame === false) return image;
   groundFrameAnchor(image, raw, segments, stagingActionQuote(raw.staging));
   const index = segments.findIndex(segment => segment.id === image.position);

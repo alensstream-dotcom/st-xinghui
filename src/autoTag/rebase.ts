@@ -1,3 +1,4 @@
+import { storyClauses } from './storyMoment';
 /**
  * 把模型给出的插入位置从「请求开始时的正文」平移到「写回时的正文」。
  *
@@ -148,7 +149,13 @@ export function rebaseImagePositions(
     const direct = mapped[oldIndex];
     const target = direct >= 0 ? direct : nearestMapped(mapped, oldIndex);
     // 对已核验的正文触发词，整句删除或改到无法识别时放弃此次保存，避免图和账本分离。
-    if (image.sourceCue && (direct < 0 || !newSegments[target]?.text.includes(image.sourceCue))) return null;
+    if (image.anchor) {
+      const text = newSegments[target]?.text;
+      const { exact, start, end, prefix, suffix } = image.anchor;
+      if (direct < 0 || !text || text.slice(start, end) !== exact
+        || !text.slice(0, start).endsWith(prefix) || !text.slice(end).startsWith(suffix)
+        || !storyClauses(text)[(image.clause ?? 0) - 1]?.includes(exact)) return null;
+    } else if (image.sourceCue && (direct < 0 || !newSegments[target]?.text.includes(image.sourceCue))) return null;
     if (target < 0) return null;
 
     if (direct < 0) report.drifted += 1;

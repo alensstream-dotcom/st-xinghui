@@ -60,7 +60,7 @@ function atFrame(point: ScenePoint, image: ImageInsertion): boolean {
 }
 
 /** 将同一帧的演员调度与机位一起编译。正文没对上时沿用原镜头。 */
-export function applyFrameStaging(image: ImageInsertion, raw: unknown, segments: TargetSegment[]): boolean {
+export function applyFrameStaging(image: ImageInsertion, raw: unknown, segments: TargetSegment[], pinned = false): boolean {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw) || image.singleFrame === false) return false;
   const staging = raw as Record<string, unknown>;
   const action = Array.isArray(staging.action) ? staging.action : [];
@@ -70,6 +70,32 @@ export function applyFrameStaging(image: ImageInsertion, raw: unknown, segments:
   const points = scenePoints(segments);
   const moment = points.find(point => atFrame(point, image) && affirmedCue(point.text, quote));
   if (!moment) return false;
+  if (pinned) {
+    const event = staging.event as Record<string, unknown> | undefined;
+    if (!event || typeof event.actor !== 'string' || !event.actor.trim()
+      || typeof event.verb !== 'string' || !english(event.verb, 48)
+      || typeof event.target !== 'string' || !english(event.target, 80)
+      || !['approach', 'contact', 'result', 'state'].includes(String(event.phase))) return false;
+    const words = (text: string) => ' ' + text.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim() + ' ';
+    if (!words(main).includes(words(event.verb)) || !words(main).includes(words(event.target))) return false;
+    const subject = /^@\{([^{}]+)\}/.exec(main)?.[1];
+    if (subject && subject !== event.actor) return false;
+    if (event.actor !== 'viewer' && !image.characters.some(c => c.name === event.actor)
+      && !moment.text.includes(event.actor)) return false;
+    const expected = /(?:正要|刚要|伸向|即将|\babout to\b)/i.test(quote) ? 'approach'
+      : /(?:已经|放回|松开|放下|穿好|关上|\balready\b)/i.test(quote) ? 'result'
+      : /(?:握住|碰到|接住|抓住|贴住|\bgrasp(?:s|ed)?\b)/i.test(quote) ? 'contact' : undefined;
+    if (expected && event.phase !== expected) return false;
+    const depicted = /\b(?:already|has finished|puts? .+ back|has put|sets? .+ down|releases?|lets? go)\b/i.test(main) ? 'result'
+      : /\b(?:about to|reaches? toward|starts? to)\b/i.test(main) ? 'approach' : undefined;
+    if (depicted && depicted !== event.phase) return false;
+    if (event.actor === 'viewer' && (!/\bpov\b/i.test(String((staging.camera as unknown[] | undefined)?.[0]))
+      || !/\b(?:viewer|pov|foreground)\b/i.test(main))) return false;
+    if (event.actor === 'viewer') {
+      image.characters = image.characters.filter(c => !split(c.tag).some(tag => /^(?:1?boy|male|man|faceless male)$/i.test(tag)));
+      image.tag = split(image.tag).filter(tag => !/^\d+boys?$/i.test(tag)).join(', ');
+    }
+  }
 
   const actors = new Map<string, { posture: string; detail: string }>();
   for (const row of Array.isArray(staging.actors) ? staging.actors.slice(0, 8) : []) {
@@ -103,7 +129,7 @@ export function applyFrameStaging(image: ImageInsertion, raw: unknown, segments:
   const angle = typeof camera[0] === 'string' && CAMERA.test(camera[0]) ? camera[0].toLowerCase() : '';
   const showing = new Set<string>(Array.isArray(camera[1]) ? camera[1].filter((part: unknown) => typeof part === 'string' && CROP.has(part)) : []);
   const broad = showing.has('knees') || showing.has('feet');
-  const base = split(image.tag).filter(tag => !SHARED_MOTION.test(tag) && !(angle && CAMERA.test(tag))
+  const base = split(image.tag).filter(tag => (!pinned || !/\b(?:grip\w*|hold\w*|put\w*|releas\w*|reach\w*|touch\w*)\b/i.test(tag)) && !SHARED_MOTION.test(tag) && !(angle && CAMERA.test(tag))
     && !(showing.has('faces') && /^hand focus$/i.test(tag)));
   const showHandsAndFaces = showing.has('faces') && showing.has('hands');
   if (broad) {
@@ -125,6 +151,7 @@ export function applyFrameStaging(image: ImageInsertion, raw: unknown, segments:
   image.characters = image.characters.map(character => {
     const grounded = actors.get(character.name);
     const marker = key && character.name === pair[0] ? 'source#' + key : key && character.name === pair[1] ? 'target#' + key : '';
+    if (pinned) return { ...character, tag: [...split(character.tag).filter(tag => /^(?:1?girl|1?boy|woman|man|smile|blush|frown|surprised|looking at viewer|closed eyes)$/i.test(tag)), grounded?.posture === 'keep' ? '' : grounded?.posture, grounded?.detail, marker].filter(Boolean).join(', '), nl: '' };
     if (!grounded && !marker) return character;
     const kept = split(character.tag).filter(tag => grounded ? !ROLE_MOTION.test(tag)
       || grounded.posture === 'keep' && Object.hasOwn(POSTURES, tag.toLowerCase()) : !/^(?:source|target|mutual)#/i.test(tag));

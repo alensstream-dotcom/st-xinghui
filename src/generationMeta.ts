@@ -88,6 +88,8 @@ export interface GenerationMeta {
   positive: string;
   /** 实际发送的负面词（拿不到时为空串，负面仍在 tag 文本里）。 */
   negative: string;
+  frameId?: string;
+  requestCharacters?: Array<{ name: string; positive: string; negative: string }>;
   /** NAI 画师串；其它后端为 null。 */
   artist: GenerationArtist | null;
   /** NAI 实际叠加的 vibe（被跳过的不在内）；其它后端为空数组。 */
@@ -153,4 +155,10 @@ export function formatGenerationMeta(meta: GenerationMeta): string {
   if (sampling.length) lines.push(`采样: ${sampling.join(' · ')}`);
 
   return lines.join('\n');
+}
+
+export function formatRequestPrompt(meta: GenerationMeta): string {
+  return [meta.positive, meta.negative && '负面 ' + meta.negative,
+    ...(meta.requestCharacters ?? []).flatMap(role => [role.name, role.positive, role.negative && '角色负面 ' + role.negative]),
+  ].filter(Boolean).join('\n');
 }

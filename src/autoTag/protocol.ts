@@ -57,6 +57,7 @@ export interface ImageInsertion {
   beat?: SceneBeat;
   visualPose?: string;
   sourceCue?: string;
+  anchor?: { exact: string; start: number; end: number; prefix: string; suffix: string };
   clearLayers?: Array<{ name: string; region: 'top' | 'bottom' }>;
   singleFrame?: boolean;
   /** 模型选择的目标正文位置 ID。 */
@@ -362,7 +363,7 @@ export function parseImagePlan(
   segments: TargetSegment[],
   minImages: number,
   maxImages: number,
-  rules: { femaleScenesOnly?: boolean; knownMaleProfiles?: ReadonlySet<string>; selectBeats?: boolean } = {},
+  rules: { femaleScenesOnly?: boolean; knownMaleProfiles?: ReadonlySet<string>; selectBeats?: boolean; pinSelection?: boolean } = {},
 ): ImagePlan {
   const parsed = pickPlanObject(raw);
   if (!parsed) throw new Error('AI 返回的 JSON 缺少 images 数组');
@@ -403,7 +404,7 @@ export function parseImagePlan(
     const image: ImageInsertion = { position, sourceLine, ...(step ? { step } : {}), ...(clause ? { clause } : {}),
       ...(extent ? { extent } : {}), ...(beat ? { beat } : {}), ...(entry.layout === 'sequence' ? { singleFrame: false } : {}),
       tag, nl, negative, characters, size };
-    const grounded = rules.selectBeats ? groundStoryImage(image, entry, segments) : image;
+    const grounded = rules.selectBeats || rules.pinSelection ? groundStoryImage(image, entry, segments, rules.pinSelection) : image;
     const parts = storyClauses(source.get(grounded.position) ?? '');
     const current = grounded.clause ? [parts[grounded.clause - 1] ?? ''] : parts;
     for (const character of grounded.characters) {
@@ -655,7 +656,7 @@ export function parseUnifiedPlan(
   segments: TargetSegment[],
   minImages: number,
   maxImages: number,
-  rules: { femaleScenesOnly?: boolean; knownMaleProfiles?: ReadonlySet<string>; selectBeats?: boolean } = {},
+  rules: { femaleScenesOnly?: boolean; knownMaleProfiles?: ReadonlySet<string>; selectBeats?: boolean; pinSelection?: boolean } = {},
 ): UnifiedPlan {
   const parsed = pickPlanObject(raw);
   if (!parsed) throw new Error('AI 返回的 JSON 缺少 images 数组');

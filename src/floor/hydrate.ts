@@ -1,3 +1,4 @@
+import { FRAME_CONTINUITY_KEY, frameTextHash, type FloorContinuity } from '@/autoTag/frameContinuity';
 import { h, render, watch, type VNode } from 'vue';
 
 import Card from '@/floor/Card.vue';
@@ -158,9 +159,12 @@ export function hydrateMessage(messageId: number, ctx: STContext): void {
           // 无匹配但有旧提示词结果 → stale(DESIGN-FLOOR-UI.md §7.1)。
           const store = readStore(message);
           const hash = promptHash(tags[seq]);
-          const history = historyEntries(store, swipeId, hash, seq);
+          const continuity = message.extra?.[FRAME_CONTINUITY_KEY] as FloorContinuity | undefined;
+          const frame = continuity?.swipe === swipeId ? continuity.frames?.[seq] : undefined;
+          const frameId = frame?.promptHash === frameTextHash(tags[seq]) ? frame?.frameId : undefined;
+          const history = historyEntries(store, swipeId, hash, seq, frameId);
           const entry = history.length ? history[history.length - 1] : null;
-          const staleEntry = entry ? null : latestStaleEntry(store, swipeId, hash, seq);
+          const staleEntry = entry || !frameId ? null : latestStaleEntry(store, swipeId, hash, seq, frameId);
           const content = parseImageTagContent(tags[seq]);
           desired.set(key, {
             anchor: anchors[seq],
@@ -178,6 +182,7 @@ export function hydrateMessage(messageId: number, ctx: STContext): void {
               swipeId,
               history,
               staleEntry,
+              frameId,
               // key 的一部分:与 registry.key 的占位口径一致(chatId 缺失时用 '-')
               chatId: chatId ?? '-',
             }),
