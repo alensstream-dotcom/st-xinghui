@@ -46,7 +46,6 @@ import {
   parseImagePlan,
   parseUnifiedPlan,
   type CharChange,
-  type ImageInsertion,
   type ImagePlan,
 } from '@/autoTag/protocol';
 import { bakeAppearance, comicAppearance, type ComicLayout } from '@/backends/mossLayout';

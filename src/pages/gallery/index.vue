@@ -1,5 +1,4 @@
 <script setup lang="ts">
-import { formatBytes } from '@/bytes';
 import Icon from '@/components/Icon.vue';
 import { confirmDialog } from '@/components/confirm';
 import { imageDownloadFileName } from '@/floor/download';
@@ -10,7 +9,7 @@ import { formatGenerationMeta, type GenerationMeta } from '@/generationMeta';
 import { mapLimit } from '@/pool';
 import { getContext } from '@/st/context';
 import { formatPromptText, parseImageTagContent } from '@/st/imageTagRegex';
-import { ARTIST_PREVIEW_FOLDER, listUserImageFolders, listUserImages, probeUserImage } from '@/st/images';
+import { ARTIST_PREVIEW_FOLDER, listUserImageFolders, listUserImages } from '@/st/images';
 import { computed, onMounted, ref } from 'vue';
 
 /**
@@ -36,13 +35,11 @@ const PREVIEW_COUNT = 24;
 /** 侧写请求超时:点图后要等它才开灯箱,不能让服务端卡住把点击拖成「点了没反应」。 */
 const SIDECAR_TIMEOUT_MS = 4000;
 /**
- * 批量请求(探体积、删图)的并发上限。
+ * 批量删图的并发上限。
  * 不开大:ST 是单进程,几十个请求一起压过去会把用户自己的聊天卡住;
  * 公网连接下更明显。6 路够快又不至于霸占连接池。
  */
 const REQUEST_CONCURRENCY = 6;
-/** 体积攒够这么多张再推一次响应式更新(理由见 measureSizes)。 */
-const SIZE_PUBLISH_BATCH = 12;
 
 interface GalleryImage {
   /** 目录内的文件名(组内唯一,作 key) */
@@ -200,10 +197,6 @@ async function load(): Promise<void> {
       return rank || collator.compare(a.name, b.name);
     });
     groups.value = next;
-    // ⚠ 暂时禁用分组体积统计:作者不满意当前方案——逐张 HEAD 读 Content-Length,
-    // 请求数随图库规模线性增长,进一次图库就是几百上千个后台请求。
-    // 体积相关的计算、模板、CSS 与测试全部原样保留,恢复时解注下面这一行即可。
-    // void measureSizes(next);
   } catch (e) {
     error.value = e instanceof Error ? e.message : String(e);
   } finally {
@@ -212,89 +205,6 @@ async function load(): Promise<void> {
 }
 
 onMounted(load);
-
-/* —— 体积统计(⚠ 暂时禁用:load() 里的 measureSizes 调用已注释,理由见该处) —— */
-
-/**
- * 归一化路径 → 字节数。**逐张 HEAD 量出来的**。
- *
- * 为什么只能这样:`/api/images/list` 只返回文件名,既无 size 也无 mtime
- * (服务端 util.js getImages 只 map 出 dirent.name),没有任何现成接口报体积。
- * HEAD 走静态路由 res.sendFile,实测 1~2ms 且无 body——比缩略图本身(图库直接加载原图,
- * 一个组就是十几 MB)便宜得多。
- *
- * 不进 localStorage 缓存:文件可能被外部改动,缓存过期没法感知,而重量一遍也就几十个
- * HEAD。页面活着期间按路径缓存即可,刷新按钮会重量。
- */
-const sizes = ref(new Map<string, number>());
-/** 还在量体积的分组数:>0 时总计后面显示「计算中」,免得把半截数字当成最终值。 */
-const measuring = ref(0);
-
-/**
- * 后台量体积:限并发逐张 HEAD。**不 await、不阻塞首屏**——图已经能看了,
- * 体积是附加信息,慢慢填上来即可。
- *
- * 已量过的路径跳过(刷新时大部分图没变,只有新增的那几张要量)。
- *
- * 攒批发布而非逐张写回:groupSize 要遍历组内全部图才能算出合计,每量到一张就发布一次
- * 等于让每个分组把自己重算 n 遍——几千张图时是平方级空转。攒够一批再推一次,
- * 「慢慢填上来」的观感不变。
- */
-async function measureSizes(list: GalleryGroup[]): Promise<void> {
-  const pending = list.flatMap(group => group.images).filter(image => !sizes.value.has(image.key));
-  if (!pending.length) return;
-  measuring.value++;
-  // 未发布的增量。发布时**合并进当前值**而非整份替换:连点两次刷新会有两轮
-  // measureSizes 并行,各自持有快照替换会把对方量到的数抹掉。
-  const buffered = new Map<string, number>();
-  const publish = (): void => {
-    if (!buffered.size) return;
-    const next = new Map(sizes.value);
-    for (const [key, size] of buffered) next.set(key, size);
-    buffered.clear();
-    sizes.value = next;
-  };
-  try {
-    await mapLimit(pending, REQUEST_CONCURRENCY, async image => {
-      const probe = await probeUserImage(image.src);
-      // 只记确定的数:探不到(网络错误)就留空,由 groupSize 按「还没量全」处理
-      if (probe?.exists && probe.size !== null) {
-        buffered.set(image.key, probe.size);
-        if (buffered.size >= SIZE_PUBLISH_BATCH) publish();
-      }
-    });
-  } finally {
-    publish();
-    measuring.value--;
-  }
-}
-
-/** 一组的体积合计与完整度。量全了才是准数,否则文案要带「≥」。 */
-function groupSize(group: GalleryGroup): { bytes: number; complete: boolean } {
-  let bytes = 0;
-  let known = 0;
-  for (const image of group.images) {
-    const size = sizes.value.get(image.key);
-    if (size === undefined) continue;
-    bytes += size;
-    known++;
-  }
-  return { bytes, complete: known === group.images.length };
-}
-
-/** 分组角标上的体积文案;一张都没量出来时返回空串(不显示,而非显示 0 B)。 */
-function groupSizeText(group: GalleryGroup): string {
-  const { bytes, complete } = groupSize(group);
-  if (!bytes) return '';
-  const text = formatBytes(bytes);
-  return complete ? text : `≥ ${text}`;
-}
-
-const totalSizeText = computed(() => {
-  let bytes = 0;
-  for (const size of sizes.value.values()) bytes += size;
-  return bytes ? formatBytes(bytes) : '';
-});
 
 const filtered = computed(() => {
   const q = query.value.trim().toLowerCase();
@@ -416,7 +326,7 @@ function onThumbClick(image: GalleryImage): void {
  * 删除选中的图。**只删文件,不碰聊天记录**(理由见文件顶部注释)。
  *
  * 删完做三件事:标记缺失(让本会话里已打开的楼层卡片立刻降级,不必等它自己 404)、
- * 就地从列表摘掉(不重新 load,免得把用户的展开态和已加载批次全重置)、清理体积缓存。
+ * 就地从列表摘掉(不重新 load,免得把用户的展开态和已加载批次全重置)。
  */
 async function deleteSelected(): Promise<void> {
   if (!selectedCount.value || deleting.value) return;
@@ -442,7 +352,7 @@ async function deleteSelected(): Promise<void> {
       try {
         // 传 key 而非 src:src 是给 <img> 用的逐段编码路径,而删除接口要的是解码后的
         // 磁盘路径(ST /api/images/delete 直接 path.join,不做 decodeURIComponent)。
-        // key 与 markImagesMissing / sizes 同一口径,中文目录名不会打偏到 404。
+        // key 与 markImagesMissing 同一口径,中文目录名不会打偏到 404。
         await deleteImageFileOnly(image.key);
         return { key: image.key, ok: true };
       } catch (e) {
@@ -461,9 +371,6 @@ async function deleteSelected(): Promise<void> {
       groups.value = groups.value
         .map(group => ({ ...group, images: group.images.filter(image => !done.has(image.key)) }))
         .filter(group => group.images.length > 0);
-      const nextSizes = new Map(sizes.value);
-      done.forEach(key => nextSizes.delete(key));
-      sizes.value = nextSizes;
     }
 
     selected.value = new Set([...selected.value].filter(key => !done.has(key)));
@@ -526,9 +433,7 @@ async function open(image: GalleryImage): Promise<void> {
         {{ selecting ? '退出选择' : '选择' }}
       </button>
       <span class="gal-count">
-        {{ groups.length }} 位角色 · {{ totalImages }} 张<template v-if="totalSizeText">
-          · {{ totalSizeText }}<span v-if="measuring" class="gal-measuring">+</span>
-        </template>
+        {{ groups.length }} 位角色 · {{ totalImages }} 张
       </span>
     </div>
 
@@ -612,7 +517,6 @@ async function open(image: GalleryImage): Promise<void> {
             <Icon name="chevron" class="gal-caret" :class="{ 'is-collapsed': !expanded.has(group.folder) }" />
             <span class="gal-name">{{ group.name }}</span>
             <span class="gal-badge">{{ group.images.length }}</span>
-            <span v-if="groupSizeText(group)" class="gal-size">{{ groupSizeText(group) }}</span>
           </button>
         </div>
 
@@ -710,13 +614,6 @@ async function open(image: GalleryImage): Promise<void> {
   white-space: nowrap;
   font-variant-numeric: tabular-nums;
 }
-/* 体积还在量:总计后跟一个「+」示意「至少这么多,还在加」。
-   不用转圈——工具条里多一个动效太吵,而这个加号静态也读得懂。 */
-.gal-measuring {
-  margin-left: 1px;
-  opacity: 0.6;
-}
-
 /* 选择模式开关。开启时用主色实心,与「正在选」的状态对齐。 */
 .gal-select-toggle {
   flex: 0 0 auto;
@@ -891,19 +788,6 @@ async function open(image: GalleryImage): Promise<void> {
   font-weight: 600;
   line-height: 1.6;
 }
-/* 体积:跟在张数角标右边,不给底色——它是附注不是标签,压过角色名就喧宾夺主了。
-   margin-left:auto 把它推到行尾,与右侧留白对齐。 */
-.gal-size {
-  flex: 0 0 auto;
-  margin-left: auto;
-  padding-left: 8px;
-  color: var(--bbi-ink-muted);
-  font-family: var(--bbi-font-mono);
-  font-size: 11px;
-  font-variant-numeric: tabular-nums;
-  white-space: nowrap;
-}
-
 .gal-fold-wrap {
   display: grid;
   grid-template-rows: 1fr;

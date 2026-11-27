@@ -8,7 +8,7 @@ function segments(text: string): TargetSegment[] {
   return text
     .split(/\n+/)
     .filter(Boolean)
-    .map((line, index) => ({ id: `P${index + 1}`, sourceLine: index } as TargetSegment));
+    .map((line, index) => ({ id: `P${index + 1}`, sourceLine: index, text: line }));
 }
 
 const TEXT = ['她推开道观的门。', '他伸手把她按在门框上，低头吻她。', '她的道袍被撩到腰际。'].join('\n');

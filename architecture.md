@@ -32,7 +32,7 @@ src/
 │   ├── keyboard.ts    # shadow 内编辑控件方向键不冒泡到 ST 全局快捷键
 │   ├── clipboard.ts   # 复制到剪贴板统一入口(失败 toast;卡片/灯箱/历史页共用)
 │   ├── images.ts      # /api/images/* 上传/删除/列举封装(user/images 子目录归类;画师串预览图、图库)
-│   │                  # + probeUserImage:HEAD 探存在与体积(三态:在/不在/分不清)
+│   │                  # + probeUserImage:HEAD 探文件是否存在(三态:在/不在/分不清)
 │   ├── imageFile.ts   # 图片读取与 canvas 缩放(File→dataURL、makeJpegThumbnail;与网络层分开)
 │   └── iconFallback.ts# 注入按钮的字体图标兜底(防美化主题清空图标)
 ├── state/             # 全局状态与持久化
@@ -108,14 +108,13 @@ src/
 │   ├── backend/index.vue      # 「渠道」页:页签(webui 已隐藏)+ 各后端面板
 │   │   └── panels/            # ComfyUIPanel / NaiPanel / WebUIPanel(隐藏,代码保留)/ NaiArtistLibrary / NaiArtistPicker
 │   ├── characters/index.vue   # 「角色管理」页:全局/本聊天两区卡片式外貌库 CRUD + 历史回滚
-│   ├── gallery/index.vue      # 「图库」页:按角色名分组浏览 user/images/星绘_<角色名>/(放大+看提示词+另存;多选删除**只删文件不碰聊天记录**,分组体积逐张 HEAD 量但 ⚠ 已暂时禁用)
+│   ├── gallery/index.vue      # 「图库」页:按角色名分组浏览 user/images/星绘_<角色名>/(放大+看提示词+另存;多选删除**只删文件不碰聊天记录**)
 │   ├── history/index.vue      # 「请求历史」页:调试辅助(LLM 提示词/响应/生图元信息)
 │   └── settings/index.vue     # 「设置」页:渠道管理/自动 tag/提示词编辑/界面偏好(最大页)
 ├── components/       # 通用组件:BbiSelect/BbiCombo/BbiTextarea/Collapsible/ConfirmDialog/FloatingOrb/Icon/ModalMask/NavBar
 │                     # (BbiCombo = 可输入可过滤下拉,与副 API 模型框同交互,菜单 Teleport 防裁剪)
 ├── styles/           # base.css(全局基础样式)、theme.css(主题变量,data-theme 切换)
-├── bytes.ts          # 字节数 → 人读体积(1024 进制、单位写 KB/MB 与资源管理器对齐;非有限值返回空串)
-├── pool.ts           # 限并发 map(mapLimit,返回顺序=输入顺序);图库量体积/批量删图用
+├── pool.ts           # 限并发 map(mapLimit,返回顺序=输入顺序);图库批量删图用
 ├── generationMeta.ts # ★ 随图落盘的出图元信息 schema(画师串/vibe/采样参数)+ 只读展示格式化;叶子模块零 import,避免 settings↔nai 成环
 ├── menu.ts           # 魔杖菜单入口注入(轮询等懒加载)
 ├── topbar.ts         # ST 顶栏快速打开按钮(受 ui.showTopBar 开关控制)
@@ -853,15 +852,6 @@ genState 同构(chatId|messageId|swipeId|seq),重建后按 key 认领。手动�
   分组头的复选框选的是**整组**而非当前渲染的那批(懒加载只是渲染策略)。删除逐张容错
   (单张失败不中断其余,失败的留在列表里且仍勾着),删完 `markImagesMissing` 让已打开的
   楼层卡片立刻降级,并**就地**从列表摘掉而非重新 `load()`(否则展开态与已加载批次全被重置)。
-  **分组体积(⚠ 暂时禁用)**:原方案逐张 HEAD 读 `Content-Length`——`/api/images/list`
-  只返回文件名(服务端 `util.js getImages` 只 map 出 `dirent.name`),既无 size 也无 mtime,
-  只能一张张问(静态路由 `res.sendFile`,实测 1~2ms 且无 body,比图库直接加载原图当缩略图
-  便宜得多)。**作者不满意这一方案(请求数随图库规模线性增长),`index.vue` 的 `load()` 中
-  `measureSizes` 调用已注释**,计算/模板/CSS/测试原样保留,恢复时解注即可;`probeUserImage`
-  仍供 `missingImages.ts` 的 404 确认使用。原设计:后台限并发(`src/pool.ts` 的 `mapLimit`,
-  6 路——ST 单进程,压太狠会卡住用户自己的聊天)且不阻塞首屏;量不到的**不计入**而非当 0
-  累加,未量全的文案带「≥」;返回三态(`exists:true` / `exists:false` / `null`=分不清),
-  `null` 让网络抖动不会被当成删除。
 - **charTags(三层真源:全局库 + 本聊天手动基线 + AI 楼层增量)**:
   - **全局库**:存 `extensionSettings['xinghui_image_char_global']`(globalCharTags.ts,
     协议同共享渠道:revision + 指纹 + 广播事件),跨聊天/跨设备。定位是**冻结模板**:
@@ -1037,7 +1027,7 @@ API 对象 `Object.freeze`,一个插件改不动下一个插件拿到的东西�
 | 画师串库(列表/编辑/预览图/批量删除)与方案里的挑选弹窗 | src/pages/backend/panels/NaiArtistLibrary.vue、NaiArtistPicker.vue(共用卡片 ArtistTile.vue;预览图破缓存 artistPreview.ts;纯逻辑在 backends/naiArtistLib.ts;内置只读库在 backends/nai.ts 的 `BUILTIN_NAI_ARTISTS`) |
 | 画师串预览图(user/images 上传/删除) | src/st/images.ts + imageFile.ts(文件夹常量 `ARTIST_PREVIEW_FOLDER`) |
 | 图库页(按角色名分组列图) | src/pages/gallery/index.vue(目录/文件列举在 st/images.ts 的 `listUserImageFolders` / `listUserImages`) |
-| 图库多选删除 / 分组体积(体积**已暂时禁用**,代码保留待恢复) | src/pages/gallery/index.vue + src/floor/storage.ts 的 `deleteImageFileOnly`(只删文件不碰聊天记录)+ st/images.ts 的 `probeUserImage`(HEAD 三态返回;现供 404 确认,原亦量体积)+ src/pool.ts / src/bytes.ts |
+| 图库多选删除 | src/pages/gallery/index.vue + src/floor/storage.ts 的 `deleteImageFileOnly` + src/pool.ts 的限并发处理 |
 | 图被删后卡片不显示破图 | src/floor/missingImages.ts(模块级 reactive 册,HEAD 确认 404 才落册)+ Card.vue 的 `liveHistory` / `liveStale` / `@error` |
 | 图库点图看提示词 | src/floor/storage.ts 的 `sidecarFileName` / `sidecarPathFor`(存图时写侧写)+ gallery/index.vue(当前聊天读 extra、其余取侧写;展示口径 `formatPromptText`) |
 | 漫画方案(MOSS 分镜协议 / 外貌烤入 / 出图换算 / 类型不符处理) | 见 §6「漫画方案」:prompt.ts 的 `comicContract` + protocol.ts 的 `parseComicPlan` + runner.ts 的 `bakeComicAppearance` + backends/mossLayout.ts + generate.ts 的 `tagBlockReason`;内置规范/思维链在 settings.ts 的 `DEFAULT_COMFY_COMIC_*` |

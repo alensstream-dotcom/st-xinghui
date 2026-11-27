@@ -40,7 +40,6 @@ import {
   readWardrobeFloorDelta,
   type CharacterWardrobe,
   type GarmentSlot,
-  type WardrobeSlotKey,
 } from '@/state/outfitState';
 import {
   TRAIT_CATEGORIES,
@@ -139,16 +138,6 @@ const editingHistory = computed<CharTagChangeRecord[]>(() => {
   if (!editingName.value || editingScope.value !== 'chat') return [];
   return findCharTag(editingName.value)?.history ?? [];
 });
-
-/** 卡片上的字段 chips:有字段用字段,整串模式回退 raw 文本(模板里分支)。 */
-function chipsOf(entry: CharTagEntry): { label: string; value: string }[] {
-  const chips: { label: string; value: string }[] = [];
-  for (const f of CHAR_TAG_FIELDS) {
-    const value = entry.fields[f]?.trim();
-    if (value) chips.push({ label: CHAR_TAG_FIELD_LABELS[f], value });
-  }
-  return chips;
-}
 
 function openEntry(entry: CharTagEntry, scope: Scope) {
   editingName.value = entry.name;
@@ -396,13 +385,6 @@ function snapshotEntry(name: string, d: NonNullable<typeof draft.value>, portrai
   };
 }
 
-/** 把当前草稿拼成条目(只用于生成立绘,不落盘)。 */
-function draftEntry(name: string): CharTagEntry {
-  const d = draft.value;
-  if (!d) throw new Error('没有打开的角色');
-  return snapshotEntry(name, d, draftPortraitKey.value || undefined);
-}
-
 /** 列表卡片:生成立绘并立刻写进对应层级的库。 */
 async function generatePortraitFor(entry: CharTagEntry, scope: Scope) {
   if (portraitBusy.value) return;
@@ -646,10 +628,6 @@ const editingWardrobe = computed<CharacterWardrobe | null>(() => {
 });
 
 const STATUS_CN: Record<GarmentSlot['status'], string> = { on: '穿着', half: '半脱', half_top: '上身半开', half_bottom: '下摆提起', off: '已脱' };
-
-function slotLabel(key: WardrobeSlotKey, slot: GarmentSlot): string {
-  return `${WARDROBE_SLOT_LABELS[key]}[${[slot.tag, slot.condition].filter(Boolean).join(', ')}|${STATUS_CN[slot.status]}${slot.halfTag ? `(${slot.halfTag})` : ''}]`;
-}
 
 const editingSlotRows = computed(() =>
   WARDROBE_SLOT_KEYS.map(key => {
@@ -1513,35 +1491,6 @@ function sourceLabel(entry: CharTagEntry): string {
   border-color: transparent;
 }
 
-/* —— 字段 chips:两行封顶,超出裁切 —— */
-.bbi-char-chips {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  max-height: 52px;
-  overflow: hidden;
-}
-.bbi-chip {
-  font-family: var(--bbi-font-mono);
-  font-size: 11px;
-  padding: 3px 9px;
-  border-radius: var(--bbi-radius-pill);
-  background: var(--bbi-surface-2);
-  color: var(--bbi-ink-soft);
-  border: 1px solid var(--bbi-line);
-  white-space: nowrap;
-}
-/* 整串模式:mono 小字两行截断 */
-.bbi-char-raw {
-  font-family: var(--bbi-font-mono);
-  font-size: 12px;
-  color: var(--bbi-ink-muted);
-  display: -webkit-box;
-  -webkit-line-clamp: 2;
-  -webkit-box-orient: vertical;
-  overflow: hidden;
-  word-break: break-word;
-}
 .bbi-char-history-badge {
   display: inline-flex;
   align-items: center;

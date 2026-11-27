@@ -152,8 +152,6 @@ beforeEach(() => {
   vi.mocked(listUserImages).mockImplementation(async folder =>
     Array.from({ length: folder === alpha ? 53 : 5 }, (_, i) => `image-${i}.png`),
   );
-  // 默认每张 1 KB:体积相关断言用得上,其余用例无副作用
-  vi.mocked(probeUserImage).mockResolvedValue({ exists: true, size: 1024 });
   vi.mocked(deleteImageFileOnly).mockResolvedValue(undefined);
   vi.mocked(confirmDialog).mockResolvedValue(true);
 });
@@ -249,60 +247,13 @@ describe('gallery on-demand rendering', () => {
   });
 });
 
-// 体积统计暂时禁用:作者不满意「逐张 HEAD 读 Content-Length」的方案(见 index.vue 的 load())。
-// 以下用例原样保留,恢复 measureSizes 调用时去掉 .skip 即可。
-describe.skip('gallery size readout', () => {
-  it('sums measured bytes per group and in total, sizing every image including unrendered ones', async () => {
+describe('gallery loading', () => {
+  it('lists and refreshes folders without probing every image', async () => {
     const root = await mount();
-    // 58 张全都量过(懒加载只是渲染策略,体积统计必须覆盖整组,否则角标随下拉往上跳)
-    expect(vi.mocked(probeUserImage)).toHaveBeenCalledTimes(58);
-    expect(find(root, '.gal-size').map(text)).toEqual(['53 KB', '5.0 KB']);
-    expect(text(find(root, '.gal-count')[0])).toContain('58 KB');
-    // 量全了就不带「≥」,也不再显示「还在量」的加号
-    expect(find(root, '.gal-size').some(span => text(span).includes('≥'))).toBe(false);
-    expect(find(root, '.gal-measuring')).toHaveLength(0);
-  });
-
-  it('marks partial sums with ≥ and never counts an unmeasurable file as zero', async () => {
-    // 探不到大小的那些(HEAD 失败 / 缺 Content-Length)一律不计入,而不是当 0 字节累加:
-    // 谎报 0 会让「量不到」看起来像「量到了,就是空的」。
-    vi.mocked(probeUserImage).mockImplementation(async src =>
-      src.includes(encodeURIComponent(alpha))
-        ? (src.endsWith('image-0.png') ? { exists: true, size: 2048 } : null)
-        : { exists: true, size: null },
-    );
-    const root = await mount();
-    // Alpha 只量出一张 → 带 ≥;Beta 一张都没量出来 → 整个角标不显示(而非 0 B)
-    expect(find(root, '.gal-size').map(text)).toEqual(['≥ 2.0 KB']);
-    expect(text(find(root, '.gal-count')[0])).toContain('2.0 KB');
-  });
-
-  it('skips already-measured images when reloading', async () => {
-    const root = await mount();
-    expect(vi.mocked(probeUserImage)).toHaveBeenCalledTimes(58);
-    vi.mocked(listUserImages).mockImplementation(async folder =>
-      Array.from({ length: folder === alpha ? 54 : 5 }, (_, i) => `image-${i}.png`),
-    );
-    await click(find(root, '.gal-icon-btn')[0]);
-    await flush();
-    // 只有新增的那一张要量
-    expect(vi.mocked(probeUserImage)).toHaveBeenCalledTimes(59);
-    expect(find(root, '.gal-size').map(text)).toEqual(['54 KB', '5.0 KB']);
-  });
-});
-
-describe('gallery size readout disabled', () => {
-  it('issues no HEAD probes and renders no size UI', async () => {
-    const root = await mount();
-    // 进页零体积探测;刷新也不该冒出来——请求数随图库线性增长正是暂时停用它的原因
     expect(vi.mocked(probeUserImage)).not.toHaveBeenCalled();
     await click(find(root, '.gal-icon-btn')[0]);
     await flush();
     expect(vi.mocked(probeUserImage)).not.toHaveBeenCalled();
-    // 分组角标、总计体积、测量中的「+」一律不出现
-    expect(find(root, '.gal-size')).toHaveLength(0);
-    expect(find(root, '.gal-measuring')).toHaveLength(0);
-    expect(text(find(root, '.gal-count')[0])).not.toContain('KB');
   });
 });
 
@@ -354,8 +305,6 @@ describe('gallery multi-select delete', () => {
     // 已显示张数(48)不变,后面的图往前补位——删两张不该让用户重新往下翻
     expect(find(root, 'img')).toHaveLength(48);
     expect(text(find(root, '.gal-count')[0])).toContain('56 张');
-    // 体积显示已暂时禁用(见 load()):删除后就地渲染的列表里也不该出现任何体积角标
-    expect(find(root, '.gal-size')).toHaveLength(0);
     // 楼层卡片据此立刻降级,不必等它自己 404
     expect(isImageMissing(`user/images/${alpha}/image-0.png`)).toBe(true);
     expect(isImageMissing(`user/images/${alpha}/image-1.png`)).toBe(false);

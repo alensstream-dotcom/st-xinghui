@@ -116,7 +116,7 @@ describe('probeUserImage', () => {
       return Promise.resolve(new Response(null, { status: 200, headers: { 'content-length': '311300' } }));
     });
     vi.stubGlobal('fetch', fetchMock);
-    await expect(probeUserImage('/user/images/f/a.jpg')).resolves.toEqual({ exists: true, size: 311300 });
+    await expect(probeUserImage('/user/images/f/a.jpg')).resolves.toEqual({ exists: true });
   });
 
   it('404 → exists:false(服务端明确说没有)', async () => {
@@ -133,9 +133,9 @@ describe('probeUserImage', () => {
     await expect(probeUserImage('/user/images/f/a.jpg')).resolves.toBeNull();
   });
 
-  it('缺 Content-Length 仍算存在,size 为 null', async () => {
+  it('缺 Content-Length 仍算存在', async () => {
     vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(new Response(null, { status: 200 }))));
-    await expect(probeUserImage('/user/images/f/a.jpg')).resolves.toEqual({ exists: true, size: null });
+    await expect(probeUserImage('/user/images/f/a.jpg')).resolves.toEqual({ exists: true });
   });
 
   it('超时中止 → null', async () => {

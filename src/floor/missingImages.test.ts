@@ -73,7 +73,7 @@ describe('confirmImageMissing', () => {
   });
 
   it('文件还在则不落册', async () => {
-    vi.mocked(probeUserImage).mockResolvedValue({ exists: true, size: 1024 });
+    vi.mocked(probeUserImage).mockResolvedValue({ exists: true });
     expect(await confirmImageMissing(path)).toBe(false);
     expect(isImageMissing(path)).toBe(false);
   });

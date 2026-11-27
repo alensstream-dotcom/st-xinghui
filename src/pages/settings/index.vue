@@ -30,7 +30,7 @@ import {
   type ThemeName,
 } from '@/state/ui';
 import { checkForUpdate, performUpdate, updateState } from '@/update';
-import { computed, nextTick, onMounted, ref } from 'vue';
+import { computed, onMounted, ref } from 'vue';
 
 const NAV_OPTIONS: { value: NavPosition; label: string }[] = [
   { value: 'auto', label: '自动' },

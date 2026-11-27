@@ -42,11 +42,6 @@ const BASE: CharacterWardrobe = {
 describe('楼内穿脱时序', () => {
   it('第 1 张 on、第 2 张 off、第 3 张 on 按顺序编译，楼尾 off 不污染第 1 张', () => {
     const before = new Map<string, CharacterWardrobe>([['温岚', BASE]]);
-    // 模型在这一楼末尾才让她脱光，并且顺手发了个 replace（同类更新）。
-    const updates: WardrobeUpdate[] = [
-      { name: '温岚', mode: 'patch', slots: { top: { ...BASE.top!, status: 'off' } } },
-    ];
-    // 这份更新没有 position：从楼首起生效——楼尾才是脱，靠每帧 wearState 推进。
     const wardrobes = new Map(before);
 
     const entries = [entry('温岚')];
